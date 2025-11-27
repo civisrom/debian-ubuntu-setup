@@ -2,6 +2,7 @@
 
 #############################################
 # System Setup Script for Debian and Ubuntu
+# Author: Auto-generated
 # Description: Initial package installation and system configuration
 #############################################
 
@@ -134,6 +135,15 @@ if [ "$INTERACTIVE" = true ]; then
     read -p "Configure UFW? (Y/n): " CONFIGURE_UFW
     CONFIGURE_UFW=${CONFIGURE_UFW:-y}
     
+    # Ask about ufw-docker (only if Docker will be installed)
+    if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+        print_message "Do you want to install ufw-docker (UFW integration for Docker)?"
+        read -p "Install ufw-docker? (Y/n): " INSTALL_UFW_DOCKER
+        INSTALL_UFW_DOCKER=${INSTALL_UFW_DOCKER:-y}
+    else
+        INSTALL_UFW_DOCKER="n"
+    fi
+    
     # Ask about sysctl configuration
     print_message "Do you want to optimize system parameters (sysctl.conf)?"
     read -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
@@ -167,6 +177,7 @@ else
     # Default settings for non-interactive mode
     INSTALL_DOCKER="n"
     CONFIGURE_UFW="y"
+    INSTALL_UFW_DOCKER="y"
     CONFIGURE_SYSCTL="y"
     CONFIGURE_REPOS="y"
     INSTALL_MOTD="n"
@@ -175,6 +186,7 @@ else
     print_message "Non-interactive mode - using default settings:"
     print_message "- Docker: NO"
     print_message "- UFW: YES"
+    print_message "- ufw-docker: YES (if Docker present)"
     print_message "- sysctl: YES"
     print_message "- Repositories: YES (Debian only)"
     print_message "- MOTD: NO"
@@ -188,6 +200,9 @@ print_message "Configuration Summary:"
 print_message "  OS: $OS $VERSION ($VERSION_CODENAME)"
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+    print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
+fi
 print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$OS" = "debian" ]; then
     print_message "  Debian repositories: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
@@ -485,26 +500,31 @@ else
     DOCKER_INSTALLED="no"
 fi
 
-# Install ufw-docker (only if Docker is installed)
-print_message "Checking for Docker installation..."
-
+# Install ufw-docker (only if Docker is installed and user wants it)
 if command -v docker &> /dev/null; then
-    print_message "Docker detected. Installing ufw-docker..."
-    
-    if wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker; then
-        chmod +x /usr/local/bin/ufw-docker
-        print_message "ufw-docker installed successfully"
+    if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
+        print_message "Docker detected. Installing ufw-docker..."
         
-        # Run ufw-docker install
-        print_message "Configuring ufw-docker..."
-        /usr/local/bin/ufw-docker install
-        print_message "ufw-docker configured successfully"
+        if wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker; then
+            chmod +x /usr/local/bin/ufw-docker
+            print_message "ufw-docker installed successfully"
+            
+            # Run ufw-docker install
+            print_message "Configuring ufw-docker..."
+            /usr/local/bin/ufw-docker install
+            print_message "ufw-docker configured successfully"
+        else
+            print_error "Failed to download ufw-docker"
+        fi
     else
-        print_error "Failed to download ufw-docker"
+        print_message "Skipping ufw-docker installation (not requested)"
     fi
 else
     print_warning "Docker is not installed. Skipping ufw-docker installation."
-    print_warning "If you need Docker support:"
+    if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+        print_warning "Note: Docker installation may have failed."
+    fi
+    print_warning "If you need Docker support later:"
     print_warning "  1. Install Docker first"
     print_warning "  2. Run: wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker"
     print_warning "  3. Run: chmod +x /usr/local/bin/ufw-docker"
@@ -571,11 +591,20 @@ else
 fi
 if command -v docker &> /dev/null; then
     print_message "- Docker: Installed"
-    if command -v ufw-docker &> /dev/null; then
-        print_message "- ufw-docker: Installed and configured"
+    if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
+        if command -v ufw-docker &> /dev/null; then
+            print_message "- ufw-docker: Installed and configured"
+        else
+            print_message "- ufw-docker: Installation attempted but not found"
+        fi
+    else
+        print_message "- ufw-docker: Not installed (skipped by user)"
     fi
 else
     print_message "- Docker: Not installed"
+    if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+        print_message "- Docker installation may have failed"
+    fi
 fi
 if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     print_message "- Custom MOTD: Installed"
