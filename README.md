@@ -17,7 +17,7 @@
 ### Вариант 1: Прямая загрузка и запуск
 
 ```bash
-wget https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/system-setup.sh -O - | sudo bash
+bash <(wget -qO- https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
 ```
 
 ### Вариант 2: Загрузка и локальный запуск
@@ -36,7 +36,7 @@ sudo ./system-setup.sh
 ### Вариант 3: С использованием curl
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/system-setup.sh | sudo bash
+bash <(curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
 ```
 
 ## Что делает скрипт
