@@ -2,6 +2,7 @@
 
 #############################################
 # System Setup Script for Debian and Ubuntu
+# Author: Auto-generated
 # Description: Initial package installation and system configuration
 #############################################
 
@@ -176,16 +177,26 @@ else
     # Default settings for non-interactive mode
     INSTALL_DOCKER="n"
     CONFIGURE_UFW="y"
-    INSTALL_UFW_DOCKER="y"
     CONFIGURE_SYSCTL="y"
     CONFIGURE_REPOS="y"
     INSTALL_MOTD="n"
     CUSTOM_PORT=""
     
+    # Check if Docker is already installed for ufw-docker decision
+    if command -v docker &> /dev/null; then
+        INSTALL_UFW_DOCKER="y"
+    else
+        INSTALL_UFW_DOCKER="n"
+    fi
+    
     print_message "Non-interactive mode - using default settings:"
     print_message "- Docker: NO"
     print_message "- UFW: YES"
-    print_message "- ufw-docker: YES (if Docker present)"
+    if [ "$INSTALL_UFW_DOCKER" = "y" ]; then
+        print_message "- ufw-docker: YES (Docker already present)"
+    else
+        print_message "- ufw-docker: NO (Docker not present)"
+    fi
     print_message "- sysctl: YES"
     print_message "- Repositories: YES (Debian only)"
     print_message "- MOTD: NO"
@@ -500,34 +511,53 @@ else
 fi
 
 # Install ufw-docker (only if Docker is installed and user wants it)
-if command -v docker &> /dev/null; then
-    if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
-        print_message "Docker detected. Installing ufw-docker..."
-        
-        if wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker; then
-            chmod +x /usr/local/bin/ufw-docker
-            print_message "ufw-docker installed successfully"
+if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+    # Docker was requested to be installed, check if it's actually present
+    if command -v docker &> /dev/null; then
+        if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
+            print_message "Docker detected. Installing ufw-docker..."
             
-            # Run ufw-docker install
-            print_message "Configuring ufw-docker..."
-            /usr/local/bin/ufw-docker install
-            print_message "ufw-docker configured successfully"
+            if wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker; then
+                chmod +x /usr/local/bin/ufw-docker
+                print_message "ufw-docker installed successfully"
+                
+                # Run ufw-docker install
+                print_message "Configuring ufw-docker..."
+                /usr/local/bin/ufw-docker install
+                print_message "ufw-docker configured successfully"
+            else
+                print_error "Failed to download ufw-docker"
+            fi
         else
-            print_error "Failed to download ufw-docker"
+            print_message "Skipping ufw-docker installation (not requested)"
         fi
     else
-        print_message "Skipping ufw-docker installation (not requested)"
+        print_warning "Docker installation may have failed. Skipping ufw-docker."
     fi
 else
-    print_warning "Docker is not installed. Skipping ufw-docker installation."
-    if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
-        print_warning "Note: Docker installation may have failed."
+    # Docker was not requested
+    if command -v docker &> /dev/null; then
+        # Docker is already installed on the system
+        if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
+            print_message "Docker is already present on system. Installing ufw-docker..."
+            
+            if wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker; then
+                chmod +x /usr/local/bin/ufw-docker
+                print_message "ufw-docker installed successfully"
+                
+                # Run ufw-docker install
+                print_message "Configuring ufw-docker..."
+                /usr/local/bin/ufw-docker install
+                print_message "ufw-docker configured successfully"
+            else
+                print_error "Failed to download ufw-docker"
+            fi
+        else
+            print_message "Docker is present but ufw-docker not requested. Skipping."
+        fi
+    else
+        print_message "Docker not installed. Skipping ufw-docker."
     fi
-    print_warning "If you need Docker support later:"
-    print_warning "  1. Install Docker first"
-    print_warning "  2. Run: wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker"
-    print_warning "  3. Run: chmod +x /usr/local/bin/ufw-docker"
-    print_warning "  4. Run: ufw-docker install"
 fi
 
 # Install custom MOTD
