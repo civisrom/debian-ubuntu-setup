@@ -418,6 +418,14 @@ fi
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     print_message "Configuring UFW firewall..."
     
+    # Set default policies
+    print_message "Setting UFW default policies..."
+    ufw --force default deny incoming
+    ufw --force default allow outgoing
+    ufw --force default deny forward
+    ufw --force default deny routed
+    print_message "UFW default policies configured"
+    
     # Allow SSH (port 22)
     ufw allow 22/tcp comment 'SSH'
     print_message "UFW rule added: Allow SSH (port 22)"
@@ -431,6 +439,14 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
             print_warning "Invalid port number. Skipping custom port."
         fi
     fi
+    
+    # Enable UFW
+    print_message "Enabling UFW..."
+    echo "y" | ufw enable
+    ufw status verbose
+else
+    print_message "Skipping UFW configuration (not requested)"
+fi
     
     # Enable UFW
     print_message "Enabling UFW..."
