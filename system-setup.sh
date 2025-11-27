@@ -2,7 +2,6 @@
 
 #############################################
 # System Setup Script for Debian and Ubuntu
-# Author: Auto-generated
 # Description: Initial package installation and system configuration
 #############################################
 
@@ -115,28 +114,71 @@ fi
 
 echo ""
 
-# Ask about Docker installation
+# ============================================
+# INTERACTIVE CONFIGURATION SELECTION
+# ============================================
+
+print_header "═══════════════════════════════════════════════"
+print_header "   Configuration Options"
+print_header "═══════════════════════════════════════════════"
+echo ""
+
 if [ "$INTERACTIVE" = true ]; then
+    # Ask about Docker installation
     print_message "Do you want to install Docker?"
     read -p "Install Docker? (y/N): " INSTALL_DOCKER
     INSTALL_DOCKER=${INSTALL_DOCKER:-n}
+    
+    # Ask about UFW configuration
+    print_message "Do you want to configure UFW firewall?"
+    read -p "Configure UFW? (Y/n): " CONFIGURE_UFW
+    CONFIGURE_UFW=${CONFIGURE_UFW:-y}
+    
+    # Ask about sysctl configuration
+    print_message "Do you want to optimize system parameters (sysctl.conf)?"
+    read -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
+    CONFIGURE_SYSCTL=${CONFIGURE_SYSCTL:-y}
+    
+    # Ask about repository configuration (Debian only)
+    if [ "$OS" = "debian" ]; then
+        print_message "Do you want to configure Debian repositories?"
+        read -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
+        CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
+    else
+        CONFIGURE_REPOS="n"
+    fi
+    
+    # Ask about MOTD installation
+    print_message "Do you want to install custom MOTD (Message of the Day)?"
+    read -p "Install MOTD? (y/N): " INSTALL_MOTD
+    INSTALL_MOTD=${INSTALL_MOTD:-n}
+    
+    # Ask for UFW ports (if UFW is enabled)
+    if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+        echo ""
+        print_message "UFW Firewall Configuration"
+        print_message "Port 22 (SSH) will be allowed automatically"
+        echo ""
+        read -p "Enter additional port to allow (press Enter to skip): " CUSTOM_PORT
+    else
+        CUSTOM_PORT=""
+    fi
 else
-    # Default: do not install Docker in non-interactive mode
+    # Default settings for non-interactive mode
     INSTALL_DOCKER="n"
-    print_message "Docker installation: NO (non-interactive mode, use install-docker.sh separately if needed)"
-fi
-echo ""
-
-# Ask for UFW ports
-if [ "$INTERACTIVE" = true ]; then
-    print_message "UFW Firewall Configuration"
-    print_message "Port 22 (SSH) will be allowed automatically"
-    echo ""
-    read -p "Enter additional port to allow (press Enter to skip): " CUSTOM_PORT
-else
-    # Default: no custom port in non-interactive mode
+    CONFIGURE_UFW="y"
+    CONFIGURE_SYSCTL="y"
+    CONFIGURE_REPOS="y"
+    INSTALL_MOTD="n"
     CUSTOM_PORT=""
-    print_message "UFW Custom Port: None (non-interactive mode)"
+    
+    print_message "Non-interactive mode - using default settings:"
+    print_message "- Docker: NO"
+    print_message "- UFW: YES"
+    print_message "- sysctl: YES"
+    print_message "- Repositories: YES (Debian only)"
+    print_message "- MOTD: NO"
+    print_message "- Custom UFW Port: None"
 fi
 echo ""
 
@@ -144,11 +186,13 @@ echo ""
 print_header "═══════════════════════════════════════════════"
 print_message "Configuration Summary:"
 print_message "  OS: $OS $VERSION ($VERSION_CODENAME)"
-if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
-    print_message "  Docker: Will be installed"
-else
-    print_message "  Docker: Will NOT be installed"
+print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
+print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
+print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$OS" = "debian" ]; then
+    print_message "  Debian repositories: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
 fi
+print_message "  Custom MOTD: $([ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ] && echo "YES" || echo "NO")"
 if [ ! -z "$CUSTOM_PORT" ]; then
     print_message "  UFW Custom Port: $CUSTOM_PORT"
 else
@@ -253,7 +297,7 @@ elif [ "$OS" = "ubuntu" ]; then
 fi
 
 # Configure sources.list for Debian only
-if [ "$OS" = "debian" ]; then
+if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
     print_message "Configuring Debian repositories..."
     
     # Backup original sources.list
@@ -289,20 +333,21 @@ EOF
 fi
 
 # Configure sysctl.conf
-print_message "Configuring system parameters (sysctl.conf)..."
-
-# Backup original sysctl.conf
-if [ -f /etc/sysctl.conf ]; then
-    cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)
-    print_message "Original sysctl.conf backed up"
-fi
-
-# Remove only uncommented lines and preserve comments
-grep '^#' /etc/sysctl.conf > /etc/sysctl.conf.new 2>/dev/null || true
-grep '^$' /etc/sysctl.conf >> /etc/sysctl.conf.new 2>/dev/null || true
-
-# Add new configuration
-cat >> /etc/sysctl.conf.new << 'EOF'
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+    print_message "Configuring system parameters (sysctl.conf)..."
+    
+    # Backup original sysctl.conf
+    if [ -f /etc/sysctl.conf ]; then
+        cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)
+        print_message "Original sysctl.conf backed up"
+    fi
+    
+    # Remove only uncommented lines and preserve comments
+    grep '^#' /etc/sysctl.conf > /etc/sysctl.conf.new 2>/dev/null || true
+    grep '^$' /etc/sysctl.conf >> /etc/sysctl.conf.new 2>/dev/null || true
+    
+    # Add new configuration
+    cat >> /etc/sysctl.conf.new << 'EOF'
 
 # Custom Network Optimizations
 net.ipv6.conf.all.disable_ipv6 = 1
@@ -333,35 +378,42 @@ net.ipv4.tcp_slow_start_after_idle = 0
 fs.inotify.max_user_instances = 8192
 net.ipv4.ip_local_port_range = 1024 45000
 EOF
-
-mv /etc/sysctl.conf.new /etc/sysctl.conf
-print_message "sysctl.conf configured"
-
-# Apply sysctl settings
-print_message "Applying sysctl settings..."
-sysctl -p
-
-# Configure UFW
-print_message "Configuring UFW firewall..."
-
-# Allow SSH (port 22)
-ufw allow 22/tcp comment 'SSH'
-print_message "UFW rule added: Allow SSH (port 22)"
-
-# Add custom port if specified
-if [ ! -z "$CUSTOM_PORT" ]; then
-    if [[ "$CUSTOM_PORT" =~ ^[0-9]+$ ]] && [ "$CUSTOM_PORT" -ge 1 ] && [ "$CUSTOM_PORT" -le 65535 ]; then
-        ufw allow $CUSTOM_PORT/tcp comment "Custom port"
-        print_message "UFW rule added: Allow port $CUSTOM_PORT"
-    else
-        print_warning "Invalid port number. Skipping custom port."
-    fi
+    
+    mv /etc/sysctl.conf.new /etc/sysctl.conf
+    print_message "sysctl.conf configured"
+    
+    # Apply sysctl settings
+    print_message "Applying sysctl settings..."
+    sysctl -p
+else
+    print_message "Skipping sysctl configuration (not requested)"
 fi
 
-# Enable UFW
-print_message "Enabling UFW..."
-echo "y" | ufw enable
-ufw status verbose
+# Configure UFW
+if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+    print_message "Configuring UFW firewall..."
+    
+    # Allow SSH (port 22)
+    ufw allow 22/tcp comment 'SSH'
+    print_message "UFW rule added: Allow SSH (port 22)"
+    
+    # Add custom port if specified
+    if [ ! -z "$CUSTOM_PORT" ]; then
+        if [[ "$CUSTOM_PORT" =~ ^[0-9]+$ ]] && [ "$CUSTOM_PORT" -ge 1 ] && [ "$CUSTOM_PORT" -le 65535 ]; then
+            ufw allow $CUSTOM_PORT/tcp comment "Custom port"
+            print_message "UFW rule added: Allow port $CUSTOM_PORT"
+        else
+            print_warning "Invalid port number. Skipping custom port."
+        fi
+    fi
+    
+    # Enable UFW
+    print_message "Enabling UFW..."
+    echo "y" | ufw enable
+    ufw status verbose
+else
+    print_message "Skipping UFW configuration (not requested)"
+fi
 
 # Install Docker if requested
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
@@ -459,6 +511,40 @@ else
     print_warning "  4. Run: ufw-docker install"
 fi
 
+# Install custom MOTD
+if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
+    print_message "Installing custom MOTD (Message of the Day)..."
+    echo ""
+    
+    MOTD_SCRIPT="/tmp/motd_install.sh"
+    
+    if [ "$OS" = "debian" ]; then
+        MOTD_URL="https://raw.githubusercontent.com/civisrom/motd-ubuntu-debian/refs/heads/main/scripts/debian.sh"
+    else
+        MOTD_URL="https://raw.githubusercontent.com/civisrom/motd-ubuntu-debian/refs/heads/main/scripts/ubuntu.sh"
+    fi
+    
+    print_message "Downloading MOTD installation script for $OS..."
+    if curl -fsSL "$MOTD_URL" -o "$MOTD_SCRIPT"; then
+        chmod +x "$MOTD_SCRIPT"
+        print_message "Running MOTD installation script..."
+        
+        if bash "$MOTD_SCRIPT"; then
+            print_message "Custom MOTD installed successfully"
+            rm -f "$MOTD_SCRIPT"
+        else
+            print_warning "MOTD installation completed with warnings"
+            rm -f "$MOTD_SCRIPT"
+        fi
+    else
+        print_error "Failed to download MOTD installation script"
+    fi
+    
+    echo ""
+else
+    print_message "Skipping MOTD installation (not requested)"
+fi
+
 # Final message
 echo ""
 print_header "═════════════════════════════════════════"
@@ -467,36 +553,62 @@ print_header "══════════════════════
 print_message "Summary:"
 print_message "- OS: $OS $VERSION ($VERSION_CODENAME)"
 print_message "- Packages installed"
-print_message "- System parameters optimized (sysctl.conf)"
-if [ "$OS" = "debian" ]; then
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+    print_message "- System parameters optimized (sysctl.conf)"
+else
+    print_message "- sysctl: SKIPPED"
+fi
+if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
     print_message "- Debian repositories configured"
 fi
-print_message "- UFW firewall configured and enabled"
-if [ ! -z "$CUSTOM_PORT" ]; then
-    print_message "- Custom UFW port: $CUSTOM_PORT"
+if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+    print_message "- UFW firewall configured and enabled"
+    if [ ! -z "$CUSTOM_PORT" ]; then
+        print_message "- Custom UFW port: $CUSTOM_PORT"
+    fi
+else
+    print_message "- UFW: SKIPPED"
 fi
 if command -v docker &> /dev/null; then
     print_message "- Docker: Installed"
-    print_message "- ufw-docker: Installed and configured"
+    if command -v ufw-docker &> /dev/null; then
+        print_message "- ufw-docker: Installed and configured"
+    fi
 else
     print_message "- Docker: Not installed"
-    print_message "- ufw-docker: Skipped"
 fi
-print_message ""
-print_message "Backup files saved with timestamp:"
-print_message "- /etc/sysctl.conf.backup.*"
-if [ "$OS" = "debian" ]; then
-    print_message "- /etc/apt/sources.list.backup.*"
-fi
-print_message ""
-print_warning "Recommended next steps:"
-print_warning "1. Review UFW status: sudo ufw status verbose"
-print_warning "2. Check sysctl: sysctl net.ipv4.tcp_congestion_control"
-if command -v docker &> /dev/null && [ ! -z "$SUDO_USER" ]; then
-    print_warning "3. Log out and back in to use Docker without sudo"
-    print_warning "4. Reboot system: sudo reboot"
+if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
+    print_message "- Custom MOTD: Installed"
 else
-    print_warning "3. Reboot system if needed: sudo reboot"
+    print_message "- Custom MOTD: Not installed"
+fi
+print_message ""
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
+    print_message "Backup files saved with timestamp:"
+    if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+        print_message "- /etc/sysctl.conf.backup.*"
+    fi
+    if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
+        print_message "- /etc/apt/sources.list.backup.*"
+    fi
+    print_message ""
+fi
+print_warning "Recommended next steps:"
+STEP_NUM=1
+if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+    print_warning "$STEP_NUM. Review UFW status: sudo ufw status verbose"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+    print_warning "$STEP_NUM. Check sysctl: sysctl net.ipv4.tcp_congestion_control"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+if command -v docker &> /dev/null && [ ! -z "$SUDO_USER" ]; then
+    print_warning "$STEP_NUM. Log out and back in to use Docker without sudo"
+    STEP_NUM=$((STEP_NUM + 1))
+    print_warning "$STEP_NUM. Reboot system: sudo reboot"
+else
+    print_warning "$STEP_NUM. Reboot system if needed: sudo reboot"
 fi
 
 exit 0
