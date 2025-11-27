@@ -2,6 +2,7 @@
 
 #############################################
 # System Setup Script for Debian and Ubuntu
+# Author: Auto-generated
 # Description: Initial package installation and system configuration
 #############################################
 
