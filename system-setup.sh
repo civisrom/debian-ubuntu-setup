@@ -37,6 +37,14 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Detect if running interactively
+if [ -t 0 ]; then
+    INTERACTIVE=true
+else
+    INTERACTIVE=false
+    print_warning "Running in non-interactive mode with default settings"
+fi
+
 # Print banner
 echo ""
 print_header "╔═══════════════════════════════════════════════╗"
@@ -59,34 +67,40 @@ else
     DETECTED_OS=""
 fi
 
-# If OS cannot be detected, ask user to choose
+# If OS cannot be detected, ask user to choose (only in interactive mode)
 if [ -z "$DETECTED_OS" ] || { [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ]; }; then
-    print_warning "Cannot detect OS or OS is not supported"
-    echo ""
-    print_message "Please select the operating system:"
-    echo "  1) Debian 12 (Bookworm)"
-    echo "  2) Ubuntu 24.04 (Noble)"
-    echo ""
-    read -p "Enter your choice [1-2]: " OS_CHOICE
-    
-    case $OS_CHOICE in
-        1)
-            OS="debian"
-            VERSION="12"
-            VERSION_CODENAME="bookworm"
-            print_message "Selected: Debian 12 (Bookworm)"
-            ;;
-        2)
-            OS="ubuntu"
-            VERSION="24.04"
-            VERSION_CODENAME="noble"
-            print_message "Selected: Ubuntu 24.04 (Noble)"
-            ;;
-        *)
-            print_error "Invalid choice. Exiting."
-            exit 1
-            ;;
-    esac
+    if [ "$INTERACTIVE" = true ]; then
+        print_warning "Cannot detect OS or OS is not supported"
+        echo ""
+        print_message "Please select the operating system:"
+        echo "  1) Debian 12 (Bookworm)"
+        echo "  2) Ubuntu 24.04 (Noble)"
+        echo ""
+        read -p "Enter your choice [1-2]: " OS_CHOICE
+        
+        case $OS_CHOICE in
+            1)
+                OS="debian"
+                VERSION="12"
+                VERSION_CODENAME="bookworm"
+                print_message "Selected: Debian 12 (Bookworm)"
+                ;;
+            2)
+                OS="ubuntu"
+                VERSION="24.04"
+                VERSION_CODENAME="noble"
+                print_message "Selected: Ubuntu 24.04 (Noble)"
+                ;;
+            *)
+                print_error "Invalid choice. Exiting."
+                exit 1
+                ;;
+        esac
+    else
+        print_error "Cannot detect OS and running in non-interactive mode"
+        print_error "Please run the script locally: sudo bash system-setup.sh"
+        exit 1
+    fi
 else
     print_message "Detected OS: $OS $VERSION"
     VERSION_CODENAME=${VERSION_CODENAME:-unknown}
@@ -101,16 +115,28 @@ fi
 echo ""
 
 # Ask about Docker installation
-print_message "Do you want to install Docker?"
-read -p "Install Docker? (y/N): " INSTALL_DOCKER
-INSTALL_DOCKER=${INSTALL_DOCKER:-n}
+if [ "$INTERACTIVE" = true ]; then
+    print_message "Do you want to install Docker?"
+    read -p "Install Docker? (y/N): " INSTALL_DOCKER
+    INSTALL_DOCKER=${INSTALL_DOCKER:-n}
+else
+    # Default: do not install Docker in non-interactive mode
+    INSTALL_DOCKER="n"
+    print_message "Docker installation: NO (non-interactive mode, use install-docker.sh separately if needed)"
+fi
 echo ""
 
 # Ask for UFW ports
-print_message "UFW Firewall Configuration"
-print_message "Port 22 (SSH) will be allowed automatically"
-echo ""
-read -p "Enter additional port to allow (press Enter to skip): " CUSTOM_PORT
+if [ "$INTERACTIVE" = true ]; then
+    print_message "UFW Firewall Configuration"
+    print_message "Port 22 (SSH) will be allowed automatically"
+    echo ""
+    read -p "Enter additional port to allow (press Enter to skip): " CUSTOM_PORT
+else
+    # Default: no custom port in non-interactive mode
+    CUSTOM_PORT=""
+    print_message "UFW Custom Port: None (non-interactive mode)"
+fi
 echo ""
 
 # Confirm settings
@@ -129,12 +155,18 @@ else
 fi
 print_header "═══════════════════════════════════════════════"
 echo ""
-read -p "Continue with these settings? (Y/n): " CONFIRM
-CONFIRM=${CONFIRM:-y}
 
-if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
-    print_error "Installation cancelled by user"
-    exit 0
+if [ "$INTERACTIVE" = true ]; then
+    read -p "Continue with these settings? (Y/n): " CONFIRM
+    CONFIRM=${CONFIRM:-y}
+    
+    if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+        print_error "Installation cancelled by user"
+        exit 0
+    fi
+else
+    print_message "Continuing with default settings (non-interactive mode)..."
+    sleep 2
 fi
 
 echo ""
