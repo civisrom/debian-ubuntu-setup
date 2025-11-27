@@ -17,14 +17,14 @@
 ### Вариант 1: Прямая загрузка и запуск
 
 ```bash
-wget https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/system-setup.sh -O - | sudo bash
+wget https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/system-setup.sh -O - | sudo bash
 ```
 
 ### Вариант 2: Загрузка и локальный запуск
 
 ```bash
 # Загрузить скрипт
-wget https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/system-setup.sh
+wget https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/system-setup.sh
 
 # Сделать исполняемым
 chmod +x system-setup.sh
@@ -36,7 +36,7 @@ sudo ./system-setup.sh
 ### Вариант 3: С использованием curl
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/system-setup.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/system-setup.sh | sudo bash
 ```
 
 ## Что делает скрипт
