@@ -447,14 +447,6 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
 else
     print_message "Skipping UFW configuration (not requested)"
 fi
-    
-    # Enable UFW
-    print_message "Enabling UFW..."
-    echo "y" | ufw enable
-    ufw status verbose
-else
-    print_message "Skipping UFW configuration (not requested)"
-fi
 
 # Install Docker if requested
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
