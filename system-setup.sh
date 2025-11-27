@@ -99,7 +99,7 @@ COMMON_PACKAGES=(
 
 # Debian-specific packages
 DEBIAN_PACKAGES=(
-    openvswitch-switch-dpdk
+#    openvswitch-switch-dpdk
 )
 
 # Ubuntu-specific packages
