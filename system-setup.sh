@@ -904,6 +904,11 @@ if command -v docker &> /dev/null && [ ! -z "$SUDO_USER" ]; then
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
+print_message "sudo ufw status verbose"
+print_message "sudo ufw status numbered"
+print_message "sudo nano/etc/sysctl.conf"
+print_message "sudo nano/etc/apt/sources.list"
+print_message "sudo nano/etc/apt/sources.list.d/ubuntu.list"
+print_message "sudo nano/etc/ssh/sshd_config"
 print_warning "$STEP_NUM. Reboot system to apply all changes: sudo reboot"
-
 exit 0
