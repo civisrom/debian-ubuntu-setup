@@ -146,8 +146,8 @@ if [ "$INTERACTIVE" = true ]; then
     CREATE_VENV=${CREATE_VENV:-n}
     
     if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
-        read -p "Enter path for virtual environment (default: /root/scripts): " VENV_PATH
-        VENV_PATH=${VENV_PATH:-/root/scripts}
+        read -p "Enter path for virtual environment (default: /root/skripts): " VENV_PATH
+        VENV_PATH=${VENV_PATH:-/root/skripts}
     else
         VENV_PATH=""
     fi
