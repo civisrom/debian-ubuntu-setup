@@ -138,76 +138,9 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Enter usernames for AllowUsers (space-separated, leave empty to skip)"
         print_message "Example: user1 user2 user3"
         read -p "AllowUsers: " SSH_ALLOW_USERS
-        
-        echo ""
-        print_header "Advanced SSH Security Parameters"
-        print_message "Configure additional SSH security settings"
-        echo ""
-        
-        # PubkeyAuthentication
-        print_message "PubkeyAuthentication - Enable public key authentication"
-        read -p "Configure PubkeyAuthentication? (y/N): " CONFIG_PUBKEY
-        CONFIG_PUBKEY=${CONFIG_PUBKEY:-n}
-        if [ "$CONFIG_PUBKEY" = "y" ] || [ "$CONFIG_PUBKEY" = "Y" ]; then
-            read -p "Set PubkeyAuthentication to yes or no? (Y/n): " SSH_PUBKEY_AUTH
-            SSH_PUBKEY_AUTH=${SSH_PUBKEY_AUTH:-y}
-            if [ "$SSH_PUBKEY_AUTH" = "y" ] || [ "$SSH_PUBKEY_AUTH" = "Y" ]; then
-                SSH_PUBKEY_AUTH="yes"
-            else
-                SSH_PUBKEY_AUTH="no"
-            fi
-        else
-            SSH_PUBKEY_AUTH=""
-        fi
-        
-        # PasswordAuthentication
-        print_message "PasswordAuthentication - Enable password authentication"
-        read -p "Configure PasswordAuthentication? (y/N): " CONFIG_PASSWORD
-        CONFIG_PASSWORD=${CONFIG_PASSWORD:-n}
-        if [ "$CONFIG_PASSWORD" = "y" ] || [ "$CONFIG_PASSWORD" = "Y" ]; then
-            read -p "Set PasswordAuthentication to yes or no? (Y/n): " SSH_PASSWORD_AUTH
-            SSH_PASSWORD_AUTH=${SSH_PASSWORD_AUTH:-y}
-            if [ "$SSH_PASSWORD_AUTH" = "y" ] || [ "$SSH_PASSWORD_AUTH" = "Y" ]; then
-                SSH_PASSWORD_AUTH="yes"
-            else
-                SSH_PASSWORD_AUTH="no"
-            fi
-        else
-            SSH_PASSWORD_AUTH=""
-        fi
-        
-        # PermitEmptyPasswords - ALWAYS set to no, only ask about uncommenting
-        print_message "PermitEmptyPasswords - Prevent empty password authentication (ALWAYS set to 'no')"
-        read -p "Configure PermitEmptyPasswords? (y/N): " CONFIG_EMPTY_PASS
-        CONFIG_EMPTY_PASS=${CONFIG_EMPTY_PASS:-n}
-        if [ "$CONFIG_EMPTY_PASS" = "y" ] || [ "$CONFIG_EMPTY_PASS" = "Y" ]; then
-            SSH_EMPTY_PASSWORDS="no"  # ALWAYS no for security
-        else
-            SSH_EMPTY_PASSWORDS=""
-        fi
-        
-        # PermitRootLogin
-        print_message "PermitRootLogin - Allow root user to login via SSH"
-        read -p "Configure PermitRootLogin? (y/N): " CONFIG_ROOT_LOGIN
-        CONFIG_ROOT_LOGIN=${CONFIG_ROOT_LOGIN:-n}
-        if [ "$CONFIG_ROOT_LOGIN" = "y" ] || [ "$CONFIG_ROOT_LOGIN" = "Y" ]; then
-            read -p "Set PermitRootLogin to yes or no? (Y/n): " SSH_ROOT_LOGIN
-            SSH_ROOT_LOGIN=${SSH_ROOT_LOGIN:-y}
-            if [ "$SSH_ROOT_LOGIN" = "y" ] || [ "$SSH_ROOT_LOGIN" = "Y" ]; then
-                SSH_ROOT_LOGIN="yes"
-            else
-                SSH_ROOT_LOGIN="no"
-            fi
-        else
-            SSH_ROOT_LOGIN=""
-        fi
     else
         SSH_PORT="22"
         SSH_ALLOW_USERS=""
-        SSH_PUBKEY_AUTH=""
-        SSH_PASSWORD_AUTH=""
-        SSH_EMPTY_PASSWORDS=""
-        SSH_ROOT_LOGIN=""
     fi
     
     # Ask about Python virtual environment
@@ -216,8 +149,8 @@ if [ "$INTERACTIVE" = true ]; then
     CREATE_VENV=${CREATE_VENV:-n}
     
     if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
-        read -p "Enter path for virtual environment (default: /root/skripts): " VENV_PATH
-        VENV_PATH=${VENV_PATH:-/root/skripts}
+        read -p "Enter path for virtual environment (default: /root/scripts): " VENV_PATH
+        VENV_PATH=${VENV_PATH:-/root/scripts}
     else
         VENV_PATH=""
     fi
@@ -285,10 +218,6 @@ else
     CONFIGURE_SSH="n"
     SSH_PORT="22"
     SSH_ALLOW_USERS=""
-    SSH_PUBKEY_AUTH=""
-    SSH_PASSWORD_AUTH=""
-    SSH_EMPTY_PASSWORDS=""
-    SSH_ROOT_LOGIN=""
     CREATE_VENV="n"
     VENV_PATH=""
     INSTALL_DOCKER="n"
@@ -319,20 +248,6 @@ print_header "══════════════════════
 print_message "Configuration Summary:"
 print_message "  OS: $OS $VERSION ($VERSION_CODENAME)"
 print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT, Users: ${SSH_ALLOW_USERS:-none})" || echo "NO")"
-if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
-    if [ ! -z "$SSH_PUBKEY_AUTH" ]; then
-        print_message "    - PubkeyAuthentication: $SSH_PUBKEY_AUTH"
-    fi
-    if [ ! -z "$SSH_PASSWORD_AUTH" ]; then
-        print_message "    - PasswordAuthentication: $SSH_PASSWORD_AUTH"
-    fi
-    if [ ! -z "$SSH_EMPTY_PASSWORDS" ]; then
-        print_message "    - PermitEmptyPasswords: $SSH_EMPTY_PASSWORDS"
-    fi
-    if [ ! -z "$SSH_ROOT_LOGIN" ]; then
-        print_message "    - PermitRootLogin: $SSH_ROOT_LOGIN"
-    fi
-fi
 print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ] && echo "YES (Path: $VENV_PATH)" || echo "NO")"
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
@@ -613,31 +528,6 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         print_message "Original sshd_config backed up"
     fi
     
-    # Function to set or update SSH parameter
-    configure_ssh_parameter() {
-        local param_name="$1"
-        local param_value="$2"
-        local config_file="$3"
-        
-        # Check if parameter exists (commented or uncommented)
-        if grep -q "^#${param_name} " "$config_file" || grep -q "^${param_name} " "$config_file"; then
-            # Parameter exists, update it
-            # First, comment out all existing instances
-            sed -i "s/^${param_name} .*/#&/" "$config_file"
-            sed -i "s/^#${param_name} .*/#&/" "$config_file"
-            
-            # Then add the new value (uncommented)
-            sed -i "0,/^#${param_name} /s//${param_name} ${param_value}\n#&/" "$config_file"
-            print_message "SSH parameter set: ${param_name} ${param_value}"
-        else
-            # Parameter doesn't exist, add it at the end
-            echo "" >> "$config_file"
-            echo "# Custom configuration" >> "$config_file"
-            echo "${param_name} ${param_value}" >> "$config_file"
-            print_message "SSH parameter added: ${param_name} ${param_value}"
-        fi
-    }
-    
     # Change SSH port
     if [ ! -z "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
         # Check if Port line exists (commented or not)
@@ -651,27 +541,6 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
             sed -i "/^Include \/etc\/ssh\/sshd_config.d\/\*.conf/a Port $SSH_PORT" "$SSHD_CONFIG"
             print_message "SSH port set to $SSH_PORT"
         fi
-    fi
-    
-    # Configure PubkeyAuthentication
-    if [ ! -z "$SSH_PUBKEY_AUTH" ]; then
-        configure_ssh_parameter "PubkeyAuthentication" "$SSH_PUBKEY_AUTH" "$SSHD_CONFIG"
-    fi
-    
-    # Configure PasswordAuthentication
-    if [ ! -z "$SSH_PASSWORD_AUTH" ]; then
-        configure_ssh_parameter "PasswordAuthentication" "$SSH_PASSWORD_AUTH" "$SSHD_CONFIG"
-    fi
-    
-    # Configure PermitEmptyPasswords (ALWAYS no for security)
-    if [ ! -z "$SSH_EMPTY_PASSWORDS" ]; then
-        configure_ssh_parameter "PermitEmptyPasswords" "$SSH_EMPTY_PASSWORDS" "$SSHD_CONFIG"
-        print_warning "PermitEmptyPasswords set to 'no' for security reasons"
-    fi
-    
-    # Configure PermitRootLogin
-    if [ ! -z "$SSH_ROOT_LOGIN" ]; then
-        configure_ssh_parameter "PermitRootLogin" "$SSH_ROOT_LOGIN" "$SSHD_CONFIG"
     fi
     
     # Add AllowUsers if specified
@@ -1029,18 +898,6 @@ print_message "- Packages installed"
 
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     print_message "- SSH configured (Port: $SSH_PORT, AllowUsers: ${SSH_ALLOW_USERS:-not set})"
-    if [ ! -z "$SSH_PUBKEY_AUTH" ]; then
-        print_message "  - PubkeyAuthentication: $SSH_PUBKEY_AUTH"
-    fi
-    if [ ! -z "$SSH_PASSWORD_AUTH" ]; then
-        print_message "  - PasswordAuthentication: $SSH_PASSWORD_AUTH"
-    fi
-    if [ ! -z "$SSH_EMPTY_PASSWORDS" ]; then
-        print_message "  - PermitEmptyPasswords: $SSH_EMPTY_PASSWORDS (security enforced)"
-    fi
-    if [ ! -z "$SSH_ROOT_LOGIN" ]; then
-        print_message "  - PermitRootLogin: $SSH_ROOT_LOGIN"
-    fi
 else
     print_message "- SSH: NOT CONFIGURED"
 fi
