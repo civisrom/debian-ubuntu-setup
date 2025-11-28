@@ -756,73 +756,79 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
     
     UFW_BEFORE_RULES="/etc/ufw/before.rules"
     
-    # Backup original before.rules
-    if [ -f "$UFW_BEFORE_RULES" ]; then
-        # Save original permissions
-        ORIGINAL_PERMS=$(stat -c "%a" "$UFW_BEFORE_RULES" 2>/dev/null || stat -f "%Mp%Lp" "$UFW_BEFORE_RULES" 2>/dev/null)
-        
-        cp "$UFW_BEFORE_RULES" "${UFW_BEFORE_RULES}.backup.$(date +%Y%m%d-%H%M%S)"
-        print_message "Original before.rules backed up"
-    fi
-    
-    # Check if the ICMP section exists
-    if grep -q "# ok icmp codes for INPUT" "$UFW_BEFORE_RULES"; then
-        print_message "Found ICMP section in before.rules"
-        
-        # Create a temporary file for modifications
-        TEMP_FILE=$(mktemp)
-        
-        # Process the file and replace ICMP rules
-        awk '
-        /# ok icmp codes for INPUT/ {
-            print "# ok icmp codes for INPUT"
-            print "-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP"
-            print "-A ufw-before-input -p icmp --icmp-type source-quench -j DROP"
-            print "-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP"
-            print "-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP"
-            print "-A ufw-before-input -p icmp --icmp-type echo-request -j DROP"
-            
-            # Skip the next 4 lines (original ICMP rules)
-            for(i=0; i<4; i++) {
-                getline
-            }
-            next
-        }
-        { print }
-        ' "$UFW_BEFORE_RULES" > "$TEMP_FILE"
-        
-        # Verify the temporary file is not empty
-        if [ -s "$TEMP_FILE" ]; then
-            # Replace original file
-            mv "$TEMP_FILE" "$UFW_BEFORE_RULES"
-            
-            # Restore original permissions
-            if [ ! -z "$ORIGINAL_PERMS" ]; then
-                chmod "$ORIGINAL_PERMS" "$UFW_BEFORE_RULES"
-                print_message "Restored original file permissions: $ORIGINAL_PERMS"
-            else
-                # Set default permissions if we couldn't detect them
-                chmod 640 "$UFW_BEFORE_RULES"
-                print_message "Set default file permissions: 640"
-            fi
-            
-            print_message "ICMP blocking configured successfully"
-            
-            # Reload UFW to apply changes
-            print_message "Reloading UFW to apply ICMP blocking..."
-            ufw reload
-            print_message "UFW reloaded"
-        else
-            print_error "Failed to modify before.rules (temporary file is empty)"
-            rm -f "$TEMP_FILE"
-        fi
+    # Check if ICMP blocking is already configured
+    if grep -q "icmp-type echo-request -j DROP" "$UFW_BEFORE_RULES"; then
+        print_warning "ICMP blocking is already configured in before.rules"
+        print_message "Skipping ICMP configuration to avoid duplicates"
     else
-        print_warning "ICMP section not found in before.rules"
-        print_warning "Skipping ICMP blocking configuration"
+        # Backup original before.rules
+        if [ -f "$UFW_BEFORE_RULES" ]; then
+            # Save original permissions
+            ORIGINAL_PERMS=$(stat -c "%a" "$UFW_BEFORE_RULES" 2>/dev/null || stat -f "%Mp%Lp" "$UFW_BEFORE_RULES" 2>/dev/null)
+            
+            cp "$UFW_BEFORE_RULES" "${UFW_BEFORE_RULES}.backup.$(date +%Y%m%d-%H%M%S)"
+            print_message "Original before.rules backed up"
+        fi
+        
+        # Check if the ICMP section exists
+        if grep -q "# ok icmp codes for INPUT" "$UFW_BEFORE_RULES"; then
+            print_message "Found ICMP section in before.rules"
+            
+            # Create a temporary file for modifications
+            TEMP_FILE=$(mktemp)
+            
+            # Process the file and replace ICMP rules
+            awk '
+            /# ok icmp codes for INPUT/ {
+                print "# ok icmp codes for INPUT"
+                print "-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP"
+                print "-A ufw-before-input -p icmp --icmp-type source-quench -j DROP"
+                print "-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP"
+                print "-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP"
+                print "-A ufw-before-input -p icmp --icmp-type echo-request -j DROP"
+                
+                # Skip the next 4 lines (original ICMP rules)
+                for(i=0; i<4; i++) {
+                    getline
+                }
+                next
+            }
+            { print }
+            ' "$UFW_BEFORE_RULES" > "$TEMP_FILE"
+            
+            # Verify the temporary file is not empty
+            if [ -s "$TEMP_FILE" ]; then
+                # Replace original file
+                mv "$TEMP_FILE" "$UFW_BEFORE_RULES"
+                
+                # Restore original permissions
+                if [ ! -z "$ORIGINAL_PERMS" ]; then
+                    chmod "$ORIGINAL_PERMS" "$UFW_BEFORE_RULES"
+                    print_message "Restored original file permissions: $ORIGINAL_PERMS"
+                else
+                    # Set default permissions if we couldn't detect them
+                    chmod 640 "$UFW_BEFORE_RULES"
+                    print_message "Set default file permissions: 640"
+                fi
+                
+                print_message "ICMP blocking configured successfully"
+                
+                # Reload UFW to apply changes
+                print_message "Reloading UFW to apply ICMP blocking..."
+                ufw reload
+                print_message "UFW reloaded"
+            else
+                print_error "Failed to modify before.rules (temporary file is empty)"
+                rm -f "$TEMP_FILE"
+            fi
+        else
+            print_warning "ICMP section not found in before.rules"
+            print_warning "Skipping ICMP blocking configuration"
+        fi
+        
+        print_message "ICMP (ping) requests are now blocked"
+        print_message "Your server will not respond to ping"
     fi
-    
-    print_message "ICMP (ping) requests are now blocked"
-    print_message "Your server will not respond to ping"
 else
     if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
         print_message "ICMP blocking not requested - server will respond to ping"
