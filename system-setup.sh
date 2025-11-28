@@ -787,9 +787,12 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
                 print "-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP"
                 print "-A ufw-before-input -p icmp --icmp-type echo-request -j DROP"
                 
-                # Skip the next 4 lines (original ICMP rules)
-                for(i=0; i<4; i++) {
-                    getline
+                # Skip all lines that start with -A ufw-before-input -p icmp
+                while (getline > 0) {
+                    if ($0 !~ /^-A ufw-before-input -p icmp/) {
+                        print
+                        break
+                    }
                 }
                 next
             }
