@@ -134,10 +134,13 @@ if [ "$INTERACTIVE" = true ]; then
         read -p "Enter new SSH port (default 22): " SSH_PORT
         SSH_PORT=${SSH_PORT:-22}
         
-        read -p "Enter username for AllowUsers (leave empty to skip): " SSH_ALLOW_USER
+        echo ""
+        print_message "Enter usernames for AllowUsers (space-separated, leave empty to skip)"
+        print_message "Example: user1 user2 user3"
+        read -p "AllowUsers: " SSH_ALLOW_USERS
     else
         SSH_PORT="22"
-        SSH_ALLOW_USER=""
+        SSH_ALLOW_USERS=""
     fi
     
     # Ask about Python virtual environment
@@ -203,7 +206,7 @@ else
     # Default settings for non-interactive mode
     CONFIGURE_SSH="n"
     SSH_PORT="22"
-    SSH_ALLOW_USER=""
+    SSH_ALLOW_USERS=""
     CREATE_VENV="n"
     VENV_PATH=""
     INSTALL_DOCKER="n"
@@ -231,7 +234,7 @@ echo ""
 print_header "═══════════════════════════════════════════════"
 print_message "Configuration Summary:"
 print_message "  OS: $OS $VERSION ($VERSION_CODENAME)"
-print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT, User: ${SSH_ALLOW_USER:-none})" || echo "NO")"
+print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT, Users: ${SSH_ALLOW_USERS:-none})" || echo "NO")"
 print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ] && echo "YES (Path: $VENV_PATH)" || echo "NO")"
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
@@ -384,17 +387,33 @@ fi
 if [ "$OS" = "ubuntu" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
     print_message "Configuring Ubuntu repositories..."
     
-    # Backup original sources.list
-    if [ -f /etc/apt/sources.list ]; then
+    # Backup original sources.list if it exists and has content
+    if [ -f /etc/apt/sources.list ] && [ -s /etc/apt/sources.list ]; then
         cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)
         print_message "Original sources.list backed up"
+        
+        # Clear the main sources.list file
+        cat > /etc/apt/sources.list << 'EOF'
+# Ubuntu repositories are now managed in /etc/apt/sources.list.d/
+# See /etc/apt/sources.list.d/ubuntu.list for repository configuration
+EOF
+        print_message "Main sources.list cleared (repositories moved to sources.list.d)"
     fi
     
     # Use detected or selected codename
     UBUNTU_CODENAME=${VERSION_CODENAME:-noble}
     
-    # Write new sources.list
-    cat > /etc/apt/sources.list << EOF
+    # Create ubuntu.list in sources.list.d
+    UBUNTU_LIST_FILE="/etc/apt/sources.list.d/ubuntu.list"
+    
+    # Backup if exists
+    if [ -f "$UBUNTU_LIST_FILE" ]; then
+        cp "$UBUNTU_LIST_FILE" "${UBUNTU_LIST_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
+        print_message "Existing ubuntu.list backed up"
+    fi
+    
+    # Write new ubuntu.list
+    cat > "$UBUNTU_LIST_FILE" << EOF
 # Ubuntu Main Repositories
 deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
 deb-src http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
@@ -411,12 +430,12 @@ deb-src http://security.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-security main rest
 deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
 deb-src http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
 
-# Canonical Partner Repository
+# Canonical Partner Repository (uncomment to enable)
 # deb http://archive.canonical.com/ubuntu ${UBUNTU_CODENAME} partner
 # deb-src http://archive.canonical.com/ubuntu ${UBUNTU_CODENAME} partner
 EOF
     
-    print_message "Ubuntu repositories configured for ${UBUNTU_CODENAME}"
+    print_message "Ubuntu repositories configured in: $UBUNTU_LIST_FILE"
     print_message "Repositories enabled: main, restricted, universe, multiverse"
     apt update
 fi
@@ -509,15 +528,15 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     fi
     
     # Add AllowUsers if specified
-    if [ ! -z "$SSH_ALLOW_USER" ]; then
+    if [ ! -z "$SSH_ALLOW_USERS" ]; then
         # Remove existing AllowUsers lines
         sed -i '/^AllowUsers /d' "$SSHD_CONFIG"
         
         # Add AllowUsers at the end of file
         echo "" >> "$SSHD_CONFIG"
         echo "# Allowed users" >> "$SSHD_CONFIG"
-        echo "AllowUsers $SSH_ALLOW_USER" >> "$SSHD_CONFIG"
-        print_message "AllowUsers set to: $SSH_ALLOW_USER"
+        echo "AllowUsers $SSH_ALLOW_USERS" >> "$SSHD_CONFIG"
+        print_message "AllowUsers set to: $SSH_ALLOW_USERS"
     fi
     
     # Test SSH configuration
@@ -532,7 +551,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     else
         print_error "SSH configuration test failed!"
         print_error "Restoring backup..."
-        cp "${SSHD_CONFIG}.backup."* "$SSHD_CONFIG"
+        cp "${SSHD_CONFIG}.backup."* "$SSHD_CONFIG" 2>/dev/null | head -1
         print_error "SSH configuration restored from backup"
     fi
 else
@@ -773,7 +792,7 @@ print_message "- OS: $OS $VERSION ($VERSION_CODENAME)"
 print_message "- Packages installed"
 
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
-    print_message "- SSH configured (Port: $SSH_PORT, AllowUsers: ${SSH_ALLOW_USER:-not set})"
+    print_message "- SSH configured (Port: $SSH_PORT, AllowUsers: ${SSH_ALLOW_USERS:-not set})"
 else
     print_message "- SSH: NOT CONFIGURED"
 fi
@@ -840,7 +859,12 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
         print_message "- /etc/sysctl.conf.backup.*"
     fi
     if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
-        print_message "- /etc/apt/sources.list.backup.*"
+        if [ "$OS" = "debian" ]; then
+            print_message "- /etc/apt/sources.list.backup.*"
+        else
+            print_message "- /etc/apt/sources.list.backup.*"
+            print_message "- /etc/apt/sources.list.d/ubuntu.list.backup.*"
+        fi
     fi
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         print_message "- /etc/ssh/sshd_config.backup.*"
