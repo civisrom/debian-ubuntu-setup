@@ -626,6 +626,9 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
     
     # Backup original before.rules
     if [ -f "$UFW_BEFORE_RULES" ]; then
+        # Save original permissions
+        ORIGINAL_PERMS=$(stat -c "%a" "$UFW_BEFORE_RULES" 2>/dev/null || stat -f "%Mp%Lp" "$UFW_BEFORE_RULES" 2>/dev/null)
+        
         cp "$UFW_BEFORE_RULES" "${UFW_BEFORE_RULES}.backup.$(date +%Y%m%d-%H%M%S)"
         print_message "Original before.rules backed up"
     fi
@@ -660,6 +663,17 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
         if [ -s "$TEMP_FILE" ]; then
             # Replace original file
             mv "$TEMP_FILE" "$UFW_BEFORE_RULES"
+            
+            # Restore original permissions
+            if [ ! -z "$ORIGINAL_PERMS" ]; then
+                chmod "$ORIGINAL_PERMS" "$UFW_BEFORE_RULES"
+                print_message "Restored original file permissions: $ORIGINAL_PERMS"
+            else
+                # Set default permissions if we couldn't detect them
+                chmod 640 "$UFW_BEFORE_RULES"
+                print_message "Set default file permissions: 640"
+            fi
+            
             print_message "ICMP blocking configured successfully"
             
             # Reload UFW to apply changes
@@ -1009,7 +1023,6 @@ print_message "sudo nano /etc/sysctl.conf"
 print_message "sudo nano /etc/apt/sources.list"
 print_message "sudo nano /etc/apt/sources.list.d/ubuntu.list"
 print_message "sudo nano /etc/ssh/sshd_config"
-print_message "sudo nano /etc/ufw/before.rules"
 print_warning "$STEP_NUM. Reboot system to apply all changes: sudo reboot"
 
 exit 0
