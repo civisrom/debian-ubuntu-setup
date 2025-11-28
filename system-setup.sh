@@ -1009,6 +1009,7 @@ print_message "sudo nano/etc/sysctl.conf"
 print_message "sudo nano/etc/apt/sources.list"
 print_message "sudo nano/etc/apt/sources.list.d/ubuntu.list"
 print_message "sudo nano/etc/ssh/sshd_config"
+print_message "sudo nano/etc/ufw/before.rules.backup"
 print_warning "$STEP_NUM. Reboot system to apply all changes: sudo reboot"
 
 exit 0
