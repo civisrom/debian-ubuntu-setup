@@ -546,8 +546,18 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         
         # Restart SSH service
         print_message "Restarting SSH service..."
-        systemctl restart sshd || systemctl restart ssh
-        print_message "SSH service restarted"
+        if systemctl restart sshd 2>/dev/null; then
+            print_message "SSH service restarted (sshd)"
+        elif systemctl restart ssh 2>/dev/null; then
+            print_message "SSH service restarted (ssh)"
+        elif service ssh restart 2>/dev/null; then
+            print_message "SSH service restarted (service ssh)"
+        elif service sshd restart 2>/dev/null; then
+            print_message "SSH service restarted (service sshd)"
+        else
+            print_error "Failed to restart SSH service"
+            print_warning "Please restart SSH manually: sudo systemctl restart ssh"
+        fi
     else
         print_error "SSH configuration test failed!"
         print_error "Restoring backup..."
@@ -911,4 +921,5 @@ print_message "sudo nano/etc/apt/sources.list"
 print_message "sudo nano/etc/apt/sources.list.d/ubuntu.list"
 print_message "sudo nano/etc/ssh/sshd_config"
 print_warning "$STEP_NUM. Reboot system to apply all changes: sudo reboot"
+
 exit 0
