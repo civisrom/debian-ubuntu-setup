@@ -288,6 +288,8 @@ COMMON_PACKAGES=(
     autoconf
     automake
     libtool
+    python3
+    python3-venv
 )
 
 # Debian-specific packages
