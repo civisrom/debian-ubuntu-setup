@@ -149,8 +149,8 @@ if [ "$INTERACTIVE" = true ]; then
     CREATE_VENV=${CREATE_VENV:-n}
     
     if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
-        read -p "Enter path for virtual environment (default: /root/skripts): " VENV_PATH
-        VENV_PATH=${VENV_PATH:-/root/skripts}
+        read -p "Enter path for virtual environment (default: /root/scripts): " VENV_PATH
+        VENV_PATH=${VENV_PATH:-/root/scripts}
     else
         VENV_PATH=""
     fi
@@ -170,6 +170,17 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Do you want to configure UFW firewall?"
     read -p "Configure UFW? (Y/n): " CONFIGURE_UFW
     CONFIGURE_UFW=${CONFIGURE_UFW:-y}
+    
+    # Ask about ICMP blocking (only if UFW is enabled)
+    if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+        echo ""
+        print_message "Do you want to block ICMP (ping) requests?"
+        print_message "Note: This will make your server invisible to ping"
+        read -p "Block ICMP? (y/N): " BLOCK_ICMP
+        BLOCK_ICMP=${BLOCK_ICMP:-n}
+    else
+        BLOCK_ICMP="n"
+    fi
     
     # Ask about sysctl configuration
     print_message "Do you want to optimize system parameters (sysctl.conf)?"
@@ -211,6 +222,7 @@ else
     VENV_PATH=""
     INSTALL_DOCKER="n"
     CONFIGURE_UFW="y"
+    BLOCK_ICMP="n"
     CONFIGURE_SYSCTL="y"
     CONFIGURE_REPOS="y"
     INSTALL_MOTD="n"
@@ -223,6 +235,7 @@ else
     print_message "- Docker: NO"
     print_message "- ufw-docker: NO"
     print_message "- UFW: YES"
+    print_message "- Block ICMP: NO"
     print_message "- sysctl: YES"
     print_message "- Repositories: YES"
     print_message "- MOTD: NO"
@@ -239,6 +252,9 @@ print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+    print_message "  Block ICMP (ping): $([ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] && echo "YES" || echo "NO")"
+fi
 print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Custom MOTD: $([ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ] && echo "YES" || echo "NO")"
@@ -602,6 +618,71 @@ else
     print_message "Skipping UFW configuration (not requested)"
 fi
 
+# Configure ICMP blocking in UFW
+if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
+    print_message "Configuring ICMP blocking in UFW..."
+    
+    UFW_BEFORE_RULES="/etc/ufw/before.rules"
+    
+    # Backup original before.rules
+    if [ -f "$UFW_BEFORE_RULES" ]; then
+        cp "$UFW_BEFORE_RULES" "${UFW_BEFORE_RULES}.backup.$(date +%Y%m%d-%H%M%S)"
+        print_message "Original before.rules backed up"
+    fi
+    
+    # Check if the ICMP section exists
+    if grep -q "# ok icmp codes for INPUT" "$UFW_BEFORE_RULES"; then
+        print_message "Found ICMP section in before.rules"
+        
+        # Create a temporary file for modifications
+        TEMP_FILE=$(mktemp)
+        
+        # Process the file and replace ICMP rules
+        awk '
+        /# ok icmp codes for INPUT/ {
+            print "# ok icmp codes for INPUT"
+            print "-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP"
+            print "-A ufw-before-input -p icmp --icmp-type source-quench -j DROP"
+            print "-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP"
+            print "-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP"
+            print "-A ufw-before-input -p icmp --icmp-type echo-request -j DROP"
+            
+            # Skip the next 4 lines (original ICMP rules)
+            for(i=0; i<4; i++) {
+                getline
+            }
+            next
+        }
+        { print }
+        ' "$UFW_BEFORE_RULES" > "$TEMP_FILE"
+        
+        # Verify the temporary file is not empty
+        if [ -s "$TEMP_FILE" ]; then
+            # Replace original file
+            mv "$TEMP_FILE" "$UFW_BEFORE_RULES"
+            print_message "ICMP blocking configured successfully"
+            
+            # Reload UFW to apply changes
+            print_message "Reloading UFW to apply ICMP blocking..."
+            ufw reload
+            print_message "UFW reloaded"
+        else
+            print_error "Failed to modify before.rules (temporary file is empty)"
+            rm -f "$TEMP_FILE"
+        fi
+    else
+        print_warning "ICMP section not found in before.rules"
+        print_warning "Skipping ICMP blocking configuration"
+    fi
+    
+    print_message "ICMP (ping) requests are now blocked"
+    print_message "Your server will not respond to ping"
+else
+    if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+        print_message "ICMP blocking not requested - server will respond to ping"
+    fi
+fi
+
 # Install Docker if requested
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     print_message "Installing Docker..."
@@ -829,6 +910,11 @@ fi
 
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     print_message "- UFW firewall configured and enabled"
+    if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
+        print_message "- ICMP (ping) blocking: ENABLED"
+    else
+        print_message "- ICMP (ping) blocking: DISABLED (server responds to ping)"
+    fi
     if [ ! -z "$CUSTOM_PORT" ]; then
         print_message "- Custom UFW port: $CUSTOM_PORT"
     fi
@@ -863,7 +949,7 @@ fi
 
 print_message ""
 
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
     print_message "Backup files saved with timestamp:"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "- /etc/sysctl.conf.backup.*"
@@ -878,6 +964,9 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     fi
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         print_message "- /etc/ssh/sshd_config.backup.*"
+    fi
+    if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
+        print_message "- /etc/ufw/before.rules.backup.*"
     fi
     print_message ""
 fi
