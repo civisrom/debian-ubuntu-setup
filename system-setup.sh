@@ -2,7 +2,7 @@
 
 #############################################
 # System Setup Script for Debian and Ubuntu
-# Author: Auto-generated
+# Author: Auto-generated (Enhanced Version)
 # Description: Initial package installation and system configuration
 #############################################
 
@@ -50,7 +50,7 @@ fi
 echo ""
 print_header "╔═══════════════════════════════════════════════╗"
 print_header "║   Debian/Ubuntu System Setup Script          ║"
-print_header "║   Initial Configuration Tool                  ║"
+print_header "║   Initial Configuration Tool (Enhanced)       ║"
 print_header "╚═══════════════════════════════════════════════╝"
 echo ""
 
@@ -125,6 +125,143 @@ print_header "══════════════════════
 echo ""
 
 if [ "$INTERACTIVE" = true ]; then
+    # Ask about root password
+    print_message "Do you want to set a password for root user?"
+    read -p "Set root password? (y/N): " SET_ROOT_PASSWORD
+    SET_ROOT_PASSWORD=${SET_ROOT_PASSWORD:-n}
+    
+    if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
+        while true; do
+            read -s -p "Enter new root password: " ROOT_PASSWORD
+            echo ""
+            read -s -p "Confirm root password: " ROOT_PASSWORD_CONFIRM
+            echo ""
+            
+            if [ "$ROOT_PASSWORD" = "$ROOT_PASSWORD_CONFIRM" ]; then
+                if [ -z "$ROOT_PASSWORD" ]; then
+                    print_error "Password cannot be empty"
+                    continue
+                fi
+                print_message "Root password will be set"
+                break
+            else
+                print_error "Passwords do not match. Please try again."
+            fi
+        done
+    else
+        ROOT_PASSWORD=""
+    fi
+    
+    echo ""
+    
+    # Ask about creating new user
+    print_message "Do you want to create a new user?"
+    read -p "Create new user? (y/N): " CREATE_USER
+    CREATE_USER=${CREATE_USER:-n}
+    
+    if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
+        read -p "Enter username for new user: " NEW_USERNAME
+        
+        if [ -z "$NEW_USERNAME" ]; then
+            print_error "Username cannot be empty"
+            CREATE_USER="n"
+        else
+            # Check if user already exists
+            if id "$NEW_USERNAME" &>/dev/null; then
+                print_warning "User $NEW_USERNAME already exists"
+                read -p "Continue with existing user? (y/N): " USE_EXISTING
+                USE_EXISTING=${USE_EXISTING:-n}
+                
+                if [ "$USE_EXISTING" != "y" ] && [ "$USE_EXISTING" != "Y" ]; then
+                    CREATE_USER="n"
+                    NEW_USERNAME=""
+                else
+                    CREATE_USER="existing"
+                fi
+            else
+                while true; do
+                    read -s -p "Enter password for $NEW_USERNAME: " NEW_USER_PASSWORD
+                    echo ""
+                    read -s -p "Confirm password: " NEW_USER_PASSWORD_CONFIRM
+                    echo ""
+                    
+                    if [ "$NEW_USER_PASSWORD" = "$NEW_USER_PASSWORD_CONFIRM" ]; then
+                        if [ -z "$NEW_USER_PASSWORD" ]; then
+                            print_error "Password cannot be empty"
+                            continue
+                        fi
+                        print_message "User $NEW_USERNAME will be created"
+                        break
+                    else
+                        print_error "Passwords do not match. Please try again."
+                    fi
+                done
+            fi
+        fi
+    else
+        NEW_USERNAME=""
+        NEW_USER_PASSWORD=""
+    fi
+    
+    echo ""
+    
+    # Ask about SSH key for new user
+    if [ ! -z "$NEW_USERNAME" ]; then
+        print_message "Do you want to configure SSH key for $NEW_USERNAME?"
+        read -p "Configure SSH key? (y/N): " CONFIGURE_USER_SSH_KEY
+        CONFIGURE_USER_SSH_KEY=${CONFIGURE_USER_SSH_KEY:-n}
+        
+        if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ]; then
+            echo ""
+            print_message "Enter SSH public key for $NEW_USERNAME"
+            print_message "Example: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB..."
+            read -p "SSH public key: " USER_SSH_KEY
+            
+            if [ -z "$USER_SSH_KEY" ]; then
+                print_warning "No SSH key provided, skipping SSH key configuration"
+                CONFIGURE_USER_SSH_KEY="n"
+            fi
+        else
+            USER_SSH_KEY=""
+        fi
+    else
+        CONFIGURE_USER_SSH_KEY="n"
+        USER_SSH_KEY=""
+    fi
+    
+    echo ""
+    
+    # Ask about zsh installation for new user
+    if [ ! -z "$NEW_USERNAME" ]; then
+        print_message "Do you want to install and configure zsh with Oh My Zsh for $NEW_USERNAME?"
+        read -p "Install zsh? (y/N): " INSTALL_ZSH
+        INSTALL_ZSH=${INSTALL_ZSH:-n}
+    else
+        INSTALL_ZSH="n"
+    fi
+    
+    echo ""
+    
+    # Ask about crontab configuration
+    print_message "Do you want to configure crontab for root?"
+    read -p "Configure crontab? (y/N): " CONFIGURE_CRONTAB
+    CONFIGURE_CRONTAB=${CONFIGURE_CRONTAB:-n}
+    
+    if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
+        echo ""
+        print_message "Enter the command to run at reboot (leave empty to skip)"
+        print_message "Example: cd /root/vpnbot && make r"
+        read -p "Reboot command: " CRONTAB_REBOOT_CMD
+        
+        if [ -z "$CRONTAB_REBOOT_CMD" ]; then
+            print_warning "No command provided, will only set crontab environment"
+        fi
+    else
+        CRONTAB_REBOOT_CMD=""
+    fi
+    
+    echo ""
+    
     # Ask about SSH configuration
     print_message "Do you want to configure SSH (change port and set AllowUsers)?"
     read -p "Configure SSH? (y/N): " CONFIGURE_SSH
@@ -137,6 +274,9 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "Enter usernames for AllowUsers (space-separated, leave empty to skip)"
         print_message "Example: user1 user2 user3"
+        if [ ! -z "$NEW_USERNAME" ]; then
+            print_message "Suggestion: $NEW_USERNAME"
+        fi
         read -p "AllowUsers: " SSH_ALLOW_USERS
         
         echo ""
@@ -282,6 +422,16 @@ if [ "$INTERACTIVE" = true ]; then
     fi
 else
     # Default settings for non-interactive mode
+    SET_ROOT_PASSWORD="n"
+    ROOT_PASSWORD=""
+    CREATE_USER="n"
+    NEW_USERNAME=""
+    NEW_USER_PASSWORD=""
+    CONFIGURE_USER_SSH_KEY="n"
+    USER_SSH_KEY=""
+    INSTALL_ZSH="n"
+    CONFIGURE_CRONTAB="n"
+    CRONTAB_REBOOT_CMD=""
     CONFIGURE_SSH="n"
     SSH_PORT="22"
     SSH_ALLOW_USERS=""
@@ -301,6 +451,8 @@ else
     INSTALL_UFW_DOCKER="n"
     
     print_message "Non-interactive mode - using default settings:"
+    print_message "- Root password: NO"
+    print_message "- Create user: NO"
     print_message "- SSH configuration: NO"
     print_message "- Python venv: NO"
     print_message "- Docker: NO"
@@ -311,6 +463,7 @@ else
     print_message "- Repositories: YES"
     print_message "- MOTD: NO"
     print_message "- Custom UFW Port: None"
+    print_message "- Crontab: NO"
 fi
 echo ""
 
@@ -318,6 +471,13 @@ echo ""
 print_header "═══════════════════════════════════════════════"
 print_message "Configuration Summary:"
 print_message "  OS: $OS $VERSION ($VERSION_CODENAME)"
+print_message "  Root password: $([ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ] && echo "YES" || echo "NO")"
+print_message "  New user: $([ ! -z "$NEW_USERNAME" ] && echo "YES ($NEW_USERNAME)" || echo "NO")"
+if [ ! -z "$NEW_USERNAME" ]; then
+    print_message "    - SSH key: $([ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "    - zsh: $([ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] && echo "YES" || echo "NO")"
+fi
+print_message "  Crontab: $([ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT, Users: ${SSH_ALLOW_USERS:-none})" || echo "NO")"
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     if [ ! -z "$SSH_PUBKEY_AUTH" ]; then
@@ -368,6 +528,81 @@ echo ""
 print_message "Starting installation..."
 echo ""
 
+# ============================================
+# SET ROOT PASSWORD
+# ============================================
+
+if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
+    print_message "Setting root password..."
+    echo "root:$ROOT_PASSWORD" | chpasswd
+    print_message "Root password set successfully"
+    echo ""
+fi
+
+# ============================================
+# CREATE NEW USER
+# ============================================
+
+if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
+    print_message "Creating new user: $NEW_USERNAME"
+    
+    # Create user with home directory
+    if adduser --gecos "" --disabled-password "$NEW_USERNAME"; then
+        print_message "User $NEW_USERNAME created successfully"
+        
+        # Set password
+        echo "$NEW_USERNAME:$NEW_USER_PASSWORD" | chpasswd
+        print_message "Password set for $NEW_USERNAME"
+        
+        # Add user to sudo group
+        gpasswd -a "$NEW_USERNAME" sudo
+        print_message "User $NEW_USERNAME added to sudo group"
+    else
+        print_error "Failed to create user $NEW_USERNAME"
+        CREATE_USER="n"
+    fi
+    echo ""
+elif [ "$CREATE_USER" = "existing" ]; then
+    print_message "Using existing user: $NEW_USERNAME"
+    
+    # Ensure user is in sudo group
+    if ! groups "$NEW_USERNAME" | grep -q "\bsudo\b"; then
+        gpasswd -a "$NEW_USERNAME" sudo
+        print_message "User $NEW_USERNAME added to sudo group"
+    else
+        print_message "User $NEW_USERNAME is already in sudo group"
+    fi
+    echo ""
+fi
+
+# ============================================
+# CONFIGURE SSH KEY FOR USER
+# ============================================
+
+if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
+    print_message "Configuring SSH key for $NEW_USERNAME"
+    
+    USER_HOME=$(eval echo ~$NEW_USERNAME)
+    
+    # Create .ssh directory as user
+    sudo -u "$NEW_USERNAME" bash << EOF
+        mkdir -p "$USER_HOME/.ssh"
+        chmod 700 "$USER_HOME/.ssh"
+EOF
+    
+    print_message "Created .ssh directory for $NEW_USERNAME"
+    
+    # Add SSH key to authorized_keys
+    sudo -u "$NEW_USERNAME" bash << EOF
+        echo "$USER_SSH_KEY" > "$USER_HOME/.ssh/authorized_keys"
+        chmod 600 "$USER_HOME/.ssh/authorized_keys"
+EOF
+    
+    print_message "SSH key added to $USER_HOME/.ssh/authorized_keys"
+    print_message "SSH key configured successfully for $NEW_USERNAME"
+    echo ""
+fi
+
 # Update package lists
 print_message "Updating package lists..."
 apt update
@@ -392,12 +627,10 @@ COMMON_PACKAGES=(
     net-tools
     apache2-utils
     sqlite3
-    tilda
     ca-certificates
     lsb-release
     traceroute
     cron
-    software-properties-common
     pwgen
     libwww-perl
     apg
@@ -418,9 +651,13 @@ COMMON_PACKAGES=(
     vim
 )
 
+# Add zsh if requested
+if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
+    COMMON_PACKAGES+=(zsh)
+fi
+
 # Debian-specific packages
 DEBIAN_PACKAGES=(
-#    openvswitch-switch-dpdk
 )
 
 # Ubuntu-specific packages
@@ -447,6 +684,56 @@ elif [ "$OS" = "ubuntu" ]; then
     
     print_message "Installing Ubuntu-specific packages..."
     apt install -y "${UBUNTU_PACKAGES[@]}" || print_warning "Some Ubuntu-specific packages may not be available"
+fi
+
+# ============================================
+# INSTALL AND CONFIGURE ZSH FOR USER
+# ============================================
+
+if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
+    print_message "Installing Oh My Zsh for $NEW_USERNAME"
+    
+    USER_HOME=$(eval echo ~$NEW_USERNAME)
+    
+    # Install Oh My Zsh as user
+    print_message "Installing Oh My Zsh..."
+    sudo -u "$NEW_USERNAME" bash << 'EOF'
+        export RUNZSH=no
+        export CHSH=no
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+EOF
+    
+    if [ -d "$USER_HOME/.oh-my-zsh" ]; then
+        print_message "Oh My Zsh installed successfully"
+        
+        # Install zsh plugins
+        print_message "Installing zsh plugins..."
+        
+        sudo -u "$NEW_USERNAME" bash << EOF
+            git clone https://github.com/zsh-users/zsh-syntax-highlighting.git \${ZSH_CUSTOM:-$USER_HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+            git clone https://github.com/zsh-users/zsh-autosuggestions \${ZSH_CUSTOM:-$USER_HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+            git clone https://github.com/zsh-users/zsh-history-substring-search \${ZSH_CUSTOM:-$USER_HOME/.oh-my-zsh/custom}/plugins/zsh-history-substring-search
+EOF
+        
+        print_message "Zsh plugins installed successfully"
+        
+        # Download custom .zshrc
+        print_message "Downloading custom .zshrc configuration..."
+        if sudo -u "$NEW_USERNAME" curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/.zshrc -o "$USER_HOME/.zshrc"; then
+            print_message "Custom .zshrc downloaded successfully"
+            sudo -u "$NEW_USERNAME" chmod 644 "$USER_HOME/.zshrc"
+        else
+            print_warning "Failed to download custom .zshrc, using default"
+        fi
+        
+        # Change default shell to zsh
+        print_message "Changing default shell to zsh for $NEW_USERNAME"
+        chsh -s $(which zsh) "$NEW_USERNAME"
+        print_message "Default shell changed to zsh"
+    else
+        print_error "Oh My Zsh installation failed"
+    fi
+    echo ""
 fi
 
 # Configure sources.list for Debian
@@ -881,10 +1168,19 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             systemctl start docker
             systemctl enable docker
             
+            # Add new user to docker group if created
+            if [ ! -z "$NEW_USERNAME" ]; then
+                usermod -aG docker "$NEW_USERNAME"
+                print_message "User $NEW_USERNAME added to docker group"
+            fi
+            
             # Add current user to docker group if not root
-            if [ ! -z "$SUDO_USER" ]; then
+            if [ ! -z "$SUDO_USER" ] && [ "$SUDO_USER" != "$NEW_USERNAME" ]; then
                 usermod -aG docker $SUDO_USER
                 print_message "User $SUDO_USER added to docker group"
+            fi
+            
+            if [ ! -z "$NEW_USERNAME" ] || [ ! -z "$SUDO_USER" ]; then
                 print_warning "Please log out and log back in for docker group changes to take effect"
             fi
         else
@@ -995,6 +1291,44 @@ else
     print_message "Skipping Python virtual environment creation (not requested)"
 fi
 
+# ============================================
+# CONFIGURE CRONTAB
+# ============================================
+
+if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
+    print_message "Configuring crontab for root..."
+    
+    # Backup existing crontab
+    if crontab -l &>/dev/null; then
+        crontab -l > /tmp/crontab.backup.$(date +%Y%m%d-%H%M%S)
+        print_message "Existing crontab backed up"
+    fi
+    
+    # Create new crontab content
+    CRONTAB_CONTENT="SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HOME=/root
+MAILTO=\"\"
+LANG=en_US.UTF-8"
+    
+    # Add reboot command if specified
+    if [ ! -z "$CRONTAB_REBOOT_CMD" ]; then
+        CRONTAB_CONTENT="$CRONTAB_CONTENT
+@reboot sh -c \"sleep 5 && $CRONTAB_REBOOT_CMD\""
+    fi
+    
+    # Install new crontab
+    echo "$CRONTAB_CONTENT" | crontab -
+    print_message "Crontab configured successfully"
+    
+    # Display configured crontab
+    print_message "Configured crontab:"
+    crontab -l
+    echo ""
+else
+    print_message "Skipping crontab configuration (not requested)"
+fi
+
 # Install custom MOTD
 if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     print_message "Installing custom MOTD (Message of the Day)..."
@@ -1037,6 +1371,30 @@ print_header "══════════════════════
 print_message "Summary:"
 print_message "- OS: $OS $VERSION ($VERSION_CODENAME)"
 print_message "- Packages installed"
+
+if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
+    print_message "- Root password: SET"
+else
+    print_message "- Root password: NOT SET"
+fi
+
+if [ ! -z "$NEW_USERNAME" ]; then
+    print_message "- New user created: $NEW_USERNAME"
+    if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ]; then
+        print_message "  - SSH key configured"
+    fi
+    if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
+        print_message "  - zsh and Oh My Zsh installed"
+    fi
+else
+    print_message "- New user: NOT CREATED"
+fi
+
+if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
+    print_message "- Crontab configured for root"
+else
+    print_message "- Crontab: NOT CONFIGURED"
+fi
 
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     print_message "- SSH configured (Port: $SSH_PORT, AllowUsers: ${SSH_ALLOW_USERS:-not set})"
@@ -1117,7 +1475,7 @@ fi
 
 print_message ""
 
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     print_message "Backup files saved with timestamp:"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "- /etc/sysctl.conf.backup.*"
@@ -1136,11 +1494,22 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
         print_message "- /etc/ufw/before.rules.backup.*"
     fi
+    if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
+        print_message "- /tmp/crontab.backup.*"
+    fi
     print_message ""
 fi
 
 print_warning "Recommended next steps:"
 STEP_NUM=1
+
+if [ ! -z "$NEW_USERNAME" ]; then
+    print_warning "$STEP_NUM. Test SSH connection with new user: ssh $NEW_USERNAME@hostname"
+    if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
+        print_warning "   Note: zsh is configured, log in to see Oh My Zsh"
+    fi
+    STEP_NUM=$((STEP_NUM + 1))
+fi
 
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     if [ "$SSH_PORT" != "22" ]; then
@@ -1166,17 +1535,36 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
-if command -v docker &> /dev/null && [ ! -z "$SUDO_USER" ]; then
-    print_warning "$STEP_NUM. Log out and back in to use Docker without sudo"
+if command -v docker &> /dev/null; then
+    if [ ! -z "$NEW_USERNAME" ]; then
+        print_warning "$STEP_NUM. User $NEW_USERNAME needs to log out and back in to use Docker without sudo"
+        STEP_NUM=$((STEP_NUM + 1))
+    fi
+    if [ ! -z "$SUDO_USER" ] && [ "$SUDO_USER" != "$NEW_USERNAME" ]; then
+        print_warning "$STEP_NUM. User $SUDO_USER needs to log out and back in to use Docker without sudo"
+        STEP_NUM=$((STEP_NUM + 1))
+    fi
+fi
+
+if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
+    print_warning "$STEP_NUM. Check crontab: sudo crontab -l"
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
+print_message ""
+print_message "Useful commands:"
 print_message "sudo ufw status verbose"
 print_message "sudo ufw status numbered"
 print_message "sudo nano /etc/sysctl.conf"
 print_message "sudo nano /etc/apt/sources.list"
-print_message "sudo nano /etc/apt/sources.list.d/ubuntu.list"
+if [ "$OS" = "ubuntu" ]; then
+    print_message "sudo nano /etc/apt/sources.list.d/ubuntu.list"
+fi
 print_message "sudo nano /etc/ssh/sshd_config"
+print_message "sudo crontab -l"
+if [ ! -z "$NEW_USERNAME" ]; then
+    print_message "su - $NEW_USERNAME"
+fi
 print_warning "$STEP_NUM. Reboot system to apply all changes: sudo reboot"
 
 exit 0
