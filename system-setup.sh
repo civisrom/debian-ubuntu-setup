@@ -697,10 +697,12 @@ if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] && [ ! -z "$NEW_USERNAME
     
     # Install Oh My Zsh as user
     print_message "Installing Oh My Zsh..."
-    sudo -u "$NEW_USERNAME" bash << 'EOF'
+    sudo -u "$NEW_USERNAME" -i bash << EOF
+        export HOME="$USER_HOME"
         export RUNZSH=no
         export CHSH=no
-        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+        cd "\$HOME"
+        sh -c "\$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 EOF
     
     if [ -d "$USER_HOME/.oh-my-zsh" ]; then
@@ -709,10 +711,12 @@ EOF
         # Install zsh plugins
         print_message "Installing zsh plugins..."
         
-        sudo -u "$NEW_USERNAME" bash << EOF
-            git clone https://github.com/zsh-users/zsh-syntax-highlighting.git \${ZSH_CUSTOM:-$USER_HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
-            git clone https://github.com/zsh-users/zsh-autosuggestions \${ZSH_CUSTOM:-$USER_HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-            git clone https://github.com/zsh-users/zsh-history-substring-search \${ZSH_CUSTOM:-$USER_HOME/.oh-my-zsh/custom}/plugins/zsh-history-substring-search
+        sudo -u "$NEW_USERNAME" -i bash << EOF
+            export HOME="$USER_HOME"
+            cd "\$HOME"
+            git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting"
+            git clone https://github.com/zsh-users/zsh-autosuggestions "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
+            git clone https://github.com/zsh-users/zsh-history-substring-search "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-history-substring-search"
 EOF
         
         print_message "Zsh plugins installed successfully"
