@@ -392,12 +392,12 @@ COMMON_PACKAGES=(
     net-tools
     apache2-utils
     sqlite3
-#    tilda
+    tilda
     ca-certificates
     lsb-release
     traceroute
     cron
-#    software-properties-common
+    software-properties-common
     pwgen
     libwww-perl
     apg
