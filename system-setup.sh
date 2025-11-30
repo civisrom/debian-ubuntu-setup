@@ -250,7 +250,7 @@ if [ "$INTERACTIVE" = true ]; then
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
         echo ""
         print_message "Enter the command to run at reboot (leave empty to skip)"
-        print_message "Example: cd /root/bot && make r"
+        print_message "Example: cd /root/vpnbot && make r"
         read -p "Reboot command: " CRONTAB_REBOOT_CMD
         
         if [ -z "$CRONTAB_REBOOT_CMD" ]; then
@@ -540,81 +540,6 @@ echo ""
 print_message "Starting installation..."
 echo ""
 
-# ============================================
-# SET ROOT PASSWORD
-# ============================================
-
-if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
-    print_message "Setting root password..."
-    echo "root:$ROOT_PASSWORD" | chpasswd
-    print_message "Root password set successfully"
-    echo ""
-fi
-
-# ============================================
-# CREATE NEW USER
-# ============================================
-
-if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
-    print_message "Creating new user: $NEW_USERNAME"
-    
-    # Create user with home directory
-    if adduser --gecos "" --disabled-password "$NEW_USERNAME"; then
-        print_message "User $NEW_USERNAME created successfully"
-        
-        # Set password
-        echo "$NEW_USERNAME:$NEW_USER_PASSWORD" | chpasswd
-        print_message "Password set for $NEW_USERNAME"
-        
-        # Add user to sudo group
-        gpasswd -a "$NEW_USERNAME" sudo
-        print_message "User $NEW_USERNAME added to sudo group"
-    else
-        print_error "Failed to create user $NEW_USERNAME"
-        CREATE_USER="n"
-    fi
-    echo ""
-elif [ "$CREATE_USER" = "existing" ]; then
-    print_message "Using existing user: $NEW_USERNAME"
-    
-    # Ensure user is in sudo group
-    if ! groups "$NEW_USERNAME" | grep -q "\bsudo\b"; then
-        gpasswd -a "$NEW_USERNAME" sudo
-        print_message "User $NEW_USERNAME added to sudo group"
-    else
-        print_message "User $NEW_USERNAME is already in sudo group"
-    fi
-    echo ""
-fi
-
-# ============================================
-# CONFIGURE SSH KEY FOR USER
-# ============================================
-
-if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
-    print_message "Configuring SSH key for $NEW_USERNAME"
-    
-    USER_HOME=$(eval echo ~$NEW_USERNAME)
-    
-    # Create .ssh directory as user
-    sudo -u "$NEW_USERNAME" bash << EOF
-        mkdir -p "$USER_HOME/.ssh"
-        chmod 700 "$USER_HOME/.ssh"
-EOF
-    
-    print_message "Created .ssh directory for $NEW_USERNAME"
-    
-    # Add SSH key to authorized_keys
-    sudo -u "$NEW_USERNAME" bash << EOF
-        echo "$USER_SSH_KEY" > "$USER_HOME/.ssh/authorized_keys"
-        chmod 600 "$USER_HOME/.ssh/authorized_keys"
-EOF
-    
-    print_message "SSH key added to $USER_HOME/.ssh/authorized_keys"
-    print_message "SSH key configured successfully for $NEW_USERNAME"
-    echo ""
-fi
-
 # Update package lists
 print_message "Updating package lists..."
 apt update
@@ -698,58 +623,80 @@ elif [ "$OS" = "ubuntu" ]; then
 fi
 
 # ============================================
-# INSTALL AND CONFIGURE ZSH FOR USER
+# SET ROOT PASSWORD
 # ============================================
 
-if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
-    print_message "Installing Oh My Zsh for $NEW_USERNAME"
+if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
+    print_message "Setting root password..."
+    echo "root:$ROOT_PASSWORD" | chpasswd
+    print_message "Root password set successfully"
+    echo ""
+fi
+
+# ============================================
+# CREATE NEW USER (after packages with sudo)
+# ============================================
+
+if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
+    print_message "Creating new user: $NEW_USERNAME"
     
-    USER_HOME=$(eval echo ~$NEW_USERNAME)
-    
-    # Install Oh My Zsh as user
-    print_message "Installing Oh My Zsh..."
-    sudo -u "$NEW_USERNAME" -i bash << EOF
-        export HOME="$USER_HOME"
-        export RUNZSH=no
-        export CHSH=no
-        cd "\$HOME"
-        sh -c "\$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-EOF
-    
-    if [ -d "$USER_HOME/.oh-my-zsh" ]; then
-        print_message "Oh My Zsh installed successfully"
+    # Create user with home directory
+    if adduser --gecos "" --disabled-password "$NEW_USERNAME"; then
+        print_message "User $NEW_USERNAME created successfully"
         
-        # Install zsh plugins
-        print_message "Installing zsh plugins..."
+        # Set password
+        echo "$NEW_USERNAME:$NEW_USER_PASSWORD" | chpasswd
+        print_message "Password set for $NEW_USERNAME"
         
-        sudo -u "$NEW_USERNAME" -i bash << EOF
-            export HOME="$USER_HOME"
-            cd "\$HOME"
-            git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting"
-            git clone https://github.com/zsh-users/zsh-autosuggestions "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
-            git clone https://github.com/zsh-users/zsh-history-substring-search "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-history-substring-search"
-EOF
-        
-        print_message "Zsh plugins installed successfully"
-        
-        # Download custom .zshrc
-        print_message "Downloading custom .zshrc configuration..."
-        if sudo -u "$NEW_USERNAME" curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/.zshrc -o "$USER_HOME/.zshrc"; then
-            print_message "Custom .zshrc downloaded successfully"
-            sudo -u "$NEW_USERNAME" chmod 644 "$USER_HOME/.zshrc"
-        else
-            print_warning "Failed to download custom .zshrc, using default"
-        fi
-        
-        # Change default shell to zsh
-        print_message "Changing default shell to zsh for $NEW_USERNAME"
-        chsh -s $(which zsh) "$NEW_USERNAME"
-        print_message "Default shell changed to zsh"
+        # Add user to sudo group
+        gpasswd -a "$NEW_USERNAME" sudo
+        print_message "User $NEW_USERNAME added to sudo group"
     else
-        print_error "Oh My Zsh installation failed"
+        print_error "Failed to create user $NEW_USERNAME"
+        CREATE_USER="n"
+    fi
+    echo ""
+elif [ "$CREATE_USER" = "existing" ]; then
+    print_message "Using existing user: $NEW_USERNAME"
+    
+    # Ensure user is in sudo group
+    if ! groups "$NEW_USERNAME" | grep -q "\bsudo\b"; then
+        gpasswd -a "$NEW_USERNAME" sudo
+        print_message "User $NEW_USERNAME added to sudo group"
+    else
+        print_message "User $NEW_USERNAME is already in sudo group"
     fi
     echo ""
 fi
+
+# ============================================
+# CONFIGURE SSH KEY FOR USER
+# ============================================
+
+if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
+    print_message "Configuring SSH key for $NEW_USERNAME"
+    
+    USER_HOME=$(eval echo ~$NEW_USERNAME)
+    
+    # Create .ssh directory as user
+    sudo -u "$NEW_USERNAME" bash << EOF
+        mkdir -p "$USER_HOME/.ssh"
+        chmod 700 "$USER_HOME/.ssh"
+EOF
+    
+    print_message "Created .ssh directory for $NEW_USERNAME"
+    
+    # Add SSH key to authorized_keys
+    sudo -u "$NEW_USERNAME" bash << EOF
+        echo "$USER_SSH_KEY" > "$USER_HOME/.ssh/authorized_keys"
+        chmod 600 "$USER_HOME/.ssh/authorized_keys"
+EOF
+    
+    print_message "SSH key added to $USER_HOME/.ssh/authorized_keys"
+    print_message "SSH key configured successfully for $NEW_USERNAME"
+    echo ""
+fi
+
 
 # Configure sources.list for Debian
 if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
@@ -901,6 +848,60 @@ else
     # Install mc from standard repositories if Tataranovich is not used
     print_message "Installing Midnight Commander from standard repositories..."
     apt-get install -y mc || print_warning "Failed to install mc"
+    echo ""
+fi
+
+# ============================================
+# INSTALL AND CONFIGURE ZSH FOR USER
+# ============================================
+
+if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
+    print_message "Installing Oh My Zsh for $NEW_USERNAME"
+    
+    USER_HOME=$(eval echo ~$NEW_USERNAME)
+    
+    # Install Oh My Zsh as user
+    print_message "Installing Oh My Zsh..."
+    sudo -u "$NEW_USERNAME" -i bash << EOF
+        export HOME="$USER_HOME"
+        export RUNZSH=no
+        export CHSH=no
+        cd "\$HOME"
+        sh -c "\$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+EOF
+    
+    if [ -d "$USER_HOME/.oh-my-zsh" ]; then
+        print_message "Oh My Zsh installed successfully"
+        
+        # Install zsh plugins
+        print_message "Installing zsh plugins..."
+        
+        sudo -u "$NEW_USERNAME" -i bash << EOF
+            export HOME="$USER_HOME"
+            cd "\$HOME"
+            git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting"
+            git clone https://github.com/zsh-users/zsh-autosuggestions "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
+            git clone https://github.com/zsh-users/zsh-history-substring-search "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-history-substring-search"
+EOF
+        
+        print_message "Zsh plugins installed successfully"
+        
+        # Download custom .zshrc
+        print_message "Downloading custom .zshrc configuration..."
+        if sudo -u "$NEW_USERNAME" curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/.zshrc -o "$USER_HOME/.zshrc"; then
+            print_message "Custom .zshrc downloaded successfully"
+            sudo -u "$NEW_USERNAME" chmod 644 "$USER_HOME/.zshrc"
+        else
+            print_warning "Failed to download custom .zshrc, using default"
+        fi
+        
+        # Change default shell to zsh
+        print_message "Changing default shell to zsh for $NEW_USERNAME"
+        chsh -s $(which zsh) "$NEW_USERNAME"
+        print_message "Default shell changed to zsh"
+    else
+        print_error "Oh My Zsh installation failed"
+    fi
     echo ""
 fi
 
