@@ -603,6 +603,7 @@ UBUNTU_PACKAGES=(
     update-notifier-common
     ubuntu-keyring
     openvswitch-switch-dpdk
+    software-properties-common
 )
 
 # Install packages based on OS
