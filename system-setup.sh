@@ -603,7 +603,6 @@ UBUNTU_PACKAGES=(
     update-notifier-common
     ubuntu-keyring
     openvswitch-switch-dpdk
-    software-properties-common
 )
 
 # Install packages based on OS
@@ -706,7 +705,7 @@ if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
     
     # Backup original sources.list
     if [ -f /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list /etc/apt/~sources.list.backup.$(date +%Y%m%d-%H%M%S)~
+        cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Original sources.list backed up"
     fi
     
@@ -742,13 +741,13 @@ if [ "$OS" = "ubuntu" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
     
     # Backup original sources.list if it exists and has content
     if [ -f /etc/apt/sources.list ] && [ -s /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list /etc/apt/~sources.list.backup.$(date +%Y%m%d-%H%M%S)~
+        cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Original sources.list backed up"
         
         # Clear the main sources.list file
         cat > /etc/apt/sources.list << 'EOF'
 # Ubuntu repositories are now managed in /etc/apt/sources.list.d/
-# See /etc/apt/sources.list.d/ubuntu.list for repository configuration
+# See /etc/apt/sources.list.d/ubuntu.sources for repository configuration
 EOF
         print_message "Main sources.list cleared (repositories moved to sources.list.d)"
     fi
@@ -756,39 +755,47 @@ EOF
     # Use detected or selected codename
     UBUNTU_CODENAME=${VERSION_CODENAME:-noble}
     
-    # Create ubuntu.list in sources.list.d
-    UBUNTU_LIST_FILE="/etc/apt/sources.list.d/ubuntu.list"
+    # Use ubuntu.sources (new DEB822 format) instead of ubuntu.list
+    UBUNTU_SOURCES_FILE="/etc/apt/sources.list.d/ubuntu.sources"
     
     # Backup if exists
-    if [ -f "$UBUNTU_LIST_FILE" ]; then
-        cp "$UBUNTU_LIST_FILE" "/etc/apt/sources.list.d/~ubuntu.list.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Existing ubuntu.list backed up"
+    if [ -f "$UBUNTU_SOURCES_FILE" ]; then
+        cp "$UBUNTU_SOURCES_FILE" "/etc/apt/sources.list.d/ubuntu.sources.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Existing ubuntu.sources backed up"
     fi
     
-    # Write new ubuntu.list
-    cat > "$UBUNTU_LIST_FILE" << EOF
-# Ubuntu Main Repositories
-deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
-deb-src http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
+    # Write new ubuntu.sources in DEB822 format
+    cat > "$UBUNTU_SOURCES_FILE" << EOF
+## Ubuntu Main Repositories
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
-# Ubuntu Updates
-deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
-deb-src http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
+## Ubuntu Security Updates
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: ${UBUNTU_CODENAME}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
-# Ubuntu Security Updates
-deb http://security.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
-deb-src http://security.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
+## Ubuntu Sources (optional - uncomment to enable)
+# Types: deb-src
+# URIs: http://archive.ubuntu.com/ubuntu/
+# Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
+# Components: main restricted universe multiverse
+# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
-# Ubuntu Backports
-deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-deb-src http://archive.ubuntu.com/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-
-# Canonical Partner Repository (uncomment to enable)
-# deb http://archive.canonical.com/ubuntu ${UBUNTU_CODENAME} partner
-# deb-src http://archive.canonical.com/ubuntu ${UBUNTU_CODENAME} partner
+# Types: deb-src
+# URIs: http://security.ubuntu.com/ubuntu/
+# Suites: ${UBUNTU_CODENAME}-security
+# Components: main restricted universe multiverse
+# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
     
-    print_message "Ubuntu repositories configured in: $UBUNTU_LIST_FILE"
+    print_message "Ubuntu repositories configured in: $UBUNTU_SOURCES_FILE"
+    print_message "Format: DEB822 (ubuntu.sources)"
     print_message "Repositories enabled: main, restricted, universe, multiverse"
     apt update
 fi
@@ -913,7 +920,7 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     
     # Backup original sysctl.conf
     if [ -f /etc/sysctl.conf ]; then
-        cp /etc/sysctl.conf /etc/~sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)~
+        cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Original sysctl.conf backed up"
     fi
     
@@ -975,7 +982,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     
     # Backup original sshd_config
     if [ -f "$SSHD_CONFIG" ]; then
-        cp "$SSHD_CONFIG" "/etc/ssh/~sshd_config.backup.$(date +%Y%m%d-%H%M%S)~"
+        cp "$SSHD_CONFIG" "/etc/ssh/sshd_config.backup.$(date +%Y%m%d-%H%M%S)~"
         print_message "Original sshd_config backed up"
     fi
     
@@ -1075,7 +1082,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     else
         print_error "SSH configuration test failed!"
         print_error "Restoring backup..."
-        LATEST_BACKUP=$(ls -t /etc/ssh/~sshd_config.backup.*~ 2>/dev/null | head -1)
+        LATEST_BACKUP=$(ls -t /etc/ssh/sshd_config.backup.*~ 2>/dev/null | head -1)
         if [ ! -z "$LATEST_BACKUP" ]; then
             cp "$LATEST_BACKUP" "$SSHD_CONFIG"
             print_error "SSH configuration restored from backup"
@@ -1137,7 +1144,7 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
             # Save original permissions
             ORIGINAL_PERMS=$(stat -c "%a" "$UFW_BEFORE_RULES" 2>/dev/null || stat -f "%Mp%Lp" "$UFW_BEFORE_RULES" 2>/dev/null)
             
-            cp "$UFW_BEFORE_RULES" "/etc/ufw/~before.rules.backup.$(date +%Y%m%d-%H%M%S)~"
+            cp "$UFW_BEFORE_RULES" "/etc/ufw/before.rules.backup.$(date +%Y%m%d-%H%M%S)~"
             print_message "Original before.rules backed up"
         fi
         
@@ -1383,7 +1390,7 @@ if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     
     # Backup existing crontab
     if crontab -l &>/dev/null; then
-        crontab -l > /tmp/~crontab.backup.$(date +%Y%m%d-%H%M%S)~
+        crontab -l > /tmp/crontab.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Existing crontab backed up"
     fi
     
@@ -1562,26 +1569,26 @@ fi
 print_message ""
 
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
-    print_message "Backup files saved with timestamp (format: ~filename.backup.YYYYMMDD-HHMMSS~):"
+    print_message "Backup files saved with timestamp (format: filename.backup.YYYYMMDD-HHMMSS~):"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-        print_message "- /etc/~sysctl.conf.backup.*~"
+        print_message "- /etc/sysctl.conf.backup.*~"
     fi
     if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
         if [ "$OS" = "debian" ]; then
-            print_message "- /etc/apt/~sources.list.backup.*~"
+            print_message "- /etc/apt/sources.list.backup.*~"
         else
-            print_message "- /etc/apt/~sources.list.backup.*~"
-            print_message "- /etc/apt/sources.list.d/~ubuntu.list.backup.*~"
+            print_message "- /etc/apt/sources.list.backup.*~"
+            print_message "- /etc/apt/sources.list.d/ubuntu.sources.backup.*~"
         fi
     fi
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
-        print_message "- /etc/ssh/~sshd_config.backup.*~"
+        print_message "- /etc/ssh/sshd_config.backup.*~"
     fi
     if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
-        print_message "- /etc/ufw/~before.rules.backup.*~"
+        print_message "- /etc/ufw/before.rules.backup.*~"
     fi
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
-        print_message "- /tmp/~crontab.backup.*~"
+        print_message "- /tmp/crontab.backup.*~"
     fi
     print_message ""
 fi
