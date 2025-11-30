@@ -250,7 +250,7 @@ if [ "$INTERACTIVE" = true ]; then
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
         echo ""
         print_message "Enter the command to run at reboot (leave empty to skip)"
-        print_message "Example: cd /root/ && make r"
+        print_message "Example: cd /root/bot && make r"
         read -p "Reboot command: " CRONTAB_REBOOT_CMD
         
         if [ -z "$CRONTAB_REBOOT_CMD" ]; then
@@ -399,10 +399,18 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Do you want to configure Debian repositories?"
         read -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
+        
+        # Ask about Tataranovich repository (only for Debian)
+        echo ""
+        print_message "Do you want to add Tataranovich repository (custom mc build)?"
+        print_message "This will install Midnight Commander from tataranovich.com"
+        read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
+        ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
     else
         print_message "Do you want to configure Ubuntu repositories?"
         read -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
+        ADD_TATARANOVICH_REPO="n"
     fi
     
     # Ask about MOTD installation
@@ -449,6 +457,7 @@ else
     INSTALL_MOTD="n"
     CUSTOM_PORT=""
     INSTALL_UFW_DOCKER="n"
+    ADD_TATARANOVICH_REPO="n"
     
     print_message "Non-interactive mode - using default settings:"
     print_message "- Root password: NO"
@@ -502,6 +511,9 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
 fi
 print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
+    print_message "  Tataranovich repository: YES"
+fi
 print_message "  Custom MOTD: $([ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ] && echo "YES" || echo "NO")"
 if [ ! -z "$CUSTOM_PORT" ]; then
     print_message "  UFW Custom Port: $CUSTOM_PORT"
@@ -613,7 +625,6 @@ COMMON_PACKAGES=(
     wget
     iptables
     ufw
-    mc
     nano
     apt-utils
     curl
@@ -831,6 +842,66 @@ EOF
     print_message "Ubuntu repositories configured in: $UBUNTU_LIST_FILE"
     print_message "Repositories enabled: main, restricted, universe, multiverse"
     apt update
+fi
+
+# ============================================
+# CONFIGURE TATARANOVICH REPOSITORY (DEBIAN ONLY)
+# ============================================
+
+if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
+    print_message "Configuring Tataranovich repository..."
+    
+    # Install required packages if not already installed
+    print_message "Installing prerequisites for Tataranovich repository..."
+    apt-get install -y curl gnupg
+    
+    # Download GPG key
+    print_message "Downloading Tataranovich GPG key..."
+    if curl -fsSL https://www.tataranovich.com/debian/gpg -o /etc/apt/trusted.gpg.d/tataranovich.gpg; then
+        print_message "GPG key downloaded successfully"
+        chmod 644 /etc/apt/trusted.gpg.d/tataranovich.gpg
+    else
+        print_error "Failed to download Tataranovich GPG key"
+        print_warning "Skipping Tataranovich repository configuration"
+        ADD_TATARANOVICH_REPO="n"
+    fi
+    
+    if [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; then
+        # Add repository
+        print_message "Adding Tataranovich repository..."
+        
+        # Use detected codename for repository
+        TATARANOVICH_CODENAME=${VERSION_CODENAME:-bookworm}
+        
+        echo "deb http://www.tataranovich.com/debian ${TATARANOVICH_CODENAME} main" | tee /etc/apt/sources.list.d/tataranovich.list > /dev/null
+        print_message "Tataranovich repository added: /etc/apt/sources.list.d/tataranovich.list"
+        
+        # Update package lists
+        print_message "Updating package lists with Tataranovich repository..."
+        if apt-get update; then
+            print_message "Package lists updated successfully"
+            
+            # Install mc from Tataranovich repository
+            print_message "Installing Midnight Commander from Tataranovich repository..."
+            if apt-get install -y mc; then
+                print_message "Midnight Commander installed successfully from Tataranovich repository"
+            else
+                print_warning "Failed to install mc from Tataranovich repository"
+                print_message "Installing mc from standard repositories..."
+                apt-get install -y mc || print_warning "Failed to install mc"
+            fi
+        else
+            print_warning "Failed to update package lists with Tataranovich repository"
+            print_message "Installing mc from standard repositories..."
+            apt-get install -y mc || print_warning "Failed to install mc"
+        fi
+    fi
+    echo ""
+else
+    # Install mc from standard repositories if Tataranovich is not used
+    print_message "Installing Midnight Commander from standard repositories..."
+    apt-get install -y mc || print_warning "Failed to install mc"
+    echo ""
 fi
 
 # Configure sysctl.conf
@@ -1433,6 +1504,9 @@ fi
 if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
     if [ "$OS" = "debian" ]; then
         print_message "- Debian repositories configured"
+        if [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; then
+            print_message "- Tataranovich repository: ADDED (custom mc)"
+        fi
     else
         print_message "- Ubuntu repositories configured (main, restricted, universe, multiverse)"
     fi
