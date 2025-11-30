@@ -249,15 +249,56 @@ if [ "$INTERACTIVE" = true ]; then
     
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
         echo ""
-        print_message "Enter the command to run at reboot (leave empty to skip)"
-        print_message "Example: cd /root/bot && make r"
-        read -p "Reboot command: " CRONTAB_REBOOT_CMD
+        print_message "Crontab configuration mode:"
+        print_message "You can add multiple cron tasks after the environment variables"
+        print_message "1) Enter tasks manually (line by line)"
+        print_message "2) Paste tasks from clipboard (recommended for multiple tasks)"
+        print_message "3) Skip adding tasks (only set environment variables)"
+        echo ""
+        read -p "Choose option [1-3] (default: 3): " CRONTAB_MODE
+        CRONTAB_MODE=${CRONTAB_MODE:-3}
         
-        if [ -z "$CRONTAB_REBOOT_CMD" ]; then
-            print_warning "No command provided, will only set crontab environment"
-        fi
+        case $CRONTAB_MODE in
+            1)
+                print_message "Enter cron tasks line by line"
+                print_message "Format: minute hour day month weekday command"
+                print_message "Example: 0 2 * * * /root/backup.sh"
+                print_message "Press CTRL+D when finished"
+                echo ""
+                CRONTAB_TASKS=""
+                while IFS= read -r line; do
+                    if [ ! -z "$line" ]; then
+                        CRONTAB_TASKS="${CRONTAB_TASKS}${line}"$'\n'
+                    fi
+                done
+                ;;
+            2)
+                print_message "Paste your cron tasks from clipboard and press ENTER on empty line when finished"
+                print_message "Format: minute hour day month weekday command"
+                print_message "Example:"
+                print_message "0 2 * * * /root/backup.sh"
+                print_message "*/5 * * * * /root/check.sh"
+                echo ""
+                CRONTAB_TASKS=""
+                while IFS= read -r line; do
+                    # Stop on empty line
+                    if [ -z "$line" ]; then
+                        break
+                    fi
+                    CRONTAB_TASKS="${CRONTAB_TASKS}${line}"$'\n'
+                done
+                ;;
+            3)
+                print_message "Skipping cron tasks - only environment variables will be set"
+                CRONTAB_TASKS=""
+                ;;
+            *)
+                print_warning "Invalid option. Skipping cron tasks."
+                CRONTAB_TASKS=""
+                ;;
+        esac
     else
-        CRONTAB_REBOOT_CMD=""
+        CRONTAB_TASKS=""
     fi
     
     echo ""
@@ -439,7 +480,8 @@ else
     USER_SSH_KEY=""
     INSTALL_ZSH="n"
     CONFIGURE_CRONTAB="n"
-    CRONTAB_REBOOT_CMD=""
+    CRONTAB_MODE="3"
+    CRONTAB_TASKS=""
     CONFIGURE_SSH="n"
     SSH_PORT="22"
     SSH_ALLOW_USERS=""
@@ -571,7 +613,6 @@ COMMON_PACKAGES=(
     libwww-perl
     apg
     makepasswd
-    mc
     mc-data
     squashfs-tools
     jq
@@ -1394,17 +1435,20 @@ if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
         print_message "Existing crontab backed up"
     fi
     
-    # Create new crontab content
-    CRONTAB_CONTENT="SHELL=/bin/sh
+    # Create new crontab content with environment variables
+    CRONTAB_CONTENT="# Crontab environment variables
+SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 HOME=/root
 MAILTO=\"\"
-LANG=en_US.UTF-8"
+LANG=en_US.UTF-8
+"
     
-    # Add reboot command if specified
-    if [ ! -z "$CRONTAB_REBOOT_CMD" ]; then
-        CRONTAB_CONTENT="$CRONTAB_CONTENT
-@reboot sh -c \"sleep 5 && $CRONTAB_REBOOT_CMD\""
+    # Add custom tasks if provided
+    if [ ! -z "$CRONTAB_TASKS" ]; then
+        CRONTAB_CONTENT="${CRONTAB_CONTENT}
+# Custom cron tasks
+${CRONTAB_TASKS}"
     fi
     
     # Install new crontab
@@ -1413,7 +1457,9 @@ LANG=en_US.UTF-8"
     
     # Display configured crontab
     print_message "Configured crontab:"
+    echo "----------------------------------------"
     crontab -l
+    echo "----------------------------------------"
     echo ""
 else
     print_message "Skipping crontab configuration (not requested)"
