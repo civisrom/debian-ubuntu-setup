@@ -547,7 +547,6 @@ apt update
 # Common packages for both Debian and Ubuntu
 COMMON_PACKAGES=(
     htop
-    mc
     wget
     iptables
     ufw
@@ -572,6 +571,7 @@ COMMON_PACKAGES=(
     libwww-perl
     apg
     makepasswd
+    mc
     mc-data
     squashfs-tools
     jq
@@ -705,7 +705,7 @@ if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
     
     # Backup original sources.list
     if [ -f /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)
+        cp /etc/apt/sources.list /etc/apt/~sources.list.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Original sources.list backed up"
     fi
     
@@ -741,7 +741,7 @@ if [ "$OS" = "ubuntu" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
     
     # Backup original sources.list if it exists and has content
     if [ -f /etc/apt/sources.list ] && [ -s /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)
+        cp /etc/apt/sources.list /etc/apt/~sources.list.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Original sources.list backed up"
         
         # Clear the main sources.list file
@@ -760,7 +760,7 @@ EOF
     
     # Backup if exists
     if [ -f "$UBUNTU_LIST_FILE" ]; then
-        cp "$UBUNTU_LIST_FILE" "${UBUNTU_LIST_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
+        cp "$UBUNTU_LIST_FILE" "/etc/apt/sources.list.d/~ubuntu.list.backup.$(date +%Y%m%d-%H%M%S)~"
         print_message "Existing ubuntu.list backed up"
     fi
     
@@ -912,7 +912,7 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     
     # Backup original sysctl.conf
     if [ -f /etc/sysctl.conf ]; then
-        cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)
+        cp /etc/sysctl.conf /etc/~sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Original sysctl.conf backed up"
     fi
     
@@ -974,7 +974,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     
     # Backup original sshd_config
     if [ -f "$SSHD_CONFIG" ]; then
-        cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)"
+        cp "$SSHD_CONFIG" "/etc/ssh/~sshd_config.backup.$(date +%Y%m%d-%H%M%S)~"
         print_message "Original sshd_config backed up"
     fi
     
@@ -1074,8 +1074,13 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     else
         print_error "SSH configuration test failed!"
         print_error "Restoring backup..."
-        cp "${SSHD_CONFIG}.backup."* "$SSHD_CONFIG" 2>/dev/null | head -1
-        print_error "SSH configuration restored from backup"
+        LATEST_BACKUP=$(ls -t /etc/ssh/~sshd_config.backup.*~ 2>/dev/null | head -1)
+        if [ ! -z "$LATEST_BACKUP" ]; then
+            cp "$LATEST_BACKUP" "$SSHD_CONFIG"
+            print_error "SSH configuration restored from backup"
+        else
+            print_error "No backup found to restore"
+        fi
     fi
 else
     print_message "Skipping SSH configuration (not requested)"
@@ -1131,7 +1136,7 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
             # Save original permissions
             ORIGINAL_PERMS=$(stat -c "%a" "$UFW_BEFORE_RULES" 2>/dev/null || stat -f "%Mp%Lp" "$UFW_BEFORE_RULES" 2>/dev/null)
             
-            cp "$UFW_BEFORE_RULES" "${UFW_BEFORE_RULES}.backup.$(date +%Y%m%d-%H%M%S)"
+            cp "$UFW_BEFORE_RULES" "/etc/ufw/~before.rules.backup.$(date +%Y%m%d-%H%M%S)~"
             print_message "Original before.rules backed up"
         fi
         
@@ -1377,7 +1382,7 @@ if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     
     # Backup existing crontab
     if crontab -l &>/dev/null; then
-        crontab -l > /tmp/crontab.backup.$(date +%Y%m%d-%H%M%S)
+        crontab -l > /tmp/~crontab.backup.$(date +%Y%m%d-%H%M%S)~
         print_message "Existing crontab backed up"
     fi
     
@@ -1556,26 +1561,26 @@ fi
 print_message ""
 
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
-    print_message "Backup files saved with timestamp:"
+    print_message "Backup files saved with timestamp (format: ~filename.backup.YYYYMMDD-HHMMSS~):"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-        print_message "- /etc/sysctl.conf.backup.*"
+        print_message "- /etc/~sysctl.conf.backup.*~"
     fi
     if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
         if [ "$OS" = "debian" ]; then
-            print_message "- /etc/apt/sources.list.backup.*"
+            print_message "- /etc/apt/~sources.list.backup.*~"
         else
-            print_message "- /etc/apt/sources.list.backup.*"
-            print_message "- /etc/apt/sources.list.d/ubuntu.list.backup.*"
+            print_message "- /etc/apt/~sources.list.backup.*~"
+            print_message "- /etc/apt/sources.list.d/~ubuntu.list.backup.*~"
         fi
     fi
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
-        print_message "- /etc/ssh/sshd_config.backup.*"
+        print_message "- /etc/ssh/~sshd_config.backup.*~"
     fi
     if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
-        print_message "- /etc/ufw/before.rules.backup.*"
+        print_message "- /etc/ufw/~before.rules.backup.*~"
     fi
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
-        print_message "- /tmp/crontab.backup.*"
+        print_message "- /tmp/~crontab.backup.*~"
     fi
     print_message ""
 fi
