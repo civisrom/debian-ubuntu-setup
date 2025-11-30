@@ -250,7 +250,7 @@ if [ "$INTERACTIVE" = true ]; then
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
         echo ""
         print_message "Enter the command to run at reboot (leave empty to skip)"
-        print_message "Example: cd /root/vpnbot && make r"
+        print_message "Example: cd /root/bot && make r"
         read -p "Reboot command: " CRONTAB_REBOOT_CMD
         
         if [ -z "$CRONTAB_REBOOT_CMD" ]; then
@@ -547,6 +547,7 @@ apt update
 # Common packages for both Debian and Ubuntu
 COMMON_PACKAGES=(
     htop
+    mc
     wget
     iptables
     ufw
