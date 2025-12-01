@@ -659,13 +659,18 @@ if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
 fi
 
 # Debian-specific packages
+# Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
+# You can comment out (#) any package to disable its installation
 DEBIAN_PACKAGES=(
     linux-headers-$(uname -r)
     openvswitch-switch-dpdk
 )
 
 # Ubuntu-specific packages
+# Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
+# You can comment out (#) any package to disable its installation
 UBUNTU_PACKAGES=(
+    linux-headers-$(uname -r)
     landscape-common
     update-notifier-common
     ubuntu-keyring
@@ -679,15 +684,23 @@ if [ "$OS" = "debian" ]; then
     print_message "Installing common packages for Debian..."
     apt install -y "${COMMON_PACKAGES[@]}"
     
-    print_message "Installing Debian-specific packages..."
-    apt install -y "${DEBIAN_PACKAGES[@]}" || print_warning "Some Debian-specific packages may not be available"
+    if [ ${#DEBIAN_PACKAGES[@]} -gt 0 ]; then
+        print_message "Installing Debian-specific packages..."
+        apt install -y "${DEBIAN_PACKAGES[@]}" || print_warning "Some Debian-specific packages may not be available"
+    else
+        print_message "No Debian-specific packages to install"
+    fi
     
 elif [ "$OS" = "ubuntu" ]; then
     print_message "Installing common packages for Ubuntu..."
     apt install -y "${COMMON_PACKAGES[@]}"
     
-    print_message "Installing Ubuntu-specific packages..."
-    apt install -y "${UBUNTU_PACKAGES[@]}" || print_warning "Some Ubuntu-specific packages may not be available"
+    if [ ${#UBUNTU_PACKAGES[@]} -gt 0 ]; then
+        print_message "Installing Ubuntu-specific packages..."
+        apt install -y "${UBUNTU_PACKAGES[@]}" || print_warning "Some Ubuntu-specific packages may not be available"
+    else
+        print_message "No Ubuntu-specific packages to install"
+    fi
 fi
 
 # ============================================
@@ -1493,75 +1506,99 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
     print_message "Building and installing latest version of ipset..."
     echo ""
     
-    # Get the latest ipset version
-    print_message "Fetching latest ipset version..."
-    LATEST_IPSET_VERSION=$(curl -s https://ipset.netfilter.org/ | grep -oP 'ipset-\K[0-9]+\.[0-9]+' | head -1)
+    # Check if kernel headers are installed
+    KERNEL_VERSION=$(uname -r)
+    KERNEL_HEADERS_DIR="/lib/modules/${KERNEL_VERSION}/build"
     
-    if [ -z "$LATEST_IPSET_VERSION" ]; then
-        print_warning "Could not fetch latest ipset version, using fallback: 7.24"
-        LATEST_IPSET_VERSION="7.24"
-    fi
-    
-    print_message "Latest ipset version: $LATEST_IPSET_VERSION"
-    
-    # Download ipset
-    IPSET_ARCHIVE="ipset-${LATEST_IPSET_VERSION}.tar.bz2"
-    IPSET_URL="https://ipset.netfilter.org/${IPSET_ARCHIVE}"
-    
-    print_message "Downloading ipset from: $IPSET_URL"
-    if wget -q --show-progress "$IPSET_URL" -O "/tmp/${IPSET_ARCHIVE}"; then
-        print_message "ipset downloaded successfully"
+    if [ ! -d "$KERNEL_HEADERS_DIR" ]; then
+        print_error "Kernel headers not found at: $KERNEL_HEADERS_DIR"
+        print_error "Installing kernel headers..."
         
-        # Extract ipset
-        print_message "Extracting ipset..."
-        cd /tmp
-        tar xjf "${IPSET_ARCHIVE}"
-        
-        IPSET_DIR="ipset-${LATEST_IPSET_VERSION}"
-        
-        if [ -d "/tmp/${IPSET_DIR}" ]; then
-            cd "/tmp/${IPSET_DIR}"
-            
-            # Configure
-            print_message "Configuring ipset..."
-            if ./configure --prefix=/usr; then
-                print_message "Configuration successful"
-                
-                # Build
-                print_message "Building ipset (using $(nproc) cores)..."
-                if make -j$(nproc); then
-                    print_message "Build successful"
-                    
-                    # Install
-                    print_message "Installing ipset..."
-                    if make install; then
-                        print_message "ipset installed successfully"
-                        
-                        # Verify installation
-                        if ipset --version &> /dev/null; then
-                            IPSET_INSTALLED_VERSION=$(ipset --version)
-                            print_message "ipset version: $IPSET_INSTALLED_VERSION"
-                        else
-                            print_warning "ipset installed but version check failed"
-                        fi
-                    else
-                        print_error "Failed to install ipset"
-                    fi
-                else
-                    print_error "Failed to build ipset"
-                fi
-            else
-                print_error "Failed to configure ipset"
-            fi
-            
-            # Cleanup
-            cd /tmp
-            rm -rf "/tmp/${IPSET_DIR}" "/tmp/${IPSET_ARCHIVE}"
+        if apt install -y linux-headers-${KERNEL_VERSION}; then
+            print_message "Kernel headers installed successfully"
         else
-            print_error "Failed to extract ipset"
+            print_error "Failed to install kernel headers"
+            print_error "ipset compilation requires kernel headers"
+            print_message "Try manually: sudo apt install linux-headers-$(uname -r)"
+            print_message "Skipping ipset installation"
+            INSTALL_IPSET="n"
         fi
     else
-        print_error "Failed to download ipset"
+        print_message "Kernel headers found: $KERNEL_HEADERS_DIR"
+    fi
+    
+    if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
+        # Get the latest ipset version
+        print_message "Fetching latest ipset version..."
+        LATEST_IPSET_VERSION=$(curl -s https://ipset.netfilter.org/ | grep -oP 'ipset-\K[0-9]+\.[0-9]+' | head -1)
+        
+        if [ -z "$LATEST_IPSET_VERSION" ]; then
+            print_warning "Could not fetch latest ipset version, using fallback: 7.24"
+            LATEST_IPSET_VERSION="7.24"
+        fi
+        
+        print_message "Latest ipset version: $LATEST_IPSET_VERSION"
+        
+        # Download ipset
+        IPSET_ARCHIVE="ipset-${LATEST_IPSET_VERSION}.tar.bz2"
+        IPSET_URL="https://ipset.netfilter.org/${IPSET_ARCHIVE}"
+        
+        print_message "Downloading ipset from: $IPSET_URL"
+        if wget -q --show-progress "$IPSET_URL" -O "/tmp/${IPSET_ARCHIVE}"; then
+            print_message "ipset downloaded successfully"
+            
+            # Extract ipset
+            print_message "Extracting ipset..."
+            cd /tmp
+            tar xjf "${IPSET_ARCHIVE}"
+            
+            IPSET_DIR="ipset-${LATEST_IPSET_VERSION}"
+            
+            if [ -d "/tmp/${IPSET_DIR}" ]; then
+                cd "/tmp/${IPSET_DIR}"
+                
+                # Configure with proper kernel source
+                print_message "Configuring ipset with kernel headers..."
+                if ./configure --prefix=/usr --with-kmod=no; then
+                    print_message "Configuration successful"
+                    
+                    # Build
+                    print_message "Building ipset (using $(nproc) cores)..."
+                    if make -j$(nproc); then
+                        print_message "Build successful"
+                        
+                        # Install
+                        print_message "Installing ipset..."
+                        if make install; then
+                            print_message "ipset installed successfully"
+                            
+                            # Verify installation
+                            if ipset --version &> /dev/null; then
+                                IPSET_INSTALLED_VERSION=$(ipset --version)
+                                print_message "ipset version: $IPSET_INSTALLED_VERSION"
+                            else
+                                print_warning "ipset installed but version check failed"
+                            fi
+                        else
+                            print_error "Failed to install ipset"
+                        fi
+                    else
+                        print_error "Failed to build ipset"
+                    fi
+                else
+                    print_error "Failed to configure ipset"
+                    print_error "Check that kernel headers are properly installed"
+                fi
+                
+                # Cleanup
+                cd /tmp
+                rm -rf "/tmp/${IPSET_DIR}" "/tmp/${IPSET_ARCHIVE}"
+            else
+                print_error "Failed to extract ipset"
+            fi
+        else
+            print_error "Failed to download ipset"
+        fi
     fi
     
     echo ""
