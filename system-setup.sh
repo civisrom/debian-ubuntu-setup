@@ -660,6 +660,8 @@ fi
 
 # Debian-specific packages
 DEBIAN_PACKAGES=(
+    apt install linux-headers-$(uname -r)
+    openvswitch-switch-dpdk
 )
 
 # Ubuntu-specific packages
