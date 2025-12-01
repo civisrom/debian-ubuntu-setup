@@ -692,7 +692,6 @@ COMMON_PACKAGES=(
     python3-venv
     vim
     p7zip-full
-    p7zip-rar
 )
 
 # Add zsh if requested
