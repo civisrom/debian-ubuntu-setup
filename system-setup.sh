@@ -463,8 +463,28 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Note: This will make your server invisible to ping"
         read -p "Block ICMP? (y/N): " BLOCK_ICMP
         BLOCK_ICMP=${BLOCK_ICMP:-n}
+        
+        # Ask about custom UFW Docker rules
+        echo ""
+        print_message "Do you want to install custom UFW Docker rules script?"
+        print_message "This will download and execute ufw-docker-rules-v4.sh from GitHub"
+        print_message "Note: The script will run AFTER all other installations complete"
+        read -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
+        INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
+        
+        if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
+            echo ""
+            print_message "The archive is password-protected. Please enter the password:"
+            read -s -p "Password: " UFW_CUSTOM_RULES_PASSWORD
+            echo ""
+            if [ -z "$UFW_CUSTOM_RULES_PASSWORD" ]; then
+                print_warning "No password provided. Custom UFW rules will not be installed."
+                INSTALL_UFW_CUSTOM_RULES="n"
+            fi
+        fi
     else
         BLOCK_ICMP="n"
+        INSTALL_UFW_CUSTOM_RULES="n"
     fi
     
     # Ask about sysctl configuration
@@ -531,6 +551,8 @@ else
     INSTALL_DOCKER="n"
     CONFIGURE_UFW="y"
     BLOCK_ICMP="n"
+    INSTALL_UFW_CUSTOM_RULES="n"
+    UFW_CUSTOM_RULES_PASSWORD=""
     CONFIGURE_SYSCTL="y"
     CONFIGURE_REPOS="y"
     INSTALL_MOTD="n"
@@ -591,6 +613,7 @@ print_message "  ipset: $([ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y"
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     print_message "  Block ICMP (ping): $([ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "  Custom UFW Docker rules: $([ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ] && echo "YES" || echo "NO")"
 fi
 print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
@@ -668,6 +691,8 @@ COMMON_PACKAGES=(
     python3
     python3-venv
     vim
+    p7zip-full
+    p7zip-rar
 )
 
 # Add zsh if requested
@@ -1763,6 +1788,87 @@ else
     print_message "Skipping MOTD installation (not requested)"
 fi
 
+# ============================================
+# INSTALL CUSTOM UFW DOCKER RULES
+# ============================================
+
+if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
+    print_message "Installing custom UFW Docker rules..."
+    echo ""
+    
+    # Check if p7zip is installed, install if needed
+    if ! command -v 7z &> /dev/null; then
+        print_message "Installing p7zip-full for archive extraction..."
+        apt install -y p7zip-full
+    fi
+    
+    UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
+    UFW_ARCHIVE_FILE="/tmp/ufw-docker-rules-v4.7z"
+    UFW_EXTRACT_DIR="/tmp/ufw-docker-rules"
+    UFW_SCRIPT_NAME="ufw-docker-rules-v4.sh"
+    UFW_INSTALL_PATH="/opt/${UFW_SCRIPT_NAME}"
+    
+    print_message "Downloading custom UFW rules archive..."
+    if wget -q --show-progress "$UFW_ARCHIVE_URL" -O "$UFW_ARCHIVE_FILE"; then
+        print_message "Archive downloaded successfully"
+        
+        # Create extraction directory
+        mkdir -p "$UFW_EXTRACT_DIR"
+        
+        # Extract with password
+        print_message "Extracting archive..."
+        if 7z x -p"${UFW_CUSTOM_RULES_PASSWORD}" -o"${UFW_EXTRACT_DIR}" "$UFW_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+            print_message "Archive extracted successfully"
+            
+            # Find the script file
+            if [ -f "${UFW_EXTRACT_DIR}/${UFW_SCRIPT_NAME}" ]; then
+                print_message "Installing script to ${UFW_INSTALL_PATH}..."
+                
+                # Copy script to /opt
+                cp "${UFW_EXTRACT_DIR}/${UFW_SCRIPT_NAME}" "$UFW_INSTALL_PATH"
+                
+                # Set executable permissions
+                chmod +x "$UFW_INSTALL_PATH"
+                print_message "Script installed with executable permissions"
+                
+                # Execute the script
+                print_message "Executing custom UFW Docker rules script..."
+                echo ""
+                print_header "═══════════════════════════════════════════════════"
+                print_header "  Custom UFW Docker Rules Script Output"
+                print_header "═══════════════════════════════════════════════════"
+                echo ""
+                
+                if bash "$UFW_INSTALL_PATH"; then
+                    echo ""
+                    print_header "═══════════════════════════════════════════════════"
+                    print_message "Custom UFW Docker rules applied successfully"
+                else
+                    echo ""
+                    print_header "═══════════════════════════════════════════════════"
+                    print_warning "Custom UFW Docker rules script completed with warnings"
+                fi
+            else
+                print_error "Script file not found in archive: ${UFW_SCRIPT_NAME}"
+            fi
+            
+            # Cleanup
+            rm -rf "$UFW_EXTRACT_DIR"
+            rm -f "$UFW_ARCHIVE_FILE"
+        else
+            print_error "Failed to extract archive. Check if password is correct."
+            print_error "Password authentication failed or archive is corrupted"
+            rm -f "$UFW_ARCHIVE_FILE"
+        fi
+    else
+        print_error "Failed to download custom UFW rules archive"
+    fi
+    
+    echo ""
+else
+    print_message "Skipping custom UFW Docker rules (not requested)"
+fi
+
 # Final message
 echo ""
 print_header "═════════════════════════════════════════"
@@ -1906,6 +2012,17 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     print_message "- Custom MOTD: Installed"
 else
     print_message "- Custom MOTD: Not installed"
+fi
+
+if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
+    if [ -f "/opt/ufw-docker-rules-v4.sh" ]; then
+        print_message "- Custom UFW Docker rules: Installed and executed"
+        print_message "  Script location: /opt/ufw-docker-rules-v4.sh"
+    else
+        print_message "- Custom UFW Docker rules: Installation attempted but failed"
+    fi
+else
+    print_message "- Custom UFW Docker rules: Not installed"
 fi
 
 print_message ""
