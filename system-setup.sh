@@ -414,6 +414,26 @@ if [ "$INTERACTIVE" = true ]; then
     read -p "Install ufw-docker? (y/N): " INSTALL_UFW_DOCKER
     INSTALL_UFW_DOCKER=${INSTALL_UFW_DOCKER:-n}
     
+    # Ask about Go installation
+    echo ""
+    print_message "Do you want to install the latest version of Go?"
+    if [ ! -z "$NEW_USERNAME" ]; then
+        print_message "Go will be installed for user: $NEW_USERNAME"
+    else
+        print_message "Note: Go installation requires a user to be created"
+    fi
+    read -p "Install Go? (y/N): " INSTALL_GO
+    INSTALL_GO=${INSTALL_GO:-n}
+    
+    # Ask about ipset installation
+    echo ""
+    print_message "Do you want to build and install the latest version of ipset?"
+    print_message "This will compile ipset from source"
+    read -p "Install ipset? (y/N): " INSTALL_IPSET
+    INSTALL_IPSET=${INSTALL_IPSET:-n}
+    
+    echo ""
+    
     # Ask about UFW configuration
     print_message "Do you want to configure UFW firewall?"
     read -p "Configure UFW? (Y/n): " CONFIGURE_UFW
@@ -500,6 +520,8 @@ else
     CUSTOM_PORT=""
     INSTALL_UFW_DOCKER="n"
     ADD_TATARANOVICH_REPO="n"
+    INSTALL_GO="n"
+    INSTALL_IPSET="n"
     
     print_message "Non-interactive mode - using default settings:"
     print_message "- Root password: NO"
@@ -547,6 +569,8 @@ fi
 print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ] && echo "YES (Path: $VENV_PATH)" || echo "NO")"
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
+print_message "  Go language: $([ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ] && echo "YES (latest version)" || echo "NO")"
+print_message "  ipset: $([ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ] && echo "YES (build from source)" || echo "NO")"
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     print_message "  Block ICMP (ping): $([ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] && echo "YES" || echo "NO")"
@@ -1299,10 +1323,19 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             systemctl start docker
             systemctl enable docker
             
+            # Ensure docker group exists
+            if ! getent group docker > /dev/null 2>&1; then
+                print_message "Creating docker group..."
+                groupadd docker
+            fi
+            
             # Add new user to docker group if created
             if [ ! -z "$NEW_USERNAME" ]; then
                 usermod -aG docker "$NEW_USERNAME"
                 print_message "User $NEW_USERNAME added to docker group"
+                
+                # Note about newgrp
+                print_message "To activate docker group without logout, user can run: newgrp docker"
             fi
             
             # Add current user to docker group if not root
@@ -1312,7 +1345,7 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             fi
             
             if [ ! -z "$NEW_USERNAME" ] || [ ! -z "$SUDO_USER" ]; then
-                print_warning "Please log out and log back in for docker group changes to take effect"
+                print_warning "Users need to log out and log back in (or run 'newgrp docker') for docker group to take effect"
             fi
         else
             print_error "Failed to download Docker installation script"
@@ -1357,6 +1390,181 @@ if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
     fi
 else
     print_message "Skipping ufw-docker installation (not requested)"
+fi
+
+# ============================================
+# INSTALL GO LANGUAGE
+# ============================================
+
+if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
+    if [ -z "$NEW_USERNAME" ]; then
+        print_warning "Cannot install Go: No user was created"
+        print_warning "Go installation requires a non-root user"
+    else
+        print_message "Installing latest version of Go for user $NEW_USERNAME..."
+        echo ""
+        
+        USER_HOME=$(eval echo ~$NEW_USERNAME)
+        
+        # Get the latest Go version from official website
+        print_message "Fetching latest Go version..."
+        LATEST_GO_VERSION=$(curl -s https://go.dev/VERSION?m=text | head -1)
+        
+        if [ -z "$LATEST_GO_VERSION" ]; then
+            print_warning "Could not fetch latest Go version, using fallback: go1.23.4"
+            LATEST_GO_VERSION="go1.23.4"
+        fi
+        
+        print_message "Latest Go version: $LATEST_GO_VERSION"
+        
+        # Download Go
+        GO_ARCHIVE="${LATEST_GO_VERSION}.linux-amd64.tar.gz"
+        GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
+        
+        print_message "Downloading Go from: $GO_URL"
+        if wget -q --show-progress "$GO_URL" -O "/tmp/${GO_ARCHIVE}"; then
+            print_message "Go downloaded successfully"
+            
+            # Remove old Go installation
+            if [ -d /usr/local/go ]; then
+                print_message "Removing old Go installation..."
+                rm -rf /usr/local/go
+            fi
+            
+            # Extract Go
+            print_message "Extracting Go..."
+            tar -C /usr/local -xzf "/tmp/${GO_ARCHIVE}"
+            print_message "Go extracted to /usr/local/go"
+            
+            # Cleanup
+            rm "/tmp/${GO_ARCHIVE}"
+            
+            # Add Go to PATH for the user
+            print_message "Configuring Go environment for $NEW_USERNAME..."
+            
+            # Determine which shell config file to use
+            if [ -f "$USER_HOME/.zshrc" ]; then
+                SHELL_RC="$USER_HOME/.zshrc"
+            elif [ -f "$USER_HOME/.bashrc" ]; then
+                SHELL_RC="$USER_HOME/.bashrc"
+            else
+                SHELL_RC="$USER_HOME/.profile"
+            fi
+            
+            # Add Go to PATH if not already present
+            if ! grep -q "export PATH=.*:/usr/local/go/bin" "$SHELL_RC" 2>/dev/null; then
+                sudo -u "$NEW_USERNAME" bash << EOF
+                    echo "" >> "$SHELL_RC"
+                    echo "# Go language" >> "$SHELL_RC"
+                    echo "export PATH=\$PATH:/usr/local/go/bin" >> "$SHELL_RC"
+                    echo "export PATH=\$PATH:\$HOME/go/bin" >> "$SHELL_RC"
+EOF
+                print_message "Go PATH added to $SHELL_RC"
+            else
+                print_message "Go PATH already configured in $SHELL_RC"
+            fi
+            
+            # Verify installation
+            if /usr/local/go/bin/go version &> /dev/null; then
+                GO_INSTALLED_VERSION=$(/usr/local/go/bin/go version)
+                print_message "Go installed successfully: $GO_INSTALLED_VERSION"
+                print_message "Go binary location: /usr/local/go/bin/go"
+                print_message "User $NEW_USERNAME can use Go after reloading shell or running: source $SHELL_RC"
+            else
+                print_error "Go installation verification failed"
+            fi
+        else
+            print_error "Failed to download Go"
+        fi
+        
+        echo ""
+    fi
+else
+    print_message "Skipping Go installation (not requested)"
+fi
+
+# ============================================
+# BUILD AND INSTALL IPSET
+# ============================================
+
+if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
+    print_message "Building and installing latest version of ipset..."
+    echo ""
+    
+    # Get the latest ipset version
+    print_message "Fetching latest ipset version..."
+    LATEST_IPSET_VERSION=$(curl -s https://ipset.netfilter.org/ | grep -oP 'ipset-\K[0-9]+\.[0-9]+' | head -1)
+    
+    if [ -z "$LATEST_IPSET_VERSION" ]; then
+        print_warning "Could not fetch latest ipset version, using fallback: 7.24"
+        LATEST_IPSET_VERSION="7.24"
+    fi
+    
+    print_message "Latest ipset version: $LATEST_IPSET_VERSION"
+    
+    # Download ipset
+    IPSET_ARCHIVE="ipset-${LATEST_IPSET_VERSION}.tar.bz2"
+    IPSET_URL="https://ipset.netfilter.org/${IPSET_ARCHIVE}"
+    
+    print_message "Downloading ipset from: $IPSET_URL"
+    if wget -q --show-progress "$IPSET_URL" -O "/tmp/${IPSET_ARCHIVE}"; then
+        print_message "ipset downloaded successfully"
+        
+        # Extract ipset
+        print_message "Extracting ipset..."
+        cd /tmp
+        tar xjf "${IPSET_ARCHIVE}"
+        
+        IPSET_DIR="ipset-${LATEST_IPSET_VERSION}"
+        
+        if [ -d "/tmp/${IPSET_DIR}" ]; then
+            cd "/tmp/${IPSET_DIR}"
+            
+            # Configure
+            print_message "Configuring ipset..."
+            if ./configure --prefix=/usr; then
+                print_message "Configuration successful"
+                
+                # Build
+                print_message "Building ipset (using $(nproc) cores)..."
+                if make -j$(nproc); then
+                    print_message "Build successful"
+                    
+                    # Install
+                    print_message "Installing ipset..."
+                    if make install; then
+                        print_message "ipset installed successfully"
+                        
+                        # Verify installation
+                        if ipset --version &> /dev/null; then
+                            IPSET_INSTALLED_VERSION=$(ipset --version)
+                            print_message "ipset version: $IPSET_INSTALLED_VERSION"
+                        else
+                            print_warning "ipset installed but version check failed"
+                        fi
+                    else
+                        print_error "Failed to install ipset"
+                    fi
+                else
+                    print_error "Failed to build ipset"
+                fi
+            else
+                print_error "Failed to configure ipset"
+            fi
+            
+            # Cleanup
+            cd /tmp
+            rm -rf "/tmp/${IPSET_DIR}" "/tmp/${IPSET_ARCHIVE}"
+        else
+            print_error "Failed to extract ipset"
+        fi
+    else
+        print_error "Failed to download ipset"
+    fi
+    
+    echo ""
+else
+    print_message "Skipping ipset installation (not requested)"
 fi
 
 # Create Python virtual environment
@@ -1603,6 +1811,38 @@ else
         print_message "- ufw-docker: Installation attempted but not found"
     else
         print_message "- ufw-docker: Not installed"
+    fi
+fi
+
+if command -v go &> /dev/null || [ -f /usr/local/go/bin/go ]; then
+    if [ -f /usr/local/go/bin/go ]; then
+        GO_VERSION=$(/usr/local/go/bin/go version 2>/dev/null || echo "unknown")
+        print_message "- Go: Installed ($GO_VERSION)"
+        if [ ! -z "$NEW_USERNAME" ]; then
+            USER_HOME=$(eval echo ~$NEW_USERNAME)
+            if [ -f "$USER_HOME/.zshrc" ]; then
+                print_message "  Configured in: $USER_HOME/.zshrc"
+            elif [ -f "$USER_HOME/.bashrc" ]; then
+                print_message "  Configured in: $USER_HOME/.bashrc"
+            fi
+        fi
+    fi
+else
+    if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
+        print_message "- Go: Installation attempted but not found"
+    else
+        print_message "- Go: Not installed"
+    fi
+fi
+
+if command -v ipset &> /dev/null; then
+    IPSET_VERSION=$(ipset --version 2>/dev/null || echo "unknown")
+    print_message "- ipset: Installed ($IPSET_VERSION)"
+else
+    if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
+        print_message "- ipset: Installation attempted but not found"
+    else
+        print_message "- ipset: Not installed"
     fi
 fi
 
