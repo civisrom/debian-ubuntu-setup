@@ -273,20 +273,37 @@ if [ "$INTERACTIVE" = true ]; then
                 done
                 ;;
             2)
-                print_message "Paste your cron tasks from clipboard and press ENTER on empty line when finished"
+                print_message "Paste your cron tasks from clipboard"
+                print_message "After pasting, type 'END' on a new line and press ENTER to finish"
+                print_message ""
                 print_message "Format: minute hour day month weekday command"
                 print_message "Example:"
-                print_message "0 2 * * * /root/backup.sh"
-                print_message "*/5 * * * * /root/check.sh"
+                print_message "  0 2 * * * /root/backup.sh"
+                print_message "  */5 * * * * /root/check.sh"
+                print_message "  @reboot /root/startup.sh"
+                print_message ""
+                print_message "Paste now and type END when done:"
                 echo ""
                 CRONTAB_TASKS=""
                 while IFS= read -r line; do
-                    # Stop on empty line
-                    if [ -z "$line" ]; then
+                    # Stop on END marker
+                    if [ "$line" = "END" ] || [ "$line" = "end" ]; then
                         break
                     fi
+                    # Add line (including empty lines if they're part of the paste)
                     CRONTAB_TASKS="${CRONTAB_TASKS}${line}"$'\n'
                 done
+                
+                # Remove trailing newline if exists
+                CRONTAB_TASKS="${CRONTAB_TASKS%$'\n'}"
+                
+                if [ -z "$CRONTAB_TASKS" ]; then
+                    print_warning "No tasks entered"
+                else
+                    # Count non-empty lines
+                    TASK_COUNT=$(echo "$CRONTAB_TASKS" | grep -c -v '^[[:space:]]*$')
+                    print_message "Captured $TASK_COUNT cron task(s)"
+                fi
                 ;;
             3)
                 print_message "Skipping cron tasks - only environment variables will be set"
@@ -1689,6 +1706,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 HOME=/root
 MAILTO=\"\"
 LANG=en_US.UTF-8
+#######
 "
     
     # Add custom tasks if provided
