@@ -467,7 +467,7 @@ if [ "$INTERACTIVE" = true ]; then
         # Ask about custom UFW Docker rules
         echo ""
         print_message "Do you want to install custom UFW Docker rules script?"
-        print_message "This will download and execute ufw-docker-rules-v4.sh from GitHub"
+        print_message "This will download and execute ufw-docker-rules-v6.sh from GitHub"
         print_message "Note: The script will run AFTER all other installations complete"
         read -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
         INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
@@ -1804,7 +1804,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
     UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
     UFW_ARCHIVE_FILE="/tmp/ufw-docker-rules-v4.7z"
     UFW_EXTRACT_DIR="/tmp/ufw-docker-rules"
-    UFW_SCRIPT_NAME="ufw-docker-rules-v4.sh"
+    UFW_SCRIPT_NAME="ufw-docker-rules-v6.sh"
     UFW_INSTALL_PATH="/opt/${UFW_SCRIPT_NAME}"
     
     print_message "Downloading custom UFW rules archive..."
@@ -2014,9 +2014,9 @@ else
 fi
 
 if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
-    if [ -f "/opt/ufw-docker-rules-v4.sh" ]; then
+    if [ -f "/opt/ufw-docker-rules-v6.sh" ]; then
         print_message "- Custom UFW Docker rules: Installed and executed"
-        print_message "  Script location: /opt/ufw-docker-rules-v4.sh"
+        print_message "  Script location: /opt/ufw-docker-rules-v6.sh"
     else
         print_message "- Custom UFW Docker rules: Installation attempted but failed"
     fi
