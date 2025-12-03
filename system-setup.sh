@@ -125,6 +125,15 @@ print_header "══════════════════════
 echo ""
 
 if [ "$INTERACTIVE" = true ]; then
+    # Ask about RustDesk installation
+    print_message "Do you want to install RustDesk server in Docker?"
+    print_message "This will create /root/rustdesk directory with docker-compose.yml"
+    print_message "and install it as a systemd service"
+    read -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
+    INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
+    
+    echo ""
+    
     # Ask about root password
     print_message "Do you want to set a password for root user?"
     read -p "Set root password? (y/N): " SET_ROOT_PASSWORD
@@ -467,7 +476,7 @@ if [ "$INTERACTIVE" = true ]; then
         # Ask about custom UFW Docker rules
         echo ""
         print_message "Do you want to install custom UFW Docker rules script?"
-        print_message "This will download and execute ufw-docker-rules-v6.sh from GitHub"
+        print_message "This will download and execute ufw-docker-rules-v4.sh from GitHub"
         print_message "Note: The script will run AFTER all other installations complete"
         read -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
         INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
@@ -583,6 +592,7 @@ echo ""
 print_header "═══════════════════════════════════════════════"
 print_message "Configuration Summary:"
 print_message "  OS: $OS $VERSION ($VERSION_CODENAME)"
+print_message "  RustDesk Server: $([ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ] && echo "YES (Docker)" || echo "NO")"
 print_message "  Root password: $([ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  New user: $([ ! -z "$NEW_USERNAME" ] && echo "YES ($NEW_USERNAME)" || echo "NO")"
 if [ ! -z "$NEW_USERNAME" ]; then
@@ -646,9 +656,108 @@ echo ""
 print_message "Starting installation..."
 echo ""
 
+# ============================================
+# INSTALL RUSTDESK SERVER (DOCKER)
+# ============================================
+
+if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+    print_message "Installing RustDesk server in Docker..."
+    echo ""
+    
+    RUSTDESK_DIR="/root/rustdesk"
+    RUSTDESK_COMPOSE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/docker-compose.yml"
+    RUSTDESK_SERVICE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/rustdesk-compose.service"
+    RUSTDESK_SERVICE_PATH="/etc/systemd/system/rustdesk-compose.service"
+    
+    # Create rustdesk directory
+    print_message "Creating directory: $RUSTDESK_DIR..."
+    if mkdir -p "$RUSTDESK_DIR"; then
+        print_message "Directory created successfully"
+    else
+        print_error "CRITICAL: Failed to create directory $RUSTDESK_DIR"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+    
+    # Download docker-compose.yml
+    print_message "Downloading docker-compose.yml..."
+    if curl -fsSL "$RUSTDESK_COMPOSE_URL" -o "${RUSTDESK_DIR}/docker-compose.yml"; then
+        print_message "docker-compose.yml downloaded successfully"
+    else
+        print_error "CRITICAL: Failed to download docker-compose.yml"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+    
+    # Download systemd service file
+    print_message "Downloading systemd service file..."
+    if curl -fsSL "$RUSTDESK_SERVICE_URL" -o "$RUSTDESK_SERVICE_PATH"; then
+        print_message "Service file downloaded successfully"
+    else
+        print_error "CRITICAL: Failed to download service file"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+    
+    # Reload systemd daemon
+    print_message "Reloading systemd daemon..."
+    if systemctl daemon-reload; then
+        print_message "Systemd daemon reloaded successfully"
+    else
+        print_error "CRITICAL: Failed to reload systemd daemon"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+    
+    # Enable rustdesk service
+    print_message "Enabling rustdesk-compose service..."
+    if systemctl enable rustdesk-compose.service; then
+        print_message "Service enabled successfully"
+    else
+        print_error "CRITICAL: Failed to enable rustdesk-compose service"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+    
+    # Check if Docker is installed (needed to start the service)
+    if command -v docker &> /dev/null; then
+        print_message "Docker found, starting rustdesk-compose service..."
+        if systemctl start rustdesk-compose.service; then
+            print_message "RustDesk service started successfully"
+            
+            # Check service status
+            sleep 3
+            if systemctl is-active --quiet rustdesk-compose.service; then
+                print_message "RustDesk service is running"
+            else
+                print_warning "RustDesk service is enabled but not running (Docker might not be installed yet)"
+                print_message "Service will start automatically after Docker installation"
+            fi
+        else
+            print_warning "Failed to start rustdesk-compose service"
+            print_message "Service will start automatically after Docker installation"
+        fi
+    else
+        print_message "Docker not installed yet - RustDesk service will start after Docker is installed"
+    fi
+    
+    print_message "RustDesk installation completed"
+    print_message "Directory: $RUSTDESK_DIR"
+    print_message "Service: rustdesk-compose.service"
+    echo ""
+else
+    print_message "Skipping RustDesk installation (not requested)"
+fi
+
 # Update package lists
 print_message "Updating package lists..."
-apt update
+if apt update; then
+    print_message "Package lists updated successfully"
+else
+    print_error "CRITICAL: Failed to update package lists"
+    print_error "Installation cannot continue"
+    exit 1
+fi
 
 # Common packages for both Debian and Ubuntu
 COMMON_PACKAGES=(
@@ -691,7 +800,6 @@ COMMON_PACKAGES=(
     python3
     python3-venv
     vim
-    p7zip-full
 )
 
 # Add zsh if requested
@@ -1804,7 +1912,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
     UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
     UFW_ARCHIVE_FILE="/tmp/ufw-docker-rules-v4.7z"
     UFW_EXTRACT_DIR="/tmp/ufw-docker-rules"
-    UFW_SCRIPT_NAME="ufw-docker-rules-v6.sh"
+    UFW_SCRIPT_NAME="ufw-docker-rules-v4.sh"
     UFW_INSTALL_PATH="/opt/${UFW_SCRIPT_NAME}"
     
     print_message "Downloading custom UFW rules archive..."
@@ -1876,6 +1984,23 @@ print_header "══════════════════════
 print_message "Summary:"
 print_message "- OS: $OS $VERSION ($VERSION_CODENAME)"
 print_message "- Packages installed"
+
+if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+    if systemctl is-enabled --quiet rustdesk-compose.service 2>/dev/null; then
+        print_message "- RustDesk Server: Installed and enabled"
+        print_message "  Directory: /root/rustdesk"
+        print_message "  Service: rustdesk-compose.service"
+        if systemctl is-active --quiet rustdesk-compose.service; then
+            print_message "  Status: Running"
+        else
+            print_message "  Status: Enabled (will start with Docker)"
+        fi
+    else
+        print_message "- RustDesk Server: Installation attempted but service not enabled"
+    fi
+else
+    print_message "- RustDesk Server: Not installed"
+fi
 
 if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
     print_message "- Root password: SET"
@@ -2014,9 +2139,9 @@ else
 fi
 
 if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
-    if [ -f "/opt/ufw-docker-rules-v6.sh" ]; then
+    if [ -f "/opt/ufw-docker-rules-v4.sh" ]; then
         print_message "- Custom UFW Docker rules: Installed and executed"
-        print_message "  Script location: /opt/ufw-docker-rules-v6.sh"
+        print_message "  Script location: /opt/ufw-docker-rules-v4.sh"
     else
         print_message "- Custom UFW Docker rules: Installation attempted but failed"
     fi
