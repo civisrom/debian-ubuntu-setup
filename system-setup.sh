@@ -476,12 +476,26 @@ if [ "$INTERACTIVE" = true ]; then
         # Ask about custom UFW Docker rules
         echo ""
         print_message "Do you want to install custom UFW Docker rules script?"
-        print_message "This will download and execute ufw-docker-rules-v4.sh from GitHub"
+        print_message "Available versions:"
+        print_message "  v4 - ufw-docker-rules-v4.sh"
+        print_message "  v6 - ufw-docker-rules-v6.sh (newer version)"
         print_message "Note: The script will run AFTER all other installations complete"
         read -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
         INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
         
         if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
+            echo ""
+            print_message "Select version:"
+            read -p "Enter version (4 or 6, default: 6): " UFW_RULES_VERSION
+            UFW_RULES_VERSION=${UFW_RULES_VERSION:-6}
+            
+            if [ "$UFW_RULES_VERSION" != "4" ] && [ "$UFW_RULES_VERSION" != "6" ]; then
+                print_warning "Invalid version. Using v6 as default."
+                UFW_RULES_VERSION="6"
+            fi
+            
+            print_message "Selected version: v${UFW_RULES_VERSION}"
+            
             echo ""
             print_message "The archive is password-protected. Please enter the password:"
             read -s -p "Password: " UFW_CUSTOM_RULES_PASSWORD
@@ -489,11 +503,25 @@ if [ "$INTERACTIVE" = true ]; then
             if [ -z "$UFW_CUSTOM_RULES_PASSWORD" ]; then
                 print_warning "No password provided. Custom UFW rules will not be installed."
                 INSTALL_UFW_CUSTOM_RULES="n"
+                EXTRACT_OPT_ARCHIVE="n"
+            else
+                # Ask about extracting entire archive to /opt
+                echo ""
+                print_message "Do you want to extract additional files to /opt?"
+                print_message "This will download opt.7z and copy all its contents to /opt"
+                print_message "Files in 'scripts' subfolder will be made executable (except .ini)"
+                read -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
+                EXTRACT_OPT_ARCHIVE=${EXTRACT_OPT_ARCHIVE:-n}
             fi
+        else
+            EXTRACT_OPT_ARCHIVE="n"
+            UFW_RULES_VERSION="6"
         fi
     else
         BLOCK_ICMP="n"
         INSTALL_UFW_CUSTOM_RULES="n"
+        EXTRACT_OPT_ARCHIVE="n"
+        UFW_RULES_VERSION="6"
     fi
     
     # Ask about sysctl configuration
@@ -572,6 +600,8 @@ else
     CONFIGURE_UFW="y"
     BLOCK_ICMP="n"
     INSTALL_UFW_CUSTOM_RULES="n"
+    EXTRACT_OPT_ARCHIVE="n"
+    UFW_RULES_VERSION="6"
     UFW_CUSTOM_RULES_PASSWORD=""
     CONFIGURE_SYSCTL="y"
     CONFIGURE_REPOS="y"
@@ -634,7 +664,12 @@ print_message "  ipset: $([ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y"
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     print_message "  Block ICMP (ping): $([ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] && echo "YES" || echo "NO")"
-    print_message "  Custom UFW Docker rules: $([ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ] && echo "YES" || echo "NO")"
+    if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
+        print_message "  Custom UFW Docker rules: YES (v${UFW_RULES_VERSION})"
+        print_message "    - Extract opt.7z to /opt: $([ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ] && echo "YES" || echo "NO")"
+    else
+        print_message "  Custom UFW Docker rules: NO"
+    fi
 fi
 print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
@@ -811,7 +846,6 @@ COMMON_PACKAGES=(
     python3
     python3-venv
     vim
-    p7zip-full
 )
 
 # Add zsh if requested
@@ -1943,19 +1977,25 @@ fi
 # ============================================
 
 if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
-    print_message "Installing custom UFW Docker rules..."
+    print_message "Installing custom UFW Docker rules (v${UFW_RULES_VERSION})..."
     echo ""
     
     # Check if p7zip is installed, install if needed
     if ! command -v 7z &> /dev/null; then
         print_message "Installing p7zip-full for archive extraction..."
-        apt install -y p7zip-full
+        if apt install -y p7zip-full; then
+            print_message "p7zip-full installed successfully"
+        else
+            print_error "CRITICAL: Failed to install p7zip-full"
+            print_error "Installation cannot continue"
+            exit 1
+        fi
     fi
     
     UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
     UFW_ARCHIVE_FILE="/tmp/ufw-docker-rules-v4.7z"
     UFW_EXTRACT_DIR="/tmp/ufw-docker-rules"
-    UFW_SCRIPT_NAME="ufw-docker-rules-v4.sh"
+    UFW_SCRIPT_NAME="ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
     UFW_INSTALL_PATH="/opt/${UFW_SCRIPT_NAME}"
     
     print_message "Downloading custom UFW rules archive..."
@@ -1970,12 +2010,88 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         if 7z x -p"${UFW_CUSTOM_RULES_PASSWORD}" -o"${UFW_EXTRACT_DIR}" "$UFW_ARCHIVE_FILE" -y > /dev/null 2>&1; then
             print_message "Archive extracted successfully"
             
-            # Find the script file
+            # Check if we need to extract archive to /opt
+            if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
+                print_message "Downloading separate opt.7z archive for /opt files..."
+                
+                OPT_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/opt.7z"
+                OPT_ARCHIVE_FILE="/tmp/opt.7z"
+                OPT_EXTRACT_DIR="/tmp/opt_extract"
+                
+                if wget -q --show-progress "$OPT_ARCHIVE_URL" -O "$OPT_ARCHIVE_FILE"; then
+                    print_message "opt.7z archive downloaded successfully"
+                    
+                    # Create extraction directory
+                    mkdir -p "$OPT_EXTRACT_DIR"
+                    
+                    # Extract with password
+                    print_message "Extracting opt.7z archive..."
+                    if 7z x -p"${UFW_CUSTOM_RULES_PASSWORD}" -o"${OPT_EXTRACT_DIR}" "$OPT_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+                        print_message "opt.7z archive extracted successfully"
+                        
+                        # Copy all contents to /opt
+                        print_message "Copying files and folders to /opt..."
+                        if [ "$(ls -A ${OPT_EXTRACT_DIR})" ]; then
+                            cp -r "${OPT_EXTRACT_DIR}/"* /opt/
+                            print_message "Files copied to /opt successfully"
+                            
+                            # Make scripts in scripts folder executable (except .ini files)
+                            if [ -d "/opt/scripts" ]; then
+                                print_message "Setting executable permissions for scripts in /opt/scripts..."
+                                
+                                # Find all files in scripts directory and make them executable (except .ini)
+                                find /opt/scripts -type f ! -name "*.ini" -exec chmod +x {} \;
+                                
+                                # Count executable files
+                                EXEC_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
+                                print_message "Made $EXEC_COUNT file(s) executable in /opt/scripts"
+                            fi
+                            
+                            # List what was copied
+                            print_message "Contents copied to /opt:"
+                            ls -la /opt/ | grep -v "^total" | tail -n +2 | awk '{print "  - " $NF}'
+                        else
+                            print_warning "opt.7z archive is empty"
+                        fi
+                        
+                        # Cleanup
+                        rm -rf "$OPT_EXTRACT_DIR"
+                        rm -f "$OPT_ARCHIVE_FILE"
+                        print_message "opt.7z archive deleted"
+                    else
+                        print_error "Failed to extract opt.7z archive. Check if password is correct."
+                        rm -f "$OPT_ARCHIVE_FILE"
+                    fi
+                else
+                    print_error "Failed to download opt.7z archive"
+                fi
+            fi
+            
+            # Find and install the script file
+            SCRIPT_FOUND=false
+            
+            # Check in root of extraction
             if [ -f "${UFW_EXTRACT_DIR}/${UFW_SCRIPT_NAME}" ]; then
+                SCRIPT_SOURCE="${UFW_EXTRACT_DIR}/${UFW_SCRIPT_NAME}"
+                SCRIPT_FOUND=true
+            # Check in opt folder
+            elif [ -f "${UFW_EXTRACT_DIR}/opt/${UFW_SCRIPT_NAME}" ]; then
+                SCRIPT_SOURCE="${UFW_EXTRACT_DIR}/opt/${UFW_SCRIPT_NAME}"
+                SCRIPT_FOUND=true
+            # Check in opt/scripts folder
+            elif [ -f "${UFW_EXTRACT_DIR}/opt/scripts/${UFW_SCRIPT_NAME}" ]; then
+                SCRIPT_SOURCE="${UFW_EXTRACT_DIR}/opt/scripts/${UFW_SCRIPT_NAME}"
+                SCRIPT_FOUND=true
+            fi
+            
+            if [ "$SCRIPT_FOUND" = true ]; then
+                print_message "Found script: $UFW_SCRIPT_NAME"
                 print_message "Installing script to ${UFW_INSTALL_PATH}..."
                 
-                # Copy script to /opt
-                cp "${UFW_EXTRACT_DIR}/${UFW_SCRIPT_NAME}" "$UFW_INSTALL_PATH"
+                # Copy script to /opt if not already there from archive extraction
+                if [ ! -f "$UFW_INSTALL_PATH" ]; then
+                    cp "$SCRIPT_SOURCE" "$UFW_INSTALL_PATH"
+                fi
                 
                 # Set executable permissions
                 chmod +x "$UFW_INSTALL_PATH"
@@ -1985,7 +2101,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                 print_message "Executing custom UFW Docker rules script..."
                 echo ""
                 print_header "═══════════════════════════════════════════════════"
-                print_header "  Custom UFW Docker Rules Script Output"
+                print_header "  Custom UFW Docker Rules Script Output (v${UFW_RULES_VERSION})"
                 print_header "═══════════════════════════════════════════════════"
                 echo ""
                 
@@ -2000,11 +2116,18 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                 fi
             else
                 print_error "Script file not found in archive: ${UFW_SCRIPT_NAME}"
+                print_error "Checked locations:"
+                print_error "  - ${UFW_EXTRACT_DIR}/${UFW_SCRIPT_NAME}"
+                print_error "  - ${UFW_EXTRACT_DIR}/opt/${UFW_SCRIPT_NAME}"
+                print_error "  - ${UFW_EXTRACT_DIR}/opt/scripts/${UFW_SCRIPT_NAME}"
             fi
             
-            # Cleanup
+            # Cleanup extraction directory
             rm -rf "$UFW_EXTRACT_DIR"
+            
+            # Delete archive
             rm -f "$UFW_ARCHIVE_FILE"
+            print_message "Archive deleted"
         else
             print_error "Failed to extract archive. Check if password is correct."
             print_error "Password authentication failed or archive is corrupted"
@@ -2182,9 +2305,17 @@ else
 fi
 
 if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
-    if [ -f "/opt/ufw-docker-rules-v4.sh" ]; then
-        print_message "- Custom UFW Docker rules: Installed and executed"
-        print_message "  Script location: /opt/ufw-docker-rules-v4.sh"
+    UFW_SCRIPT_PATH="/opt/ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
+    if [ -f "$UFW_SCRIPT_PATH" ]; then
+        print_message "- Custom UFW Docker rules: Installed and executed (v${UFW_RULES_VERSION})"
+        print_message "  Script location: $UFW_SCRIPT_PATH"
+        if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
+            print_message "  Archive extracted to: /opt"
+            if [ -d "/opt/scripts" ]; then
+                SCRIPT_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
+                print_message "  Executable scripts in /opt/scripts: $SCRIPT_COUNT"
+            fi
+        fi
     else
         print_message "- Custom UFW Docker rules: Installation attempted but failed"
     fi
