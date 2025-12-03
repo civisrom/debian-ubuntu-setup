@@ -531,9 +531,20 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "UFW Firewall Configuration"
         print_message "Port $SSH_PORT (SSH) will be allowed automatically"
         echo ""
-        read -p "Enter additional port to allow (press Enter to skip): " CUSTOM_PORT
+        print_message "You can add additional ports to UFW"
+        print_message "Format examples:"
+        print_message "  Single port:     8080"
+        print_message "  With protocol:   8080/tcp  or  53/udp"
+        print_message "  Multiple ports:  8080,8443,9000"
+        print_message "  Mixed:          8080/tcp,53/udp,3000"
+        echo ""
+        read -p "Enter additional ports (comma-separated, press Enter to skip): " CUSTOM_PORTS
+        
+        if [ ! -z "$CUSTOM_PORTS" ]; then
+            print_message "Custom ports will be configured: $CUSTOM_PORTS"
+        fi
     else
-        CUSTOM_PORT=""
+        CUSTOM_PORTS=""
     fi
 else
     # Default settings for non-interactive mode
@@ -565,7 +576,7 @@ else
     CONFIGURE_SYSCTL="y"
     CONFIGURE_REPOS="y"
     INSTALL_MOTD="n"
-    CUSTOM_PORT=""
+    CUSTOM_PORTS=""
     INSTALL_UFW_DOCKER="n"
     ADD_TATARANOVICH_REPO="n"
     INSTALL_GO="n"
@@ -631,10 +642,10 @@ if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATAR
     print_message "  Tataranovich repository: YES"
 fi
 print_message "  Custom MOTD: $([ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ] && echo "YES" || echo "NO")"
-if [ ! -z "$CUSTOM_PORT" ]; then
-    print_message "  UFW Custom Port: $CUSTOM_PORT"
+if [ ! -z "$CUSTOM_PORTS" ]; then
+    print_message "  UFW Custom Ports: $CUSTOM_PORTS"
 else
-    print_message "  UFW Custom Port: None"
+    print_message "  UFW Custom Ports: None"
 fi
 print_header "═══════════════════════════════════════════════"
 echo ""
@@ -800,6 +811,7 @@ COMMON_PACKAGES=(
     python3
     python3-venv
     vim
+    p7zip-full
 )
 
 # Add zsh if requested
@@ -1339,14 +1351,45 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     ufw allow ${SSH_PORT}/tcp comment 'SSH'
     print_message "UFW rule added: Allow SSH (port ${SSH_PORT})"
     
-    # Add custom port if specified
-    if [ ! -z "$CUSTOM_PORT" ]; then
-        if [[ "$CUSTOM_PORT" =~ ^[0-9]+$ ]] && [ "$CUSTOM_PORT" -ge 1 ] && [ "$CUSTOM_PORT" -le 65535 ]; then
-            ufw allow $CUSTOM_PORT/tcp comment "Custom port"
-            print_message "UFW rule added: Allow port $CUSTOM_PORT"
-        else
-            print_warning "Invalid port number. Skipping custom port."
-        fi
+    # Add custom ports if specified
+    if [ ! -z "$CUSTOM_PORTS" ]; then
+        print_message "Configuring custom ports: $CUSTOM_PORTS"
+        
+        # Split ports by comma
+        IFS=',' read -ra PORT_ARRAY <<< "$CUSTOM_PORTS"
+        
+        for PORT_SPEC in "${PORT_ARRAY[@]}"; do
+            # Trim whitespace
+            PORT_SPEC=$(echo "$PORT_SPEC" | xargs)
+            
+            # Check if protocol is specified
+            if [[ "$PORT_SPEC" =~ ^([0-9]+)/(tcp|udp)$ ]]; then
+                # Port with protocol: 8080/tcp or 53/udp
+                PORT="${BASH_REMATCH[1]}"
+                PROTOCOL="${BASH_REMATCH[2]}"
+                
+                if [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
+                    ufw allow ${PORT}/${PROTOCOL} comment "Custom ${PROTOCOL} port"
+                    print_message "UFW rule added: Allow port ${PORT}/${PROTOCOL}"
+                else
+                    print_warning "Invalid port number: $PORT (must be 1-65535). Skipping."
+                fi
+            elif [[ "$PORT_SPEC" =~ ^[0-9]+$ ]]; then
+                # Port without protocol - default to tcp
+                PORT="$PORT_SPEC"
+                
+                if [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
+                    ufw allow ${PORT}/tcp comment "Custom tcp port"
+                    print_message "UFW rule added: Allow port ${PORT}/tcp (default)"
+                else
+                    print_warning "Invalid port number: $PORT (must be 1-65535). Skipping."
+                fi
+            else
+                print_warning "Invalid port format: $PORT_SPEC. Expected: PORT or PORT/PROTOCOL. Skipping."
+            fi
+        done
+        
+        print_message "Custom ports configuration completed"
     fi
     
     # Enable UFW
@@ -2074,8 +2117,8 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     else
         print_message "- ICMP (ping) blocking: DISABLED (server responds to ping)"
     fi
-    if [ ! -z "$CUSTOM_PORT" ]; then
-        print_message "- Custom UFW port: $CUSTOM_PORT"
+    if [ ! -z "$CUSTOM_PORTS" ]; then
+        print_message "- Custom UFW ports: $CUSTOM_PORTS"
     fi
 else
     print_message "- UFW: SKIPPED"
