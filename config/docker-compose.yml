@@ -14,9 +14,9 @@ services:
       - manual
 
   hbbr:
-    container_name: hbbr -k _
+    container_name: hbbr
     image: rustdesk/rustdesk-server:latest
-    command: hbbr
+    command: hbbr -k _
     volumes:
       - ./data:/root
     network_mode: "host"
