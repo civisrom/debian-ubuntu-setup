@@ -985,7 +985,7 @@ if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
     fi
     
     # Use detected or selected codename
-    DEBIAN_CODENAME=${VERSION_CODENAME:-bookworm}
+    DEBIAN_CODENAME=${VERSION_CODENAME:-trixie}
     
     # Write new sources.list
     cat > /etc/apt/sources.list << EOF
