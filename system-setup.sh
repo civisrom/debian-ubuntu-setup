@@ -557,6 +557,7 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "Note: Tataranovich repository is not available for Debian 13 (Trixie)"
             fi
         fi
+    fi
     
     # Ask about MOTD installation
     print_message "Do you want to install custom MOTD (Message of the Day)?"
