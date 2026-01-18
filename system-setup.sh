@@ -75,9 +75,10 @@ if [ -z "$DETECTED_OS" ] || { [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ]; };
         echo ""
         print_message "Please select the operating system:"
         echo "  1) Debian 12 (Bookworm)"
-        echo "  2) Ubuntu 24.04 (Noble)"
+        echo "  2) Debian 13 (Trixie)"
+        echo "  3) Ubuntu 24.04 (Noble)"
         echo ""
-        read -p "Enter your choice [1-2]: " OS_CHOICE
+        read -p "Enter your choice [1-3]: " OS_CHOICE
         
         case $OS_CHOICE in
             1)
@@ -87,6 +88,12 @@ if [ -z "$DETECTED_OS" ] || { [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ]; };
                 print_message "Selected: Debian 12 (Bookworm)"
                 ;;
             2)
+                OS="debian"
+                VERSION="13"
+                VERSION_CODENAME="trixie"
+                print_message "Selected: Debian 13 (Trixie)"
+                ;;
+            3)
                 OS="ubuntu"
                 VERSION="24.04"
                 VERSION_CODENAME="noble"
@@ -535,18 +542,21 @@ if [ "$INTERACTIVE" = true ]; then
         read -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
         
-        # Ask about Tataranovich repository (only for Debian)
-        echo ""
-        print_message "Do you want to add Tataranovich repository (custom mc build)?"
-        print_message "This will install Midnight Commander from tataranovich.com"
-        read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
-        ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
-    else
-        print_message "Do you want to configure Ubuntu repositories?"
-        read -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
-        CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
-        ADD_TATARANOVICH_REPO="n"
-    fi
+        # Ask about Tataranovich repository (only for Debian 12, not for Debian 13)
+        if [ "$VERSION" = "12" ]; then
+            echo ""
+            print_message "Do you want to add Tataranovich repository (custom mc build)?"
+            print_message "This will install Midnight Commander from tataranovich.com"
+            read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
+            ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
+        else
+            # Disable Tataranovich for Debian 13+
+            ADD_TATARANOVICH_REPO="n"
+            if [ "$VERSION" = "13" ]; then
+                echo ""
+                print_message "Note: Tataranovich repository is not available for Debian 13 (Trixie)"
+            fi
+        fi
     
     # Ask about MOTD installation
     print_message "Do you want to install custom MOTD (Message of the Day)?"
@@ -985,11 +995,28 @@ if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
         print_message "Original sources.list backed up"
     fi
     
-    # Use detected or selected codename
-    DEBIAN_CODENAME=${VERSION_CODENAME:-trixie}
+# Use detected or selected codename
+    DEBIAN_CODENAME=${VERSION_CODENAME:-bookworm}
     
-    # Write new sources.list
-    cat > /etc/apt/sources.list << EOF
+    # Write new sources.list based on version
+    if [ "$VERSION" = "13" ] || [ "$DEBIAN_CODENAME" = "trixie" ]; then
+        # Debian 13 (Trixie) configuration - БЕЗ backports
+        cat > /etc/apt/sources.list << EOF
+### Основные репозитории
+deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
+
+### Обновления безопасности
+deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+
+### Обновления релиза
+deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
+EOF
+    else
+        # Debian 12 (Bookworm) and older configuration - С backports
+        cat > /etc/apt/sources.list << EOF
 ### Основные репозитории
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
@@ -1006,10 +1033,7 @@ deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
 EOF
-    
-    print_message "Debian repositories configured for ${DEBIAN_CODENAME}"
-    apt update
-fi
+    fi
 
 # Configure sources.list for Ubuntu
 if [ "$OS" = "ubuntu" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
