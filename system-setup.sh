@@ -832,6 +832,7 @@ COMMON_PACKAGES=(
     libwww-perl
     apg
     makepasswd
+    mc
     mc-data
     squashfs-tools
     jq
