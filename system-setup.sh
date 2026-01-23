@@ -58,10 +58,10 @@ fi
 
 # Print banner
 echo ""
-print_header "╔═══════════════════════════════════════════════╗"
-print_header "║   Debian/Ubuntu System Setup Script v${SCRIPT_VERSION}    ║"
-print_header "║   Enhanced Configuration Tool                 ║"
-print_header "╚═══════════════════════════════════════════════╝"
+print_header "╔════════════════════════════════════════════════════════╗"
+print_header "║   Debian/Ubuntu System Setup Script v${SCRIPT_VERSION} ║"
+print_header "║   Enhanced Configuration Tool                          ║"
+print_header "╚════════════════════════════════════════════════════════╝"
 echo ""
 
 # ============================================
