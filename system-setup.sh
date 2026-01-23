@@ -2,8 +2,9 @@
 
 #############################################
 # System Setup Script for Debian and Ubuntu
-# Author: Auto-generated (Enhanced Version)
+# Author: Enhanced Version v2.0
 # Description: Initial package installation and system configuration
+# Supported: Debian 12, 13 | Ubuntu 24.04, 25.04
 #############################################
 
 set -e
@@ -13,7 +14,12 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
+
+# Script version
+SCRIPT_VERSION="2.0"
 
 # Function to print colored messages
 print_message() {
@@ -30,6 +36,10 @@ print_warning() {
 
 print_header() {
     echo -e "${BLUE}$1${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
 # Check if running as root
@@ -49,8 +59,8 @@ fi
 # Print banner
 echo ""
 print_header "╔═══════════════════════════════════════════════╗"
-print_header "║   Debian/Ubuntu System Setup Script          ║"
-print_header "║   Initial Configuration Tool (Enhanced)       ║"
+print_header "║   Debian/Ubuntu System Setup Script v${SCRIPT_VERSION}    ║"
+print_header "║   Enhanced Configuration Tool                 ║"
 print_header "╚═══════════════════════════════════════════════╝"
 echo ""
 
@@ -77,8 +87,9 @@ if [ -z "$DETECTED_OS" ] || { [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ]; };
         echo "  1) Debian 12 (Bookworm)"
         echo "  2) Debian 13 (Trixie)"
         echo "  3) Ubuntu 24.04 (Noble)"
+        echo "  4) Ubuntu 25.04 (Plucky)"
         echo ""
-        read -p "Enter your choice [1-3]: " OS_CHOICE
+        read -p "Enter your choice [1-4]: " OS_CHOICE
         
         case $OS_CHOICE in
             1)
@@ -99,6 +110,12 @@ if [ -z "$DETECTED_OS" ] || { [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ]; };
                 VERSION_CODENAME="noble"
                 print_message "Selected: Ubuntu 24.04 (Noble)"
                 ;;
+            4)
+                OS="ubuntu"
+                VERSION="25.04"
+                VERSION_CODENAME="plucky"
+                print_message "Selected: Ubuntu 25.04 (Plucky)"
+                ;;
             *)
                 print_error "Invalid choice. Exiting."
                 exit 1
@@ -117,6 +134,27 @@ else
     if [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ]; then
         print_error "This script only supports Debian and Ubuntu"
         exit 1
+    fi
+    
+    # Validate version
+    if [ "$OS" = "debian" ]; then
+        if [ "$VERSION" != "12" ] && [ "$VERSION" != "13" ]; then
+            print_warning "Detected Debian version: $VERSION (officially supported: 12, 13)"
+            read -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+            CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
+            if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
+                exit 1
+            fi
+        fi
+    elif [ "$OS" = "ubuntu" ]; then
+        if [ "$VERSION" != "24.04" ] && [ "$VERSION" != "25.04" ]; then
+            print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04, 25.04)"
+            read -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+            CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
+            if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
+                exit 1
+            fi
+        fi
     fi
 fi
 
@@ -536,25 +574,40 @@ if [ "$INTERACTIVE" = true ]; then
     read -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
     CONFIGURE_SYSCTL=${CONFIGURE_SYSCTL:-y}
     
-    # Ask about repository configuration
+    # Ask about IPv6 disable via GRUB (Debian only)
     if [ "$OS" = "debian" ]; then
-        print_message "Do you want to configure Debian repositories?"
+        echo ""
+        print_message "Do you want to disable IPv6 at kernel level (GRUB)?"
+        print_message "This adds 'ipv6.disable=1' to GRUB_CMDLINE_LINUX_DEFAULT"
+        print_message "Note: This is in addition to sysctl IPv6 disable and requires reboot"
+        read -p "Disable IPv6 via GRUB? (y/N): " DISABLE_IPV6_GRUB
+        DISABLE_IPV6_GRUB=${DISABLE_IPV6_GRUB:-n}
+    else
+        DISABLE_IPV6_GRUB="n"
+    fi
+    
+    # Ask about repository configuration
+    if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+        print_message "Do you want to configure ${OS^} repositories?"
         read -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
         
-        # Ask about Tataranovich repository (only for Debian 12, not for Debian 13)
-        if [ "$VERSION" = "12" ]; then
+        # Ask about Tataranovich repository (only for Debian 12, not for Debian 13+ or Ubuntu 25.04+)
+        if [ "$OS" = "debian" ] && [ "$VERSION" = "12" ]; then
             echo ""
             print_message "Do you want to add Tataranovich repository (custom mc build)?"
             print_message "This will install Midnight Commander from tataranovich.com"
             read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
             ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
         else
-            # Disable Tataranovich for Debian 13+
+            # Disable Tataranovich for Debian 13+, Ubuntu 25.04+
             ADD_TATARANOVICH_REPO="n"
-            if [ "$VERSION" = "13" ]; then
+            if [ "$OS" = "debian" ] && [ "$VERSION" -ge "13" ]; then
                 echo ""
-                print_message "Note: Tataranovich repository is not available for Debian 13 (Trixie)"
+                print_message "Note: Tataranovich repository is not available for Debian 13+"
+            elif [ "$OS" = "ubuntu" ] && [ "${VERSION%%.*}" -ge "25" ]; then
+                echo ""
+                print_message "Note: Tataranovich repository is not available for Ubuntu 25.04+"
             fi
         fi
     fi
@@ -585,6 +638,54 @@ if [ "$INTERACTIVE" = true ]; then
     else
         CUSTOM_PORTS=""
     fi
+    
+    # Ask about BBR Network Optimizer
+    echo ""
+    print_header "═══════════════════════════════════════════════"
+    print_header "   Advanced Network Optimization (BBR)"
+    print_header "═══════════════════════════════════════════════"
+    echo ""
+    print_message "Do you want to run the BBR Network Optimizer script?"
+    print_message "This will apply TCP BBR congestion control and other network optimizations"
+    print_message "Note: This script will run AFTER all other installations complete"
+    read -p "Run BBR Network Optimizer? (y/N): " RUN_BBR_OPTIMIZER
+    RUN_BBR_OPTIMIZER=${RUN_BBR_OPTIMIZER:-n}
+    
+    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+        echo ""
+        print_message "BBR Network Optimizer Options:"
+        print_message "The following functions can be enabled/disabled:"
+        echo ""
+        
+        # Force IPv4 for APT
+        print_message "1. Force IPv4 for APT (recommended for IPv6 connectivity issues)"
+        read -p "   Enable force_ipv4_apt? (Y/n): " BBR_FORCE_IPV4
+        BBR_FORCE_IPV4=${BBR_FORCE_IPV4:-y}
+        
+        # Full system update
+        print_message "2. Full system update and upgrade (apt update && upgrade)"
+        read -p "   Enable full_update_upgrade? (Y/n): " BBR_FULL_UPDATE
+        BBR_FULL_UPDATE=${BBR_FULL_UPDATE:-y}
+        
+        # Fix /etc/hosts
+        print_message "3. Fix /etc/hosts file (add hostname entry)"
+        read -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
+        BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
+        
+        # Fix DNS
+        print_message "4. Fix DNS configuration (set Cloudflare DNS)"
+        read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
+        BBR_FIX_DNS=${BBR_FIX_DNS:-y}
+        
+        echo ""
+        print_message "BBR optimization settings will be applied after main installation"
+    else
+        BBR_FORCE_IPV4="n"
+        BBR_FULL_UPDATE="n"
+        BBR_FIX_HOSTS="n"
+        BBR_FIX_DNS="n"
+    fi
+    
 else
     # Default settings for non-interactive mode
     SET_ROOT_PASSWORD="n"
@@ -622,6 +723,13 @@ else
     ADD_TATARANOVICH_REPO="n"
     INSTALL_GO="n"
     INSTALL_IPSET="n"
+    INSTALL_RUSTDESK="n"
+    RUN_BBR_OPTIMIZER="n"
+    BBR_FORCE_IPV4="n"
+    BBR_FULL_UPDATE="n"
+    BBR_FIX_HOSTS="n"
+    BBR_FIX_DNS="n"
+    DISABLE_IPV6_GRUB="n"
     
     print_message "Non-interactive mode - using default settings:"
     print_message "- Root password: NO"
@@ -637,6 +745,7 @@ else
     print_message "- MOTD: NO"
     print_message "- Custom UFW Port: None"
     print_message "- Crontab: NO"
+    print_message "- BBR Optimizer: NO"
 fi
 echo ""
 
@@ -683,6 +792,9 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     fi
 fi
 print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$OS" = "debian" ]; then
+    print_message "  IPv6 disable via GRUB: $([ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ] && echo "YES (kernel level)" || echo "NO")"
+fi
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
     print_message "  Tataranovich repository: YES"
@@ -692,6 +804,15 @@ if [ ! -z "$CUSTOM_PORTS" ]; then
     print_message "  UFW Custom Ports: $CUSTOM_PORTS"
 else
     print_message "  UFW Custom Ports: None"
+fi
+if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+    print_message "  BBR Network Optimizer: YES"
+    print_message "    - Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "    - Full Update: $([ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "    - Fix /etc/hosts: $([ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "    - Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
+else
+    print_message "  BBR Network Optimizer: NO"
 fi
 print_header "═══════════════════════════════════════════════"
 echo ""
@@ -985,6 +1106,9 @@ EOF
     echo ""
 fi
 
+# ============================================
+# CONFIGURE REPOSITORIES
+# ============================================
 
 # Configure sources.list for Debian
 if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
@@ -996,14 +1120,14 @@ if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
         print_message "Original sources.list backed up"
     fi
     
-# Use detected or selected codename
+    # Use detected or selected codename
     DEBIAN_CODENAME=${VERSION_CODENAME:-bookworm}
     
     # Write new sources.list based on version
     if [ "$VERSION" = "13" ] || [ "$DEBIAN_CODENAME" = "trixie" ]; then
-        # Debian 13 (Trixie) configuration - БЕЗ backports
+        # Debian 13 (Trixie) configuration - БЕЗ backports (testing не имеет backports)
         cat > /etc/apt/sources.list << EOF
-### Основные репозитории
+### Основные репозитории Debian ${DEBIAN_CODENAME^}
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 
@@ -1015,10 +1139,11 @@ deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main c
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
 EOF
+        print_message "Configured Debian 13 (Trixie) repositories without backports"
     else
         # Debian 12 (Bookworm) and older configuration - С backports
         cat > /etc/apt/sources.list << EOF
-### Основные репозитории
+### Основные репозитории Debian ${DEBIAN_CODENAME^}
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 
@@ -1034,7 +1159,13 @@ deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
 EOF
+        print_message "Configured Debian ${VERSION} (${DEBIAN_CODENAME^}) repositories with backports"
     fi
+    
+    print_message "Debian repositories configured"
+    apt update
+    echo ""
+fi
 
 # Configure sources.list for Ubuntu
 if [ "$OS" = "ubuntu" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
@@ -1097,12 +1228,14 @@ EOF
     
     print_message "Ubuntu repositories configured in: $UBUNTU_SOURCES_FILE"
     print_message "Format: DEB822 (ubuntu.sources)"
+    print_message "Codename: ${UBUNTU_CODENAME^}"
     print_message "Repositories enabled: main, restricted, universe, multiverse"
     apt update
+    echo ""
 fi
 
 # ============================================
-# CONFIGURE TATARANOVICH REPOSITORY (DEBIAN ONLY)
+# CONFIGURE TATARANOVICH REPOSITORY (DEBIAN 12 ONLY)
 # ============================================
 
 if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
@@ -1156,9 +1289,11 @@ if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATAR
     echo ""
 else
     # Install mc from standard repositories if Tataranovich is not used
-    print_message "Installing Midnight Commander from standard repositories..."
-    apt-get install -y mc || print_warning "Failed to install mc"
-    echo ""
+    if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+        print_message "Installing Midnight Commander from standard repositories..."
+        apt-get install -y mc || print_warning "Failed to install mc"
+        echo ""
+    fi
 fi
 
 # ============================================
@@ -1214,6 +1349,10 @@ EOF
     fi
     echo ""
 fi
+
+# ============================================
+# CONFIGURE SYSCTL.CONF
+# ============================================
 
 # Configure sysctl.conf
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
@@ -1274,6 +1413,86 @@ EOF
 else
     print_message "Skipping sysctl configuration (not requested)"
 fi
+
+# ============================================
+# DISABLE IPv6 VIA GRUB (DEBIAN ONLY)
+# ============================================
+
+if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+    print_message "Disabling IPv6 at kernel level via GRUB..."
+    
+    GRUB_CONFIG="/etc/default/grub"
+    
+    # Backup original grub config
+    if [ -f "$GRUB_CONFIG" ]; then
+        cp "$GRUB_CONFIG" "${GRUB_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original GRUB config backed up"
+    else
+        print_error "GRUB config file not found: $GRUB_CONFIG"
+        print_warning "Skipping IPv6 GRUB disable"
+        DISABLE_IPV6_GRUB="n"
+    fi
+    
+    if [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; then
+        # Check if ipv6.disable is already present
+        if grep -q "ipv6.disable=1" "$GRUB_CONFIG"; then
+            print_warning "IPv6 disable parameter already present in GRUB config"
+        else
+            # Modify GRUB_CMDLINE_LINUX_DEFAULT
+            if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"; then
+                # Get current value
+                CURRENT_VALUE=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG" | cut -d'"' -f2)
+                
+                # Add ipv6.disable=1 to the existing parameters
+                if [ -z "$CURRENT_VALUE" ]; then
+                    # Empty, just add ipv6.disable=1
+                    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"/' "$GRUB_CONFIG"
+                else
+                    # Add to existing parameters
+                    NEW_VALUE="${CURRENT_VALUE} ipv6.disable=1"
+                    sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"${NEW_VALUE}\"/" "$GRUB_CONFIG"
+                fi
+                
+                print_message "Added ipv6.disable=1 to GRUB_CMDLINE_LINUX_DEFAULT"
+            else
+                # Line doesn't exist, add it
+                echo 'GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"' >> "$GRUB_CONFIG"
+                print_message "Added GRUB_CMDLINE_LINUX_DEFAULT with ipv6.disable=1"
+            fi
+            
+            # Update GRUB
+            print_message "Updating GRUB configuration..."
+            if update-grub 2>&1 | tee /tmp/grub-update.log; then
+                print_success "GRUB configuration updated successfully"
+                print_warning "IPv6 will be disabled at kernel level after reboot"
+            else
+                print_error "Failed to update GRUB configuration"
+                print_warning "Check /tmp/grub-update.log for details"
+                
+                # Try to restore backup
+                print_warning "Attempting to restore GRUB config from backup..."
+                LATEST_BACKUP=$(ls -t ${GRUB_CONFIG}.backup.*~ 2>/dev/null | head -1)
+                if [ ! -z "$LATEST_BACKUP" ]; then
+                    cp "$LATEST_BACKUP" "$GRUB_CONFIG"
+                    print_message "GRUB config restored from backup"
+                fi
+            fi
+        fi
+        
+        # Display current GRUB_CMDLINE_LINUX_DEFAULT
+        print_message "Current GRUB_CMDLINE_LINUX_DEFAULT:"
+        grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"
+    fi
+    echo ""
+else
+    if [ "$OS" = "debian" ]; then
+        print_message "Skipping IPv6 GRUB disable (not requested)"
+    fi
+fi
+
+# ============================================
+# CONFIGURE SSH
+# ============================================
 
 # Configure SSH
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
@@ -1394,6 +1613,10 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
 else
     print_message "Skipping SSH configuration (not requested)"
 fi
+
+# ============================================
+# CONFIGURE UFW
+# ============================================
 
 # Configure UFW
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
@@ -1547,6 +1770,10 @@ else
         print_message "ICMP blocking not requested - server will respond to ping"
     fi
 fi
+
+# ============================================
+# INSTALL DOCKER
+# ============================================
 
 # Install Docker if requested
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
@@ -1858,6 +2085,10 @@ else
     print_message "Skipping ipset installation (not requested)"
 fi
 
+# ============================================
+# CREATE PYTHON VIRTUAL ENVIRONMENT
+# ============================================
+
 # Create Python virtual environment
 if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
     print_message "Creating Python virtual environment..."
@@ -1963,6 +2194,10 @@ ${CRONTAB_TASKS}"
 else
     print_message "Skipping crontab configuration (not requested)"
 fi
+
+# ============================================
+# INSTALL CUSTOM MOTD
+# ============================================
 
 # Install custom MOTD
 if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
@@ -2168,6 +2403,108 @@ else
     print_message "Skipping custom UFW Docker rules (not requested)"
 fi
 
+# ============================================
+# RUN BBR NETWORK OPTIMIZER
+# ============================================
+
+if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+    echo ""
+    print_header "═══════════════════════════════════════════════════"
+    print_header "   Running BBR Network Optimizer"
+    print_header "═══════════════════════════════════════════════════"
+    echo ""
+    
+    BBR_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/Linux_NetworkOptimizer/refs/heads/main/bbr.sh"
+    BBR_SCRIPT_PATH="/tmp/bbr_optimizer.sh"
+    
+    print_message "Downloading BBR Network Optimizer script..."
+    if curl -fsSL "$BBR_SCRIPT_URL" -o "$BBR_SCRIPT_PATH"; then
+        print_message "BBR script downloaded successfully"
+        chmod +x "$BBR_SCRIPT_PATH"
+        
+        # Create a modified version of the BBR script with optional functions
+        print_message "Configuring BBR script options..."
+        
+        # Create a wrapper script that will call functions based on user's choices
+        cat > /tmp/bbr_wrapper.sh << 'EOFWRAPPER'
+#!/bin/bash
+
+# Source the original BBR script
+source /tmp/bbr_optimizer.sh
+
+# Run selected functions based on parameters
+if [ "$1" = "force_ipv4" ]; then
+    force_ipv4_apt
+fi
+
+if [ "$2" = "full_update" ]; then
+    full_update_upgrade
+fi
+
+if [ "$3" = "fix_hosts" ]; then
+    fix_etc_hosts
+fi
+
+if [ "$4" = "fix_dns" ]; then
+    fix_dns
+fi
+
+# Always run the main optimization (this is the core BBR functionality)
+print_message "Applying BBR network optimizations..."
+intelligent_settings
+EOFWRAPPER
+        
+        chmod +x /tmp/bbr_wrapper.sh
+        
+        # Prepare parameters based on user choices
+        PARAM1="skip"
+        PARAM2="skip"
+        PARAM3="skip"
+        PARAM4="skip"
+        
+        if [ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ]; then
+            PARAM1="force_ipv4"
+        fi
+        
+        if [ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ]; then
+            PARAM2="full_update"
+        fi
+        
+        if [ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ]; then
+            PARAM3="fix_hosts"
+        fi
+        
+        if [ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ]; then
+            PARAM4="fix_dns"
+        fi
+        
+        print_message "Running BBR Network Optimizer with selected options..."
+        print_message "Options: Force IPv4: $PARAM1, Full Update: $PARAM2, Fix Hosts: $PARAM3, Fix DNS: $PARAM4"
+        echo ""
+        
+        # Run the wrapper script with parameters
+        bash /tmp/bbr_wrapper.sh "$PARAM1" "$PARAM2" "$PARAM3" "$PARAM4"
+        
+        # Cleanup
+        rm -f "$BBR_SCRIPT_PATH" /tmp/bbr_wrapper.sh
+        
+        echo ""
+        print_header "═══════════════════════════════════════════════════"
+        print_message "BBR Network Optimizer completed"
+        print_header "═══════════════════════════════════════════════════"
+        echo ""
+    else
+        print_error "Failed to download BBR Network Optimizer script"
+        print_message "You can manually run it later from: $BBR_SCRIPT_URL"
+    fi
+else
+    print_message "Skipping BBR Network Optimizer (not requested)"
+fi
+
+# ============================================
+# FINAL MESSAGE
+# ============================================
+
 # Final message
 echo ""
 print_header "═════════════════════════════════════════"
@@ -2246,6 +2583,11 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     print_message "- System parameters optimized (sysctl.conf)"
 else
     print_message "- sysctl: SKIPPED"
+fi
+
+if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+    print_message "- IPv6 disabled via GRUB (kernel level)"
+    print_warning "  Note: Requires reboot to take effect"
 fi
 
 if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
@@ -2349,9 +2691,19 @@ else
     print_message "- Custom UFW Docker rules: Not installed"
 fi
 
+if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+    print_message "- BBR Network Optimizer: Executed"
+    print_message "  Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "  Full Update: $([ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "  Fix /etc/hosts: $([ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "  Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
+else
+    print_message "- BBR Network Optimizer: Not executed"
+fi
+
 print_message ""
 
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || { [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; }; then
     print_message "Backup files saved with timestamp (format: filename.backup.YYYYMMDD-HHMMSS~):"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "- /etc/sysctl.conf.backup.*~"
@@ -2372,6 +2724,9 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     fi
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
         print_message "- /tmp/crontab.backup.*~"
+    fi
+    if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+        print_message "- /etc/default/grub.backup.*~"
     fi
     print_message ""
 fi
@@ -2427,6 +2782,11 @@ if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
+if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+    print_warning "$STEP_NUM. Check GRUB IPv6 disable after reboot: cat /proc/cmdline | grep ipv6"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+
 print_message ""
 print_message "Useful commands:"
 print_message "sudo ufw status verbose"
@@ -2434,10 +2794,14 @@ print_message "sudo ufw status numbered"
 print_message "sudo nano /etc/sysctl.conf"
 print_message "sudo nano /etc/apt/sources.list"
 if [ "$OS" = "ubuntu" ]; then
-    print_message "sudo nano /etc/apt/sources.list.d/ubuntu.list"
+    print_message "sudo nano /etc/apt/sources.list.d/ubuntu.sources"
 fi
 print_message "sudo nano /etc/ssh/sshd_config"
 print_message "sudo crontab -l"
+if [ "$OS" = "debian" ]; then
+    print_message "sudo nano /etc/default/grub"
+    print_message "cat /proc/cmdline"
+fi
 if [ ! -z "$NEW_USERNAME" ]; then
     print_message "su - $NEW_USERNAME"
 fi
