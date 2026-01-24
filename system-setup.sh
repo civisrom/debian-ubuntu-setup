@@ -941,8 +941,8 @@ fi
 COMMON_PACKAGES=(
     htop
     wget
-    iptables
-    ufw
+#    iptables
+#    ufw
     nano
     apt-utils
     curl
