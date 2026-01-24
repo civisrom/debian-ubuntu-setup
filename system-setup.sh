@@ -610,6 +610,49 @@ if [ "$INTERACTIVE" = true ]; then
         fi
     fi
     
+    # Ask about Ubuntu PPA repositories (only for Ubuntu)
+    if [ "$OS" = "ubuntu" ]; then
+        echo ""
+        print_message "Do you want to add additional PPA repositories for Ubuntu?"
+        print_message "Available PPAs:"
+        print_message "  1. ppa:ondrej/nginx - Latest Nginx builds"
+        print_message "  2. ppa:git-core/ppa - Latest Git version"
+        print_message "  3. ppa:ubuntu-toolchain-r/test - Latest GCC toolchain"
+        read -p "Add PPA repositories? (y/N): " ADD_UBUNTU_PPAS
+        ADD_UBUNTU_PPAS=${ADD_UBUNTU_PPAS:-n}
+        
+        # Initialize PPA selection flags
+        ADD_PPA_NGINX="n"
+        ADD_PPA_GIT="n"
+        ADD_PPA_TOOLCHAIN="n"
+        
+        if [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; then
+            echo ""
+            print_message "Select which PPAs to add:"
+            echo ""
+            
+            # Ondrej Nginx PPA
+            print_message "1. ppa:ondrej/nginx - Latest Nginx with HTTP/3, QUIC support"
+            read -p "   Add Ondrej Nginx PPA? (y/N): " ADD_PPA_NGINX
+            ADD_PPA_NGINX=${ADD_PPA_NGINX:-n}
+            
+            # Git Core PPA
+            print_message "2. ppa:git-core/ppa - Latest stable Git releases"
+            read -p "   Add Git Core PPA? (y/N): " ADD_PPA_GIT
+            ADD_PPA_GIT=${ADD_PPA_GIT:-n}
+            
+            # Ubuntu Toolchain PPA
+            print_message "3. ppa:ubuntu-toolchain-r/test - Latest GCC, G++, and toolchain"
+            read -p "   Add Ubuntu Toolchain PPA? (y/N): " ADD_PPA_TOOLCHAIN
+            ADD_PPA_TOOLCHAIN=${ADD_PPA_TOOLCHAIN:-n}
+        fi
+    else
+        ADD_UBUNTU_PPAS="n"
+        ADD_PPA_NGINX="n"
+        ADD_PPA_GIT="n"
+        ADD_PPA_TOOLCHAIN="n"
+    fi
+    
     # Ask about MOTD installation
     print_message "Do you want to install custom MOTD (Message of the Day)?"
     read -p "Install MOTD? (y/N): " INSTALL_MOTD
@@ -719,6 +762,10 @@ else
     CUSTOM_PORTS=""
     INSTALL_UFW_DOCKER="n"
     ADD_TATARANOVICH_REPO="n"
+    ADD_UBUNTU_PPAS="n"
+    ADD_PPA_NGINX="n"
+    ADD_PPA_GIT="n"
+    ADD_PPA_TOOLCHAIN="n"
     INSTALL_GO="n"
     INSTALL_IPSET="n"
     INSTALL_RUSTDESK="n"
@@ -796,6 +843,18 @@ fi
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
     print_message "  Tataranovich repository: YES"
+fi
+if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; }; then
+    print_message "  Ubuntu PPA repositories:"
+    if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
+        print_message "    - Ondrej Nginx: YES"
+    fi
+    if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
+        print_message "    - Git Core: YES"
+    fi
+    if [ "$ADD_PPA_TOOLCHAIN" = "y" ] || [ "$ADD_PPA_TOOLCHAIN" = "Y" ]; then
+        print_message "    - Ubuntu Toolchain: YES"
+    fi
 fi
 print_message "  Custom MOTD: $([ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ] && echo "YES" || echo "NO")"
 if [ ! -z "$CUSTOM_PORTS" ]; then
@@ -1229,6 +1288,88 @@ EOF
     print_message "Codename: ${UBUNTU_CODENAME^}"
     print_message "Repositories enabled: main, restricted, universe, multiverse"
     apt-get update
+    echo ""
+fi
+
+# ============================================
+# ADD UBUNTU PPA REPOSITORIES
+# ============================================
+
+if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; }; then
+    print_message "Adding Ubuntu PPA repositories..."
+    echo ""
+    
+    # Install software-properties-common if not already installed (provides add-apt-repository)
+    if ! command -v add-apt-repository &> /dev/null; then
+        print_message "Installing software-properties-common..."
+        apt-get install -y software-properties-common
+    fi
+    
+    # Add Ondrej Nginx PPA
+    if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
+        print_message "Adding ppa:ondrej/nginx..."
+        print_warning "Press ENTER when prompted to confirm the PPA addition"
+        echo ""
+        
+        # Use -y flag to auto-accept
+        if add-apt-repository -y ppa:ondrej/nginx 2>&1; then
+            print_success "Ondrej Nginx PPA added successfully"
+        else
+            print_warning "Failed to add Ondrej Nginx PPA, continuing..."
+        fi
+        echo ""
+    fi
+    
+    # Add Git Core PPA
+    if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
+        print_message "Adding ppa:git-core/ppa..."
+        print_warning "Press ENTER when prompted to confirm the PPA addition"
+        echo ""
+        
+        # Use -y flag to auto-accept
+        if add-apt-repository -y ppa:git-core/ppa 2>&1; then
+            print_success "Git Core PPA added successfully"
+        else
+            print_warning "Failed to add Git Core PPA, continuing..."
+        fi
+        echo ""
+    fi
+    
+    # Add Ubuntu Toolchain PPA
+    if [ "$ADD_PPA_TOOLCHAIN" = "y" ] || [ "$ADD_PPA_TOOLCHAIN" = "Y" ]; then
+        print_message "Adding ppa:ubuntu-toolchain-r/test..."
+        print_warning "Press ENTER when prompted to confirm the PPA addition"
+        echo ""
+        
+        # Use -y flag to auto-accept
+        if add-apt-repository -y ppa:ubuntu-toolchain-r/test 2>&1; then
+            print_success "Ubuntu Toolchain PPA added successfully"
+        else
+            print_warning "Failed to add Ubuntu Toolchain PPA, continuing..."
+        fi
+        echo ""
+    fi
+    
+    # Update package lists after adding PPAs
+    print_message "Updating package lists with new PPA repositories..."
+    if apt-get update; then
+        print_success "Package lists updated successfully"
+        
+        # Show added PPAs
+        print_message "Added PPA repositories:"
+        if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
+            print_message "  ✓ ppa:ondrej/nginx"
+        fi
+        if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
+            print_message "  ✓ ppa:git-core/ppa"
+        fi
+        if [ "$ADD_PPA_TOOLCHAIN" = "y" ] || [ "$ADD_PPA_TOOLCHAIN" = "Y" ]; then
+            print_message "  ✓ ppa:ubuntu-toolchain-r/test"
+        fi
+    else
+        print_warning "Failed to update package lists after adding PPAs"
+    fi
+    
     echo ""
 fi
 
@@ -2777,6 +2918,18 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
         fi
     else
         print_message "- Ubuntu repositories configured (main, restricted, universe, multiverse)"
+        if [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; then
+            print_message "- Ubuntu PPA repositories:"
+            if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
+                print_message "  ✓ ppa:ondrej/nginx (Latest Nginx)"
+            fi
+            if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
+                print_message "  ✓ ppa:git-core/ppa (Latest Git)"
+            fi
+            if [ "$ADD_PPA_TOOLCHAIN" = "y" ] || [ "$ADD_PPA_TOOLCHAIN" = "Y" ]; then
+                print_message "  ✓ ppa:ubuntu-toolchain-r/test (Latest GCC)"
+            fi
+        fi
     fi
 fi
 
