@@ -58,10 +58,10 @@ fi
 
 # Print banner
 echo ""
-print_header "╔════════════════════════════════════════════════════════╗"
-print_header "║   Debian/Ubuntu System Setup Script v${SCRIPT_VERSION} ║"
-print_header "║   Enhanced Configuration Tool                          ║"
-print_header "╚════════════════════════════════════════════════════════╝"
+print_header "╔═══════════════════════════════════════════════╗"
+print_header "║   Debian/Ubuntu System Setup Script v${SCRIPT_VERSION}    ║"
+print_header "║   Enhanced Configuration Tool                 ║"
+print_header "╚═══════════════════════════════════════════════╝"
 echo ""
 
 # ============================================
@@ -591,24 +591,22 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Do you want to configure ${OS^} repositories?"
         read -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
-        
-        # Ask about Tataranovich repository (only for Debian 12, not for Debian 13+ or Ubuntu 25.04+)
-        if [ "$OS" = "debian" ] && [ "$VERSION" = "12" ]; then
+    fi
+    
+    # Ask about Tataranovich repository (only for Debian 12, independent from repository configuration)
+    if [ "$OS" = "debian" ] && [ "$VERSION" = "12" ]; then
+        echo ""
+        print_message "Do you want to add Tataranovich repository (custom mc build)?"
+        print_message "This will install Midnight Commander from tataranovich.com"
+        print_message "Repository: https://www.tataranovich.com/debian/"
+        read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
+        ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
+    else
+        # Disable Tataranovich for Debian 13+, Ubuntu, or other
+        ADD_TATARANOVICH_REPO="n"
+        if [ "$OS" = "debian" ] && [ "$VERSION" -ge "13" ]; then
             echo ""
-            print_message "Do you want to add Tataranovich repository (custom mc build)?"
-            print_message "This will install Midnight Commander from tataranovich.com"
-            read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
-            ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
-        else
-            # Disable Tataranovich for Debian 13+, Ubuntu 25.04+
-            ADD_TATARANOVICH_REPO="n"
-            if [ "$OS" = "debian" ] && [ "$VERSION" -ge "13" ]; then
-                echo ""
-                print_message "Note: Tataranovich repository is not available for Debian 13+"
-            elif [ "$OS" = "ubuntu" ] && [ "${VERSION%%.*}" -ge "25" ]; then
-                echo ""
-                print_message "Note: Tataranovich repository is not available for Ubuntu 25.04+"
-            fi
+            print_message "Note: Tataranovich repository is not available for Debian 13+"
         fi
     fi
     
@@ -941,8 +939,8 @@ fi
 COMMON_PACKAGES=(
     htop
     wget
-#    iptables
-#    ufw
+    iptables
+    ufw
     nano
     apt-utils
     curl
@@ -1239,7 +1237,7 @@ fi
 # ============================================
 
 if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
-    print_message "Configuring Tataranovich repository..."
+    print_message "Configuring Tataranovich repository for Debian 12..."
     
     # Install required packages if not already installed
     print_message "Installing prerequisites for Tataranovich repository..."
@@ -1263,18 +1261,27 @@ if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATAR
         # Use detected codename for repository
         TATARANOVICH_CODENAME=${VERSION_CODENAME:-bookworm}
         
+        # Backup existing file if present
+        if [ -f /etc/apt/sources.list.d/tataranovich.list ]; then
+            cp /etc/apt/sources.list.d/tataranovich.list /etc/apt/sources.list.d/tataranovich.list.backup.$(date +%Y%m%d-%H%M%S)~
+        fi
+        
         echo "deb http://www.tataranovich.com/debian ${TATARANOVICH_CODENAME} main" | tee /etc/apt/sources.list.d/tataranovich.list > /dev/null
         print_message "Tataranovich repository added: /etc/apt/sources.list.d/tataranovich.list"
         
         # Update package lists
         print_message "Updating package lists with Tataranovich repository..."
         if apt-get update; then
-            print_message "Package lists updated successfully"
+            print_success "Package lists updated successfully"
             
             # Install mc from Tataranovich repository
             print_message "Installing Midnight Commander from Tataranovich repository..."
             if apt-get install -y mc; then
-                print_message "Midnight Commander installed successfully from Tataranovich repository"
+                print_success "Midnight Commander installed successfully from Tataranovich repository"
+                
+                # Verify installation
+                MC_VERSION=$(mc --version 2>&1 | head -1)
+                print_message "Installed: $MC_VERSION"
             else
                 print_warning "Failed to install mc from Tataranovich repository"
                 print_message "Installing mc from standard repositories..."
@@ -2220,6 +2227,95 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
         if bash "$MOTD_SCRIPT"; then
             print_message "Custom MOTD installed successfully"
             rm -f "$MOTD_SCRIPT"
+            
+            # Post-installation fixes for MOTD
+            print_message "Applying MOTD post-installation fixes..."
+            
+            # 1. Ensure all scripts in /etc/update-motd.d/ are executable
+            if [ -d /etc/update-motd.d ]; then
+                chmod +x /etc/update-motd.d/* 2>/dev/null
+                print_message "Set executable permissions on MOTD scripts"
+            fi
+            
+            # 2. Check and fix SSH configuration for MOTD
+            SSHD_CONFIG="/etc/ssh/sshd_config"
+            if [ -f "$SSHD_CONFIG" ]; then
+                # Backup SSH config if not already backed up
+                if [ ! -f "${SSHD_CONFIG}.backup.motd" ]; then
+                    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup.motd"
+                fi
+                
+                # Check PrintMotd parameter
+                if grep -q "^PrintMotd" "$SSHD_CONFIG"; then
+                    # Parameter exists, ensure it's set to yes
+                    if ! grep -q "^PrintMotd yes" "$SSHD_CONFIG"; then
+                        sed -i 's/^PrintMotd.*/PrintMotd yes/' "$SSHD_CONFIG"
+                        print_message "Enabled PrintMotd in SSH config"
+                        SSH_RESTART_NEEDED=true
+                    fi
+                else
+                    # Parameter doesn't exist, add it
+                    echo "" >> "$SSHD_CONFIG"
+                    echo "# Enable MOTD" >> "$SSHD_CONFIG"
+                    echo "PrintMotd yes" >> "$SSHD_CONFIG"
+                    print_message "Added PrintMotd to SSH config"
+                    SSH_RESTART_NEEDED=true
+                fi
+                
+                # Ensure PrintLastLog is no (conflicts with custom MOTD)
+                if grep -q "^PrintLastLog yes" "$SSHD_CONFIG"; then
+                    sed -i 's/^PrintLastLog yes/PrintLastLog no/' "$SSHD_CONFIG"
+                    print_message "Disabled PrintLastLog to avoid conflicts"
+                    SSH_RESTART_NEEDED=true
+                fi
+                
+                # Restart SSH if needed
+                if [ "$SSH_RESTART_NEEDED" = true ]; then
+                    print_message "Restarting SSH service for MOTD changes..."
+                    if systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; then
+                        print_message "SSH service restarted successfully"
+                    else
+                        print_warning "Could not restart SSH automatically, please restart manually"
+                    fi
+                fi
+            fi
+            
+            # 3. Disable static MOTD file if exists
+            if [ -f /etc/motd ]; then
+                mv /etc/motd /etc/motd.backup.$(date +%Y%m%d-%H%M%S)
+                touch /etc/motd
+                print_message "Disabled static /etc/motd file"
+            fi
+            
+            # 4. Check PAM configuration
+            PAM_SSHD="/etc/pam.d/sshd"
+            if [ -f "$PAM_SSHD" ]; then
+                if ! grep -q "pam_motd.so" "$PAM_SSHD"; then
+                    print_warning "PAM MOTD module not found in $PAM_SSHD"
+                    print_message "Adding pam_motd.so to PAM configuration..."
+                    echo "" >> "$PAM_SSHD"
+                    echo "# Display MOTD" >> "$PAM_SSHD"
+                    echo "session optional pam_motd.so motd=/run/motd.dynamic" >> "$PAM_SSHD"
+                    echo "session optional pam_motd.so noupdate" >> "$PAM_SSHD"
+                fi
+            fi
+            
+            # 5. Test MOTD generation
+            print_message "Testing MOTD generation..."
+            if run-parts /etc/update-motd.d/ > /dev/null 2>&1; then
+                print_success "MOTD scripts executed successfully"
+            else
+                print_warning "Some MOTD scripts may have errors"
+            fi
+            
+            # 6. Display current MOTD
+            echo ""
+            print_message "Current MOTD preview:"
+            print_header "─────────────────────────────────────────────"
+            run-parts /etc/update-motd.d/ 2>/dev/null || echo "MOTD generation failed"
+            print_header "─────────────────────────────────────────────"
+            echo ""
+            
         else
             print_warning "MOTD installation completed with warnings"
             rm -f "$MOTD_SCRIPT"
@@ -2668,6 +2764,7 @@ fi
 
 if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     print_message "- Custom MOTD: Installed"
+    print_warning "  Note: MOTD will be visible on next SSH login"
 else
     print_message "- Custom MOTD: Not installed"
 fi
@@ -2787,6 +2884,11 @@ if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
+if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
+    print_warning "$STEP_NUM. Test MOTD: Reconnect via SSH to see custom MOTD"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+
 print_message ""
 print_message "Useful commands:"
 print_message "sudo ufw status verbose"
@@ -2801,6 +2903,9 @@ print_message "sudo crontab -l"
 if [ "$OS" = "debian" ]; then
     print_message "sudo nano /etc/default/grub"
     print_message "cat /proc/cmdline"
+fi
+if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
+    print_message "run-parts /etc/update-motd.d/  # Test MOTD"
 fi
 if [ ! -z "$NEW_USERNAME" ]; then
     print_message "su - $NEW_USERNAME"
