@@ -602,7 +602,7 @@ if [ "$INTERACTIVE" = true ]; then
         read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
         ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
     else
-        # Disable Tataranovich for Debian 13+, Ubuntu, or other
+        # Disable Tataranovich for Debian 13+
         ADD_TATARANOVICH_REPO="n"
         if [ "$OS" = "debian" ] && [ "$VERSION" -ge "13" ]; then
             echo ""
@@ -646,12 +646,29 @@ if [ "$INTERACTIVE" = true ]; then
             read -p "   Add Ubuntu Toolchain PPA? (y/N): " ADD_PPA_TOOLCHAIN
             ADD_PPA_TOOLCHAIN=${ADD_PPA_TOOLCHAIN:-n}
         fi
+        
+        # Ask about Tataranovich repository for Ubuntu
+        echo ""
+        print_message "Do you want to add Tataranovich repository for Ubuntu (custom mc build)?"
+        print_message "This will install Midnight Commander from tataranovich.com"
+        print_message "Repository: https://www.tataranovich.com/ubuntu/"
+        read -p "Add Tataranovich repository for Ubuntu? (y/N): " ADD_TATARANOVICH_UBUNTU
+        ADD_TATARANOVICH_UBUNTU=${ADD_TATARANOVICH_UBUNTU:-n}
     else
         ADD_UBUNTU_PPAS="n"
         ADD_PPA_NGINX="n"
         ADD_PPA_GIT="n"
         ADD_PPA_TOOLCHAIN="n"
+        ADD_TATARANOVICH_UBUNTU="n"
     fi
+    
+    # Ask about disabling IPv6 in /etc/network/interfaces
+    echo ""
+    print_message "Do you want to disable IPv6 in /etc/network/interfaces?"
+    print_message "This will comment out all inet6 configuration lines"
+    print_message "Note: This is useful if you're using static network configuration"
+    read -p "Comment out IPv6 in /etc/network/interfaces? (y/N): " COMMENT_IPV6_INTERFACES
+    COMMENT_IPV6_INTERFACES=${COMMENT_IPV6_INTERFACES:-n}
     
     # Ask about MOTD installation
     print_message "Do you want to install custom MOTD (Message of the Day)?"
@@ -762,10 +779,12 @@ else
     CUSTOM_PORTS=""
     INSTALL_UFW_DOCKER="n"
     ADD_TATARANOVICH_REPO="n"
+    ADD_TATARANOVICH_UBUNTU="n"
     ADD_UBUNTU_PPAS="n"
     ADD_PPA_NGINX="n"
     ADD_PPA_GIT="n"
     ADD_PPA_TOOLCHAIN="n"
+    COMMENT_IPV6_INTERFACES="n"
     INSTALL_GO="n"
     INSTALL_IPSET="n"
     INSTALL_RUSTDESK="n"
@@ -842,7 +861,10 @@ if [ "$OS" = "debian" ]; then
 fi
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
-    print_message "  Tataranovich repository: YES"
+    print_message "  Tataranovich repository (Debian): YES"
+fi
+if [ "$OS" = "ubuntu" ] && { [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; }; then
+    print_message "  Tataranovich repository (Ubuntu): YES"
 fi
 if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; }; then
     print_message "  Ubuntu PPA repositories:"
@@ -856,6 +878,7 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         print_message "    - Ubuntu Toolchain: YES"
     fi
 fi
+print_message "  Comment IPv6 in /etc/network/interfaces: $([ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Custom MOTD: $([ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ] && echo "YES" || echo "NO")"
 if [ ! -z "$CUSTOM_PORTS" ]; then
     print_message "  UFW Custom Ports: $CUSTOM_PORTS"
@@ -1374,6 +1397,70 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
 fi
 
 # ============================================
+# CONFIGURE TATARANOVICH REPOSITORY (UBUNTU)
+# ============================================
+
+if [ "$OS" = "ubuntu" ] && { [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; }; then
+    print_message "Configuring Tataranovich repository for Ubuntu..."
+    
+    # Install required packages if not already installed
+    print_message "Installing prerequisites for Tataranovich repository..."
+    apt-get install -y curl gnupg software-properties-common
+    
+    # Download GPG key
+    print_message "Downloading Tataranovich GPG key..."
+    if curl -fsSL https://www.tataranovich.com/ubuntu/gpg -o /etc/apt/trusted.gpg.d/tataranovich-ubuntu.gpg; then
+        print_message "GPG key downloaded successfully"
+        chmod 644 /etc/apt/trusted.gpg.d/tataranovich-ubuntu.gpg
+    else
+        print_error "Failed to download Tataranovich GPG key"
+        print_warning "Skipping Tataranovich repository configuration"
+        ADD_TATARANOVICH_UBUNTU="n"
+    fi
+    
+    if [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; then
+        # Add repository
+        print_message "Adding Tataranovich repository..."
+        
+        # Use detected codename for repository
+        TATARANOVICH_UBUNTU_CODENAME=${VERSION_CODENAME:-noble}
+        
+        # Backup existing file if present
+        if [ -f /etc/apt/sources.list.d/tataranovich-ubuntu.list ]; then
+            cp /etc/apt/sources.list.d/tataranovich-ubuntu.list /etc/apt/sources.list.d/tataranovich-ubuntu.list.backup.$(date +%Y%m%d-%H%M%S)~
+        fi
+        
+        echo "deb http://www.tataranovich.com/ubuntu ${TATARANOVICH_UBUNTU_CODENAME} main" | tee /etc/apt/sources.list.d/tataranovich-ubuntu.list > /dev/null
+        print_message "Tataranovich repository added: /etc/apt/sources.list.d/tataranovich-ubuntu.list"
+        
+        # Update package lists
+        print_message "Updating package lists with Tataranovich repository..."
+        if apt-get update; then
+            print_success "Package lists updated successfully"
+            
+            # Install mc from Tataranovich repository
+            print_message "Installing Midnight Commander from Tataranovich repository..."
+            if apt-get install -y mc; then
+                print_success "Midnight Commander installed successfully from Tataranovich repository"
+                
+                # Verify installation
+                MC_VERSION=$(mc --version 2>&1 | head -1)
+                print_message "Installed: $MC_VERSION"
+            else
+                print_warning "Failed to install mc from Tataranovich repository"
+                print_message "Installing mc from standard repositories..."
+                apt-get install -y mc || print_warning "Failed to install mc"
+            fi
+        else
+            print_warning "Failed to update package lists with Tataranovich repository"
+            print_message "Installing mc from standard repositories..."
+            apt-get install -y mc || print_warning "Failed to install mc"
+        fi
+    fi
+    echo ""
+fi
+
+# ============================================
 # CONFIGURE TATARANOVICH REPOSITORY (DEBIAN 12 ONLY)
 # ============================================
 
@@ -1636,6 +1723,94 @@ else
     if [ "$OS" = "debian" ]; then
         print_message "Skipping IPv6 GRUB disable (not requested)"
     fi
+fi
+
+# ============================================
+# COMMENT IPv6 IN /etc/network/interfaces
+# ============================================
+
+if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ]; then
+    print_message "Commenting out IPv6 configuration in /etc/network/interfaces..."
+    
+    INTERFACES_FILE="/etc/network/interfaces"
+    
+    if [ ! -f "$INTERFACES_FILE" ]; then
+        print_warning "File $INTERFACES_FILE not found"
+        print_message "Your system may use netplan or NetworkManager instead"
+        print_message "Skipping /etc/network/interfaces IPv6 configuration"
+    else
+        # Backup original interfaces file
+        cp "$INTERFACES_FILE" "${INTERFACES_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original $INTERFACES_FILE backed up"
+        
+        # Check if there are any inet6 lines
+        if grep -q "inet6" "$INTERFACES_FILE"; then
+            print_message "Found IPv6 configuration in $INTERFACES_FILE"
+            
+            # Create temporary file
+            TEMP_FILE=$(mktemp)
+            
+            # Comment out all lines containing inet6 or related to IPv6
+            # This includes iface lines with inet6 and their parameters
+            awk '
+            /^[[:space:]]*iface.*inet6/ {
+                # This is an inet6 interface definition
+                print "#" $0
+                in_inet6_block = 1
+                next
+            }
+            in_inet6_block {
+                # We are in an inet6 block
+                if (/^[[:space:]]*$/ || /^[[:space:]]*#/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
+                    # End of inet6 block
+                    in_inet6_block = 0
+                    print $0
+                } else {
+                    # This line is part of inet6 configuration
+                    print "#" $0
+                }
+                next
+            }
+            {
+                # Regular line, print as is
+                print $0
+            }
+            ' "$INTERFACES_FILE" > "$TEMP_FILE"
+            
+            # Verify the temporary file is not empty
+            if [ -s "$TEMP_FILE" ]; then
+                # Replace original file
+                mv "$TEMP_FILE" "$INTERFACES_FILE"
+                print_success "IPv6 configuration commented out in $INTERFACES_FILE"
+                
+                echo ""
+                print_message "Modified $INTERFACES_FILE preview:"
+                print_header "─────────────────────────────────────────────"
+                grep -A 2 -B 2 "inet6" "$INTERFACES_FILE" 2>/dev/null || print_message "No IPv6 lines remaining (all commented)"
+                print_header "─────────────────────────────────────────────"
+                echo ""
+                
+                print_warning "Network configuration changed. You may need to restart networking:"
+                print_message "  sudo systemctl restart networking"
+                print_message "  OR reboot the system"
+            else
+                print_error "Failed to create modified interfaces file"
+                rm -f "$TEMP_FILE"
+                # Restore from backup
+                LATEST_BACKUP=$(ls -t ${INTERFACES_FILE}.backup.*~ 2>/dev/null | head -1)
+                if [ ! -z "$LATEST_BACKUP" ]; then
+                    cp "$LATEST_BACKUP" "$INTERFACES_FILE"
+                    print_message "Restored from backup"
+                fi
+            fi
+        else
+            print_message "No IPv6 configuration found in $INTERFACES_FILE"
+            print_message "File is already without IPv6 or uses different format"
+        fi
+    fi
+    echo ""
+else
+    print_message "Skipping IPv6 commenting in /etc/network/interfaces (not requested)"
 fi
 
 # ============================================
@@ -2914,10 +3089,13 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
     if [ "$OS" = "debian" ]; then
         print_message "- Debian repositories configured"
         if [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; then
-            print_message "- Tataranovich repository: ADDED (custom mc)"
+            print_message "- Tataranovich repository (Debian): ADDED (custom mc)"
         fi
     else
         print_message "- Ubuntu repositories configured (main, restricted, universe, multiverse)"
+        if [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; then
+            print_message "- Tataranovich repository (Ubuntu): ADDED (custom mc)"
+        fi
         if [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; then
             print_message "- Ubuntu PPA repositories:"
             if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
@@ -2930,6 +3108,13 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
                 print_message "  ✓ ppa:ubuntu-toolchain-r/test (Latest GCC)"
             fi
         fi
+    fi
+fi
+
+if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ]; then
+    if [ -f /etc/network/interfaces ]; then
+        print_message "- IPv6 commented in /etc/network/interfaces"
+        print_warning "  Note: May require network restart or reboot"
     fi
 fi
 
