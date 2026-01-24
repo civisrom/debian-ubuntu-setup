@@ -927,7 +927,7 @@ fi
 
 # Update package lists
 print_message "Updating package lists..."
-if apt update; then
+if apt-get update; then
     print_message "Package lists updated successfully"
 else
     print_error "CRITICAL: Failed to update package lists"
@@ -1008,22 +1008,22 @@ print_message "Installing packages..."
 
 if [ "$OS" = "debian" ]; then
     print_message "Installing common packages for Debian..."
-    apt install -y "${COMMON_PACKAGES[@]}"
+    apt-get install -y "${COMMON_PACKAGES[@]}"
     
     if [ ${#DEBIAN_PACKAGES[@]} -gt 0 ]; then
         print_message "Installing Debian-specific packages..."
-        apt install -y "${DEBIAN_PACKAGES[@]}" || print_warning "Some Debian-specific packages may not be available"
+        apt-get install -y "${DEBIAN_PACKAGES[@]}" || print_warning "Some Debian-specific packages may not be available"
     else
         print_message "No Debian-specific packages to install"
     fi
     
 elif [ "$OS" = "ubuntu" ]; then
     print_message "Installing common packages for Ubuntu..."
-    apt install -y "${COMMON_PACKAGES[@]}"
+    apt-get install -y "${COMMON_PACKAGES[@]}"
     
     if [ ${#UBUNTU_PACKAGES[@]} -gt 0 ]; then
         print_message "Installing Ubuntu-specific packages..."
-        apt install -y "${UBUNTU_PACKAGES[@]}" || print_warning "Some Ubuntu-specific packages may not be available"
+        apt-get install -y "${UBUNTU_PACKAGES[@]}" || print_warning "Some Ubuntu-specific packages may not be available"
     else
         print_message "No Ubuntu-specific packages to install"
     fi
@@ -1161,7 +1161,7 @@ EOF
     fi
     
     print_message "Debian repositories configured"
-    apt update
+    apt-get update
     echo ""
 fi
 
@@ -1228,7 +1228,7 @@ EOF
     print_message "Format: DEB822 (ubuntu.sources)"
     print_message "Codename: ${UBUNTU_CODENAME^}"
     print_message "Repositories enabled: main, restricted, universe, multiverse"
-    apt update
+    apt-get update
     echo ""
 fi
 
@@ -2000,12 +2000,12 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
         print_error "Kernel headers not found at: $KERNEL_HEADERS_DIR"
         print_error "Installing kernel headers..."
         
-        if apt install -y linux-headers-${KERNEL_VERSION}; then
+        if apt-get install -y linux-headers-${KERNEL_VERSION}; then
             print_message "Kernel headers installed successfully"
         else
             print_error "Failed to install kernel headers"
             print_error "ipset compilation requires kernel headers"
-            print_message "Try manually: sudo apt install linux-headers-$(uname -r)"
+            print_message "Try manually: sudo apt-get install linux-headers-$(uname -r)"
             print_message "Skipping ipset installation"
             INSTALL_IPSET="n"
         fi
@@ -2231,10 +2231,15 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             # Post-installation fixes for MOTD
             print_message "Applying MOTD post-installation fixes..."
             
+            # Initialize SSH restart flag
+            SSH_RESTART_NEEDED=false
+            
             # 1. Ensure all scripts in /etc/update-motd.d/ are executable
             if [ -d /etc/update-motd.d ]; then
                 chmod +x /etc/update-motd.d/* 2>/dev/null
-                print_message "Set executable permissions on MOTD scripts"
+                # Also ensure directory permissions are correct
+                chmod 755 /etc/update-motd.d
+                print_message "Set executable permissions on MOTD scripts and directory"
             fi
             
             # 2. Check and fix SSH configuration for MOTD
@@ -2243,6 +2248,13 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                 # Backup SSH config if not already backed up
                 if [ ! -f "${SSHD_CONFIG}.backup.motd" ]; then
                     cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup.motd"
+                fi
+                
+                # Check UsePAM parameter (must be yes for MOTD)
+                if grep -q "^UsePAM no" "$SSHD_CONFIG"; then
+                    sed -i 's/^UsePAM no/UsePAM yes/' "$SSHD_CONFIG"
+                    print_message "Enabled UsePAM in SSH config (required for MOTD)"
+                    SSH_RESTART_NEEDED=true
                 fi
                 
                 # Check PrintMotd parameter
@@ -2273,7 +2285,7 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                 if [ "$SSH_RESTART_NEEDED" = true ]; then
                     print_message "Restarting SSH service for MOTD changes..."
                     if systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; then
-                        print_message "SSH service restarted successfully"
+                        print_success "SSH service restarted successfully"
                     else
                         print_warning "Could not restart SSH automatically, please restart manually"
                     fi
@@ -2282,7 +2294,7 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             
             # 3. Disable static MOTD file if exists
             if [ -f /etc/motd ]; then
-                mv /etc/motd /etc/motd.backup.$(date +%Y%m%d-%H%M%S)
+                mv /etc/motd /etc/motd.backup.$(date +%Y%m%d-%H%M%S)~
                 touch /etc/motd
                 print_message "Disabled static /etc/motd file"
             fi
@@ -2290,6 +2302,11 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             # 4. Check PAM configuration
             PAM_SSHD="/etc/pam.d/sshd"
             if [ -f "$PAM_SSHD" ]; then
+                # Backup PAM config
+                if [ ! -f "${PAM_SSHD}.backup.motd" ]; then
+                    cp "$PAM_SSHD" "${PAM_SSHD}.backup.motd"
+                fi
+                
                 if ! grep -q "pam_motd.so" "$PAM_SSHD"; then
                     print_warning "PAM MOTD module not found in $PAM_SSHD"
                     print_message "Adding pam_motd.so to PAM configuration..."
@@ -2297,24 +2314,78 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                     echo "# Display MOTD" >> "$PAM_SSHD"
                     echo "session optional pam_motd.so motd=/run/motd.dynamic" >> "$PAM_SSHD"
                     echo "session optional pam_motd.so noupdate" >> "$PAM_SSHD"
+                    print_message "PAM MOTD configuration added"
+                else
+                    print_message "PAM MOTD module already configured"
                 fi
-            fi
-            
-            # 5. Test MOTD generation
-            print_message "Testing MOTD generation..."
-            if run-parts /etc/update-motd.d/ > /dev/null 2>&1; then
-                print_success "MOTD scripts executed successfully"
             else
-                print_warning "Some MOTD scripts may have errors"
+                print_warning "PAM SSH config not found: $PAM_SSHD"
             fi
             
-            # 6. Display current MOTD
+            # 5. Install run-parts if not available
+            if ! command -v run-parts &> /dev/null; then
+                print_warning "run-parts not found, installing debianutils..."
+                apt-get install -y debianutils || print_warning "Failed to install debianutils"
+            fi
+            
+            # 6. Create /run/motd.dynamic directory if not exists
+            if [ ! -d /run/motd.dynamic ]; then
+                mkdir -p /run/motd.dynamic
+                chmod 755 /run/motd.dynamic
+                print_message "Created /run/motd.dynamic directory"
+            fi
+            
+            # 7. Test MOTD generation
+            print_message "Testing MOTD generation..."
+            if command -v run-parts &> /dev/null; then
+                if run-parts /etc/update-motd.d/ > /tmp/motd-test.txt 2>&1; then
+                    print_success "MOTD scripts executed successfully"
+                    
+                    # Check if output was generated
+                    if [ -s /tmp/motd-test.txt ]; then
+                        print_message "MOTD content generated successfully"
+                    else
+                        print_warning "MOTD scripts ran but produced no output"
+                    fi
+                else
+                    print_warning "Some MOTD scripts may have errors"
+                    print_message "Error details:"
+                    cat /tmp/motd-test.txt
+                fi
+                rm -f /tmp/motd-test.txt
+            else
+                print_warning "Cannot test MOTD without run-parts"
+            fi
+            
+            # 8. Display current MOTD preview
             echo ""
-            print_message "Current MOTD preview:"
-            print_header "─────────────────────────────────────────────"
-            run-parts /etc/update-motd.d/ 2>/dev/null || echo "MOTD generation failed"
-            print_header "─────────────────────────────────────────────"
+            print_header "═══════════════════════════════════════════════"
+            print_header "   MOTD Preview (will be shown on SSH login)"
+            print_header "═══════════════════════════════════════════════"
             echo ""
+            
+            if command -v run-parts &> /dev/null && [ -d /etc/update-motd.d ]; then
+                run-parts /etc/update-motd.d/ 2>/dev/null || echo "MOTD generation failed - please run: run-parts /etc/update-motd.d/"
+            else
+                print_warning "Cannot display MOTD preview"
+            fi
+            
+            echo ""
+            print_header "═══════════════════════════════════════════════"
+            echo ""
+            
+            # Summary of MOTD configuration
+            print_success "MOTD configuration completed successfully!"
+            print_message "What was configured:"
+            print_message "  ✓ MOTD scripts installed in /etc/update-motd.d/"
+            print_message "  ✓ SSH configured to display MOTD"
+            print_message "  ✓ PAM configured for MOTD"
+            print_message "  ✓ Static MOTD file disabled"
+            print_message ""
+            print_warning "Important: MOTD will be visible on your NEXT SSH login"
+            print_message "To test now: exit and reconnect via SSH"
+            echo ""
+            
             
         else
             print_warning "MOTD installation completed with warnings"
@@ -2340,7 +2411,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
     # Check if p7zip is installed, install if needed
     if ! command -v 7z &> /dev/null; then
         print_message "Installing p7zip-full for archive extraction..."
-        if apt install -y p7zip-full; then
+        if apt-get install -y p7zip-full; then
             print_message "p7zip-full installed successfully"
         else
             print_error "CRITICAL: Failed to install p7zip-full"
