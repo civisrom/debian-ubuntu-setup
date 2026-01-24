@@ -2328,11 +2328,23 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                 apt-get install -y debianutils || print_warning "Failed to install debianutils"
             fi
             
-            # 6. Create /run/motd.dynamic directory if not exists
-            if [ ! -d /run/motd.dynamic ]; then
-                mkdir -p /run/motd.dynamic
-                chmod 755 /run/motd.dynamic
-                print_message "Created /run/motd.dynamic directory"
+            # 6. Ensure /run/motd.dynamic can be created (it's a file, not directory)
+            # PAM will create this file automatically when needed
+            # Just verify /run directory exists (it always does on modern systems)
+            if [ ! -d /run ]; then
+                print_warning "/run directory does not exist (unusual)"
+            else
+                # Remove /run/motd.dynamic if it's incorrectly a directory
+                if [ -d /run/motd.dynamic ]; then
+                    print_warning "/run/motd.dynamic exists as directory, removing..."
+                    rm -rf /run/motd.dynamic
+                    print_message "Removed incorrect directory /run/motd.dynamic"
+                fi
+                # Create empty file if it doesn't exist (optional, PAM will create it)
+                if [ ! -f /run/motd.dynamic ]; then
+                    touch /run/motd.dynamic 2>/dev/null || true
+                    print_message "Prepared /run/motd.dynamic file"
+                fi
             fi
             
             # 7. Test MOTD generation
