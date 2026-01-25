@@ -42,6 +42,11 @@ print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+# Helper function to check if variable is yes
+is_yes() {
+    [ "$1" = "y" ] || [ "$1" = "Y" ]
+}
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root"
@@ -79,7 +84,7 @@ else
 fi
 
 # If OS cannot be detected, ask user to choose (only in interactive mode)
-if [ -z "$DETECTED_OS" ] || { [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ]; }; then
+if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); then
     if [ "$INTERACTIVE" = true ]; then
         print_warning "Cannot detect OS or OS is not supported"
         echo ""
@@ -380,9 +385,27 @@ if [ "$INTERACTIVE" = true ]; then
     CONFIGURE_SSH=${CONFIGURE_SSH:-n}
     
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
-        read -p "Enter new SSH port (default 22): " SSH_PORT
-        SSH_PORT=${SSH_PORT:-22}
-        
+        while true; do
+            read -p "Enter new SSH port (default 22): " SSH_PORT
+            SSH_PORT=${SSH_PORT:-22}
+
+            # Validate port number
+            if [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ]; then
+                # Check if port is already in use
+                if ss -tuln | grep -q ":${SSH_PORT} "; then
+                    print_warning "Port $SSH_PORT is already in use by another service"
+                    read -p "Continue anyway? (y/N): " CONTINUE_PORT
+                    if [ "$CONTINUE_PORT" = "y" ] || [ "$CONTINUE_PORT" = "Y" ]; then
+                        break
+                    fi
+                else
+                    break
+                fi
+            else
+                print_error "Invalid port number. Must be between 1 and 65535"
+            fi
+        done
+
         echo ""
         print_message "Enter usernames for AllowUsers (space-separated, leave empty to skip)"
         print_message "Example: user1 user2 user3"
@@ -390,7 +413,27 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "Suggestion: $NEW_USERNAME"
         fi
         read -p "AllowUsers: " SSH_ALLOW_USERS
-        
+
+        # Validate users exist
+        if [ ! -z "$SSH_ALLOW_USERS" ]; then
+            INVALID_USERS=""
+            for username in $SSH_ALLOW_USERS; do
+                if ! id "$username" &>/dev/null; then
+                    INVALID_USERS="$INVALID_USERS $username"
+                fi
+            done
+
+            if [ ! -z "$INVALID_USERS" ]; then
+                print_warning "The following users do not exist:$INVALID_USERS"
+                print_warning "Setting AllowUsers with non-existent users may lock you out of SSH!"
+                read -p "Continue anyway? (y/N): " CONTINUE_USERS
+                if [ "$CONTINUE_USERS" != "y" ] && [ "$CONTINUE_USERS" != "Y" ]; then
+                    SSH_ALLOW_USERS=""
+                    print_message "AllowUsers configuration skipped"
+                fi
+            fi
+        fi
+
         echo ""
         print_header "Advanced SSH Security Parameters"
         print_message "Configure additional SSH security settings"
@@ -1044,8 +1087,6 @@ COMMON_PACKAGES=(
     libwww-perl
     apg
     makepasswd
-    mc
-    mc-data
     squashfs-tools
     jq
     bash
@@ -1117,7 +1158,9 @@ fi
 
 if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
     print_message "Setting root password..."
-    echo "root:$ROOT_PASSWORD" | chpasswd
+    chpasswd << EOF
+root:$ROOT_PASSWORD
+EOF
     print_message "Root password set successfully"
     echo ""
 fi
@@ -1134,7 +1177,9 @@ if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
         print_message "User $NEW_USERNAME created successfully"
         
         # Set password
-        echo "$NEW_USERNAME:$NEW_USER_PASSWORD" | chpasswd
+        chpasswd << EOF
+$NEW_USERNAME:$NEW_USER_PASSWORD
+EOF
         print_message "Password set for $NEW_USERNAME"
         
         # Add user to sudo group
@@ -1162,7 +1207,7 @@ fi
 # CONFIGURE SSH KEY FOR USER
 # ============================================
 
-if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
+if ( [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] ) && [ ! -z "$NEW_USERNAME" ]; then
     print_message "Configuring SSH key for $NEW_USERNAME"
     
     USER_HOME=$(eval echo ~$NEW_USERNAME)
@@ -1535,7 +1580,7 @@ fi
 # INSTALL AND CONFIGURE ZSH FOR USER
 # ============================================
 
-if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] && [ ! -z "$NEW_USERNAME" ]; then
+if ( [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] ) && [ ! -z "$NEW_USERNAME" ]; then
     print_message "Installing Oh My Zsh for $NEW_USERNAME"
     
     USER_HOME=$(eval echo ~$NEW_USERNAME)
@@ -1697,7 +1742,8 @@ if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_
             
             # Update GRUB
             print_message "Updating GRUB configuration..."
-            if update-grub 2>&1 | tee /tmp/grub-update.log; then
+            update-grub 2>&1 | tee /tmp/grub-update.log
+            if [ ${PIPESTATUS[0]} -eq 0 ]; then
                 print_success "GRUB configuration updated successfully"
                 print_warning "IPv6 will be disabled at kernel level after reboot"
             else
@@ -2019,8 +2065,9 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
     else
         # Backup original before.rules
         if [ -f "$UFW_BEFORE_RULES" ]; then
-            # Save original permissions
-            ORIGINAL_PERMS=$(stat -c "%a" "$UFW_BEFORE_RULES" 2>/dev/null || stat -f "%Mp%Lp" "$UFW_BEFORE_RULES" 2>/dev/null)
+            # Save original permissions (numeric format for chmod)
+            ORIGINAL_PERMS=$(stat -c "%a" "$UFW_BEFORE_RULES" 2>/dev/null || \
+                            stat -f "%A" "$UFW_BEFORE_RULES" 2>/dev/null | tail -c 4)
             
             cp "$UFW_BEFORE_RULES" "/etc/ufw/before.rules.backup.$(date +%Y%m%d-%H%M%S)~"
             print_message "Original before.rules backed up"
@@ -2233,67 +2280,96 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
         fi
         
         print_message "Latest Go version: $LATEST_GO_VERSION"
-        
-        # Download Go
-        GO_ARCHIVE="${LATEST_GO_VERSION}.linux-amd64.tar.gz"
-        GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
-        
-        print_message "Downloading Go from: $GO_URL"
-        if wget -q --show-progress "$GO_URL" -O "/tmp/${GO_ARCHIVE}"; then
-            print_message "Go downloaded successfully"
-            
-            # Remove old Go installation
-            if [ -d /usr/local/go ]; then
-                print_message "Removing old Go installation..."
-                rm -rf /usr/local/go
-            fi
-            
-            # Extract Go
-            print_message "Extracting Go..."
-            tar -C /usr/local -xzf "/tmp/${GO_ARCHIVE}"
-            print_message "Go extracted to /usr/local/go"
-            
-            # Cleanup
-            rm "/tmp/${GO_ARCHIVE}"
-            
-            # Add Go to PATH for the user
-            print_message "Configuring Go environment for $NEW_USERNAME..."
-            
-            # Determine which shell config file to use
-            if [ -f "$USER_HOME/.zshrc" ]; then
-                SHELL_RC="$USER_HOME/.zshrc"
-            elif [ -f "$USER_HOME/.bashrc" ]; then
-                SHELL_RC="$USER_HOME/.bashrc"
-            else
-                SHELL_RC="$USER_HOME/.profile"
-            fi
-            
-            # Add Go to PATH if not already present
-            if ! grep -q "export PATH=.*:/usr/local/go/bin" "$SHELL_RC" 2>/dev/null; then
-                sudo -u "$NEW_USERNAME" bash << EOF
-                    echo "" >> "$SHELL_RC"
-                    echo "# Go language" >> "$SHELL_RC"
-                    echo "export PATH=\$PATH:/usr/local/go/bin" >> "$SHELL_RC"
-                    echo "export PATH=\$PATH:\$HOME/go/bin" >> "$SHELL_RC"
-EOF
-                print_message "Go PATH added to $SHELL_RC"
-            else
-                print_message "Go PATH already configured in $SHELL_RC"
-            fi
-            
-            # Verify installation
-            if /usr/local/go/bin/go version &> /dev/null; then
-                GO_INSTALLED_VERSION=$(/usr/local/go/bin/go version)
-                print_message "Go installed successfully: $GO_INSTALLED_VERSION"
-                print_message "Go binary location: /usr/local/go/bin/go"
-                print_message "User $NEW_USERNAME can use Go after reloading shell or running: source $SHELL_RC"
-            else
-                print_error "Go installation verification failed"
-            fi
+
+        # Detect system architecture
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64)
+                GO_ARCH="amd64"
+                ;;
+            aarch64|arm64)
+                GO_ARCH="arm64"
+                ;;
+            armv6l)
+                GO_ARCH="armv6l"
+                ;;
+            i386|i686)
+                GO_ARCH="386"
+                ;;
+            *)
+                print_error "Unsupported architecture: $ARCH"
+                print_error "Go installation skipped"
+                GO_ARCH=""
+                ;;
+        esac
+
+        if [ -z "$GO_ARCH" ]; then
+            # Skip Go installation for unsupported architectures
+            :
         else
-            print_error "Failed to download Go"
+            print_message "Detected architecture: $ARCH (Go architecture: $GO_ARCH)"
+
+            # Download Go
+            GO_ARCHIVE="${LATEST_GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+            GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
+
+            print_message "Downloading Go from: $GO_URL"
+            if wget -q --show-progress "$GO_URL" -O "/tmp/${GO_ARCHIVE}"; then
+                print_message "Go downloaded successfully"
+
+                # Remove old Go installation
+                if [ -d /usr/local/go ]; then
+                    print_message "Removing old Go installation..."
+                    rm -rf /usr/local/go
+                fi
+
+                # Extract Go
+                print_message "Extracting Go..."
+                tar -C /usr/local -xzf "/tmp/${GO_ARCHIVE}"
+                print_message "Go extracted to /usr/local/go"
+
+                # Cleanup
+                rm "/tmp/${GO_ARCHIVE}"
+
+                # Add Go to PATH for the user
+                print_message "Configuring Go environment for $NEW_USERNAME..."
+
+                # Determine which shell config file to use
+                if [ -f "$USER_HOME/.zshrc" ]; then
+                    SHELL_RC="$USER_HOME/.zshrc"
+                elif [ -f "$USER_HOME/.bashrc" ]; then
+                    SHELL_RC="$USER_HOME/.bashrc"
+                else
+                    SHELL_RC="$USER_HOME/.profile"
+                fi
+
+                # Add Go to PATH if not already present
+                if ! grep -q "export PATH=.*:/usr/local/go/bin" "$SHELL_RC" 2>/dev/null; then
+                    sudo -u "$NEW_USERNAME" bash << EOF
+                        echo "" >> "$SHELL_RC"
+                        echo "# Go language" >> "$SHELL_RC"
+                        echo "export PATH=\$PATH:/usr/local/go/bin" >> "$SHELL_RC"
+                        echo "export PATH=\$PATH:\$HOME/go/bin" >> "$SHELL_RC"
+EOF
+                    print_message "Go PATH added to $SHELL_RC"
+                else
+                    print_message "Go PATH already configured in $SHELL_RC"
+                fi
+
+                # Verify installation
+                if /usr/local/go/bin/go version &> /dev/null; then
+                    GO_INSTALLED_VERSION=$(/usr/local/go/bin/go version)
+                    print_message "Go installed successfully: $GO_INSTALLED_VERSION"
+                    print_message "Go binary location: /usr/local/go/bin/go"
+                    print_message "User $NEW_USERNAME can use Go after reloading shell or running: source $SHELL_RC"
+                else
+                    print_error "Go installation verification failed"
+                fi
+            else
+                print_error "Failed to download Go"
+            fi
         fi
-        
+
         echo ""
     fi
 else
@@ -2761,9 +2837,13 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         # Create extraction directory
         mkdir -p "$UFW_EXTRACT_DIR"
         
-        # Extract with password
+        # Extract with password (using temporary password file for security)
         print_message "Extracting archive..."
-        if 7z x -p"${UFW_CUSTOM_RULES_PASSWORD}" -o"${UFW_EXTRACT_DIR}" "$UFW_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+        UFW_PASS_FILE=$(mktemp)
+        chmod 600 "$UFW_PASS_FILE"
+        printf "%s" "${UFW_CUSTOM_RULES_PASSWORD}" > "$UFW_PASS_FILE"
+        if 7z x "-p$(cat "$UFW_PASS_FILE")" -o"${UFW_EXTRACT_DIR}" "$UFW_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+            rm -f "$UFW_PASS_FILE"
             print_message "Archive extracted successfully"
             
             # Check if we need to extract archive to /opt
@@ -2780,9 +2860,13 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                     # Create extraction directory
                     mkdir -p "$OPT_EXTRACT_DIR"
                     
-                    # Extract with password
+                    # Extract with password (using temporary password file for security)
                     print_message "Extracting opt.7z archive..."
-                    if 7z x -p"${UFW_CUSTOM_RULES_PASSWORD}" -o"${OPT_EXTRACT_DIR}" "$OPT_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+                    OPT_PASS_FILE=$(mktemp)
+                    chmod 600 "$OPT_PASS_FILE"
+                    printf "%s" "${UFW_CUSTOM_RULES_PASSWORD}" > "$OPT_PASS_FILE"
+                    if 7z x "-p$(cat "$OPT_PASS_FILE")" -o"${OPT_EXTRACT_DIR}" "$OPT_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+                        rm -f "$OPT_PASS_FILE"
                         print_message "opt.7z archive extracted successfully"
                         
                         # Copy all contents to /opt
@@ -2816,6 +2900,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                         print_message "opt.7z archive deleted"
                     else
                         print_error "Failed to extract opt.7z archive. Check if password is correct."
+                        rm -f "$OPT_PASS_FILE"
                         rm -f "$OPT_ARCHIVE_FILE"
                     fi
                 else
@@ -2887,6 +2972,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         else
             print_error "Failed to extract archive. Check if password is correct."
             print_error "Password authentication failed or archive is corrupted"
+            rm -f "$UFW_PASS_FILE"
             rm -f "$UFW_ARCHIVE_FILE"
         fi
     else
