@@ -8,7 +8,9 @@
 set -e
 
 SCRIPT_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh"
+CHECKSUM_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh.sha256"
 TEMP_SCRIPT="/tmp/system-setup-$$.sh"
+TEMP_CHECKSUM="/tmp/system-setup-$$.sha256"
 
 # Colors
 RED='\033[0;31m'
@@ -24,6 +26,10 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root"
@@ -32,11 +38,35 @@ fi
 
 # Download script
 print_message "Downloading setup script..."
-if wget -q "$SCRIPT_URL" -O "$TEMP_SCRIPT"; then
+if wget --show-progress "$SCRIPT_URL" -O "$TEMP_SCRIPT" 2>&1 | grep -v "^$"; then
     print_message "Download complete"
 else
     print_error "Failed to download script"
     exit 1
+fi
+
+# Download and verify checksum if available
+print_message "Verifying integrity..."
+if wget -q "$CHECKSUM_URL" -O "$TEMP_CHECKSUM" 2>/dev/null; then
+    # Extract expected checksum
+    EXPECTED_CHECKSUM=$(cat "$TEMP_CHECKSUM" | awk '{print $1}')
+
+    # Calculate actual checksum
+    ACTUAL_CHECKSUM=$(sha256sum "$TEMP_SCRIPT" | awk '{print $1}')
+
+    if [ "$EXPECTED_CHECKSUM" = "$ACTUAL_CHECKSUM" ]; then
+        print_message "Integrity check passed"
+    else
+        print_error "Integrity check failed!"
+        print_error "Expected: $EXPECTED_CHECKSUM"
+        print_error "Got:      $ACTUAL_CHECKSUM"
+        rm -f "$TEMP_SCRIPT" "$TEMP_CHECKSUM"
+        exit 1
+    fi
+    rm -f "$TEMP_CHECKSUM"
+else
+    print_warning "Checksum file not available, skipping integrity check"
+    print_warning "This is less secure. Consider adding a checksum file to the repository."
 fi
 
 # Make executable

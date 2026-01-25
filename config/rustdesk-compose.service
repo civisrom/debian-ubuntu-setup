@@ -1,15 +1,36 @@
 [Unit]
-Description=Rustdesk Docker Compose Service
+Description=RustDesk Docker Compose Service
+Documentation=https://github.com/civisrom/debian-ubuntu-setup
 Requires=docker.service
-After=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Working directory - change if installed to different location
 WorkingDirectory=/root/rustdesk
-ExecStartPre=/bin/sleep 30
-ExecStart=/usr/bin/docker compose up -d
+# Wait for Docker to be fully ready instead of fixed sleep
+ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do docker info >/dev/null 2>&1 && break || sleep 3; done'
+# Pull latest images before starting (optional, can be removed for faster startup)
+ExecStartPre=-/usr/bin/docker compose pull -q
+# Start containers
+ExecStart=/usr/bin/docker compose up -d --wait
+# Reload containers configuration
+ExecReload=/usr/bin/docker compose up -d --force-recreate
+# Stop containers
 ExecStop=/usr/bin/docker compose down
+# Keep service active after start
 RemainAfterExit=yes
+# Restart on failure
+Restart=on-failure
+RestartSec=30
+# Timeouts
+TimeoutStartSec=300
+TimeoutStopSec=120
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rustdesk-compose
 
 [Install]
 WantedBy=multi-user.target
