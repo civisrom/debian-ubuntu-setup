@@ -1063,6 +1063,8 @@ fi
 # Common packages for both Debian and Ubuntu
 COMMON_PACKAGES=(
     htop
+    mc
+    mc-data
     wget
     iptables
     ufw
