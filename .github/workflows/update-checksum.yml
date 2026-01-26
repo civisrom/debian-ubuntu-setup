@@ -1,0 +1,99 @@
+name: Auto-update system-setup.sh checksum
+
+# Trigger when system-setup.sh is modified
+on:
+  push:
+    paths:
+      - 'system-setup.sh'
+    branches:
+      - main
+      - 'claude/**'
+
+# Allow only one concurrent workflow
+concurrency:
+  group: checksum-update-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-checksum:
+    runs-on: ubuntu-latest
+
+    # Skip if commit message contains [skip-checksum] or if it's already a checksum update
+    if: |
+      !contains(github.event.head_commit.message, '[skip-checksum]') &&
+      !contains(github.event.head_commit.message, 'Auto-update checksum')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if checksum needs update
+        id: check
+        run: |
+          # Calculate current checksum
+          ACTUAL_CHECKSUM=$(sha256sum system-setup.sh | awk '{print $1}')
+
+          # Get checksum from file (if exists)
+          if [ -f system-setup.sh.sha256 ]; then
+            STORED_CHECKSUM=$(cat system-setup.sh.sha256 | awk '{print $1}')
+          else
+            STORED_CHECKSUM=""
+          fi
+
+          echo "actual=$ACTUAL_CHECKSUM" >> $GITHUB_OUTPUT
+          echo "stored=$STORED_CHECKSUM" >> $GITHUB_OUTPUT
+
+          if [ "$ACTUAL_CHECKSUM" != "$STORED_CHECKSUM" ]; then
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "✅ Checksum needs update"
+            echo "   Current:  $ACTUAL_CHECKSUM"
+            echo "   Stored:   $STORED_CHECKSUM"
+          else
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "✅ Checksum is already up to date"
+          fi
+
+      - name: Update checksum file
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          echo "📝 Updating checksum file..."
+          sha256sum system-setup.sh > system-setup.sh.sha256
+          cat system-setup.sh.sha256
+
+      - name: Configure Git
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+      - name: Commit and push changes
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          git add system-setup.sh.sha256
+          git commit -m "Auto-update checksum for system-setup.sh [skip-checksum]
+
+          Updated by GitHub Actions
+          Triggered by: ${{ github.event.head_commit.message }}
+          Commit: ${{ github.sha }}
+
+          Old checksum: ${{ steps.check.outputs.stored }}
+          New checksum: ${{ steps.check.outputs.actual }}"
+
+          git push
+
+      - name: Summary
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          echo "### ✅ Checksum Updated Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**File:** system-setup.sh" >> $GITHUB_STEP_SUMMARY
+          echo "**Old checksum:** \`${{ steps.check.outputs.stored }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**New checksum:** \`${{ steps.check.outputs.actual }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The checksum file has been automatically updated and committed." >> $GITHUB_STEP_SUMMARY
