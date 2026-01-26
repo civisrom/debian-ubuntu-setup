@@ -2640,8 +2640,8 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             SSHD_CONFIG="/etc/ssh/sshd_config"
             if [ -f "$SSHD_CONFIG" ]; then
                 # Backup SSH config if not already backed up
-                if [ ! -f "${SSHD_CONFIG}.backup.motd" ]; then
-                    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup.motd"
+                if [ ! -f "${SSHD_CONFIG}.backup.motd~" ]; then
+                    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup.motd~"
                 fi
                 
                 # Check UsePAM parameter (must be yes for MOTD)
@@ -2697,8 +2697,8 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             PAM_SSHD="/etc/pam.d/sshd"
             if [ -f "$PAM_SSHD" ]; then
                 # Backup PAM config
-                if [ ! -f "${PAM_SSHD}.backup.motd" ]; then
-                    cp "$PAM_SSHD" "${PAM_SSHD}.backup.motd"
+                if [ ! -f "${PAM_SSHD}.backup.motd~" ]; then
+                    cp "$PAM_SSHD" "${PAM_SSHD}.backup.motd~"
                 fi
                 
                 if ! grep -q "pam_motd.so" "$PAM_SSHD"; then
