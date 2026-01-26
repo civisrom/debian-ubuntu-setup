@@ -1,0 +1,70 @@
+name: Verify checksum integrity
+
+# Run on pull requests and pushes to main
+on:
+  pull_request:
+    paths:
+      - 'system-setup.sh'
+      - 'system-setup.sh.sha256'
+  push:
+    branches:
+      - main
+    paths:
+      - 'system-setup.sh'
+      - 'system-setup.sh.sha256'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify checksum
+        id: verify
+        run: |
+          echo "🔍 Verifying checksum integrity..."
+
+          # Calculate actual checksum
+          ACTUAL_CHECKSUM=$(sha256sum system-setup.sh | awk '{print $1}')
+          echo "Actual checksum:  $ACTUAL_CHECKSUM"
+
+          # Get stored checksum
+          if [ -f system-setup.sh.sha256 ]; then
+            STORED_CHECKSUM=$(cat system-setup.sh.sha256 | awk '{print $1}')
+            echo "Stored checksum:  $STORED_CHECKSUM"
+
+            if [ "$ACTUAL_CHECKSUM" = "$STORED_CHECKSUM" ]; then
+              echo "✅ Checksum verification PASSED"
+              echo "status=pass" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Checksum verification FAILED"
+              echo "status=fail" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          else
+            echo "⚠️ Checksum file not found"
+            echo "status=missing" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Success Summary
+        if: steps.verify.outputs.status == 'pass'
+        run: |
+          echo "### ✅ Checksum Verification Passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The checksum file matches the system-setup.sh script." >> $GITHUB_STEP_SUMMARY
+          echo "Installation via \`install.sh\` will work correctly." >> $GITHUB_STEP_SUMMARY
+
+      - name: Failure Summary
+        if: failure()
+        run: |
+          echo "### ❌ Checksum Verification Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Problem:** The checksum file does not match system-setup.sh" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Solution:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Wait for automatic update (if on main/claude/* branch)" >> $GITHUB_STEP_SUMMARY
+          echo "2. Or run manually: \`./update-checksum.sh\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Then commit: \`git add system-setup.sh.sha256 && git commit && git push\`" >> $GITHUB_STEP_SUMMARY
