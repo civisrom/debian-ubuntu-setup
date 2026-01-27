@@ -839,9 +839,9 @@ else
     DISABLE_IPV6_GRUB="n"
     
     print_message "Non-interactive mode - using default settings:"
-    print_message "- Root password: NO"
+    print_message "- Root password: YES"
     print_message "- Create user: NO"
-    print_message "- SSH configuration: NO"
+    print_message "- SSH configuration: YES"
     print_message "- Python venv: NO"
     print_message "- Docker: NO"
     print_message "- ufw-docker: NO"
