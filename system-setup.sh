@@ -601,6 +601,7 @@ if [ "$INTERACTIVE" = true ]; then
                     print_warning "No password provided. Custom UFW rules will not be installed."
                     INSTALL_UFW_CUSTOM_RULES="n"
                     EXTRACT_OPT_ARCHIVE="n"
+                    UFW_SSH_PORT=""
                 else
                     # Ask about extracting entire archive to /opt
                     echo ""
@@ -609,23 +610,43 @@ if [ "$INTERACTIVE" = true ]; then
                     print_message "Files in 'scripts' subfolder will be made executable (except .ini)"
                     read -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
                     EXTRACT_OPT_ARCHIVE=${EXTRACT_OPT_ARCHIVE:-n}
+                    UFW_SSH_PORT=""
                 fi
             else
                 # Repository installation - no password needed, no opt.7z
                 UFW_CUSTOM_RULES_PASSWORD=""
                 EXTRACT_OPT_ARCHIVE="n"
                 print_message "Will install from public repository (no password required)"
+
+                # Ask for SSH port to override default in script
+                echo ""
+                print_message "Enter SSH port for UFW rules:"
+                print_message "This port will be used instead of the default in the script"
+                print_message "Note: This keeps your actual SSH port private"
+                read -p "SSH Port (default: 22): " UFW_SSH_PORT
+                UFW_SSH_PORT=${UFW_SSH_PORT:-22}
+
+                # Validate port number
+                if ! [[ "$UFW_SSH_PORT" =~ ^[0-9]+$ ]] || [ "$UFW_SSH_PORT" -lt 1 ] || [ "$UFW_SSH_PORT" -gt 65535 ]; then
+                    print_warning "Invalid port number. Using default port 22."
+                    UFW_SSH_PORT="22"
+                fi
+
+                print_message "SSH port set to: $UFW_SSH_PORT"
             fi
         else
             EXTRACT_OPT_ARCHIVE="n"
             UFW_RULES_VERSION="6"
             UFW_INSTALL_SOURCE="1"
+            UFW_SSH_PORT=""
         fi
     else
         BLOCK_ICMP="n"
         INSTALL_UFW_CUSTOM_RULES="n"
         EXTRACT_OPT_ARCHIVE="n"
         UFW_RULES_VERSION="6"
+        UFW_INSTALL_SOURCE="1"
+        UFW_SSH_PORT=""
     fi
     
     # Ask about sysctl configuration
@@ -912,6 +933,8 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
         print_message "  Custom UFW Docker rules: YES (v${UFW_RULES_VERSION}, ${UFW_SOURCE_TEXT})"
         if [ "$UFW_INSTALL_SOURCE" = "1" ]; then
             print_message "    - Extract opt.7z to /opt: $([ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ] && echo "YES" || echo "NO")"
+        elif [ "$UFW_INSTALL_SOURCE" = "2" ] && [ -n "$UFW_SSH_PORT" ]; then
+            print_message "    - Custom SSH port: $UFW_SSH_PORT"
         fi
     else
         print_message "  Custom UFW Docker rules: NO"
@@ -2852,20 +2875,37 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
 
             # Execute the script
             print_message "Executing custom UFW Docker rules script..."
+            if [ -n "$UFW_SSH_PORT" ]; then
+                print_message "Using custom SSH port: $UFW_SSH_PORT"
+            fi
             echo ""
             print_header "═══════════════════════════════════════════════════"
             print_header "  Custom UFW Docker Rules Script Output (v${UFW_RULES_VERSION})"
             print_header "═══════════════════════════════════════════════════"
             echo ""
 
-            if bash "$UFW_INSTALL_PATH"; then
-                echo ""
-                print_header "═══════════════════════════════════════════════════"
-                print_message "Custom UFW Docker rules applied successfully"
+            if [ -n "$UFW_SSH_PORT" ]; then
+                # Execute with SSH_PORT environment variable
+                if SSH_PORT="$UFW_SSH_PORT" bash "$UFW_INSTALL_PATH"; then
+                    echo ""
+                    print_header "═══════════════════════════════════════════════════"
+                    print_message "Custom UFW Docker rules applied successfully"
+                else
+                    echo ""
+                    print_header "═══════════════════════════════════════════════════"
+                    print_warning "Custom UFW Docker rules script completed with warnings"
+                fi
             else
-                echo ""
-                print_header "═══════════════════════════════════════════════════"
-                print_warning "Custom UFW Docker rules script completed with warnings"
+                # Execute without custom SSH_PORT
+                if bash "$UFW_INSTALL_PATH"; then
+                    echo ""
+                    print_header "═══════════════════════════════════════════════════"
+                    print_message "Custom UFW Docker rules applied successfully"
+                else
+                    echo ""
+                    print_header "═══════════════════════════════════════════════════"
+                    print_warning "Custom UFW Docker rules script completed with warnings"
+                fi
             fi
         else
             print_error "Failed to download script from repository"
@@ -3350,6 +3390,8 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                 SCRIPT_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
                 print_message "  Executable scripts in /opt/scripts: $SCRIPT_COUNT"
             fi
+        elif [ "$UFW_INSTALL_SOURCE" = "2" ] && [ -n "$UFW_SSH_PORT" ]; then
+            print_message "  Custom SSH port used: $UFW_SSH_PORT"
         fi
     else
         print_message "- Custom UFW Docker rules: Installation attempted but failed"
