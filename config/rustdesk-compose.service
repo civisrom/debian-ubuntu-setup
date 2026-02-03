@@ -39,18 +39,6 @@ SyslogIdentifier=rustdesk-compose
 # Security hardening
 PrivateTmp=yes
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/opt/rustdesk
-# Protect kernel parameters
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-# Restrict system calls
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
-# Lock down directories
-ReadOnlyPaths=/etc /usr
 # Resource limits
 LimitNOFILE=65536
 LimitNPROC=512
