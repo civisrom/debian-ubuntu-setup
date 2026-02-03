@@ -9,7 +9,7 @@ services:
 
     depends_on:
       - hbbr
-    restart: "no"
+    restart: unless-stopped
 
   hbbr:
     container_name: hbbr
@@ -18,4 +18,4 @@ services:
     volumes:
       - ./data:/root
     network_mode: "host"
-    restart: "no"
+    restart: unless-stopped
