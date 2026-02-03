@@ -2991,20 +2991,37 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
 
                     # Execute the script
                     print_message "Executing custom UFW Docker rules script..."
+                    if [ -n "$UFW_SSH_PORT" ]; then
+                        print_message "Using custom SSH port: $UFW_SSH_PORT"
+                    fi
                     echo ""
                     print_header "═══════════════════════════════════════════════════"
                     print_header "  Custom UFW Docker Rules Script Output (v${UFW_RULES_VERSION})"
                     print_header "═══════════════════════════════════════════════════"
                     echo ""
 
-                    if bash "$UFW_INSTALL_PATH"; then
-                        echo ""
-                        print_header "═══════════════════════════════════════════════════"
-                        print_message "Custom UFW Docker rules applied successfully"
+                    if [ -n "$UFW_SSH_PORT" ]; then
+                        # Execute with SSH_PORT environment variable
+                        if SSH_PORT="$UFW_SSH_PORT" bash "$UFW_INSTALL_PATH"; then
+                            echo ""
+                            print_header "═══════════════════════════════════════════════════"
+                            print_message "Custom UFW Docker rules applied successfully"
+                        else
+                            echo ""
+                            print_header "═══════════════════════════════════════════════════"
+                            print_warning "Custom UFW Docker rules script completed with warnings"
+                        fi
                     else
-                        echo ""
-                        print_header "═══════════════════════════════════════════════════"
-                        print_warning "Custom UFW Docker rules script completed with warnings"
+                        # Execute without custom SSH_PORT
+                        if bash "$UFW_INSTALL_PATH"; then
+                            echo ""
+                            print_header "═══════════════════════════════════════════════════"
+                            print_message "Custom UFW Docker rules applied successfully"
+                        else
+                            echo ""
+                            print_header "═══════════════════════════════════════════════════"
+                            print_warning "Custom UFW Docker rules script completed with warnings"
+                        fi
                     fi
                 else
                     print_error "Script file not found in archive: ${UFW_SCRIPT_NAME}"
