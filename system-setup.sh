@@ -181,9 +181,32 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "and install it as a systemd service"
     read -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
     INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
-    
+
     echo ""
-    
+
+    # Ask about extracting opt.7z archive
+    print_message "Do you want to extract additional files to /opt?"
+    print_message "This will download opt.7z and copy all its contents to /opt"
+    print_message "Files in 'scripts' subfolder will be made executable (except .ini)"
+    read -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
+    EXTRACT_OPT_ARCHIVE=${EXTRACT_OPT_ARCHIVE:-n}
+
+    if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
+        print_message "The archive is password-protected. Please enter the password:"
+        read -s -p "Password: " OPT_ARCHIVE_PASSWORD
+        echo ""
+        if [ -z "$OPT_ARCHIVE_PASSWORD" ]; then
+            print_warning "No password provided. opt.7z will not be extracted."
+            EXTRACT_OPT_ARCHIVE="n"
+        else
+            print_message "Password saved. Archive will be extracted during installation."
+        fi
+    else
+        OPT_ARCHIVE_PASSWORD=""
+    fi
+
+    echo ""
+
     # Ask about root password
     print_message "Do you want to set a password for root user?"
     read -p "Set root password? (y/N): " SET_ROOT_PASSWORD
@@ -600,22 +623,13 @@ if [ "$INTERACTIVE" = true ]; then
                 if [ -z "$UFW_CUSTOM_RULES_PASSWORD" ]; then
                     print_warning "No password provided. Custom UFW rules will not be installed."
                     INSTALL_UFW_CUSTOM_RULES="n"
-                    EXTRACT_OPT_ARCHIVE="n"
                     UFW_SSH_PORT=""
                 else
-                    # Ask about extracting entire archive to /opt
-                    echo ""
-                    print_message "Do you want to extract additional files to /opt?"
-                    print_message "This will download opt.7z and copy all its contents to /opt"
-                    print_message "Files in 'scripts' subfolder will be made executable (except .ini)"
-                    read -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
-                    EXTRACT_OPT_ARCHIVE=${EXTRACT_OPT_ARCHIVE:-n}
                     UFW_SSH_PORT=""
                 fi
             else
-                # Repository installation - no password needed, no opt.7z
+                # Repository installation - no password needed
                 UFW_CUSTOM_RULES_PASSWORD=""
-                EXTRACT_OPT_ARCHIVE="n"
                 print_message "Will install from public repository (no password required)"
 
                 # Ask for SSH port to override default in script
@@ -635,7 +649,6 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "SSH port set to: $UFW_SSH_PORT"
             fi
         else
-            EXTRACT_OPT_ARCHIVE="n"
             UFW_RULES_VERSION="6"
             UFW_INSTALL_SOURCE="1"
             UFW_SSH_PORT=""
@@ -643,7 +656,6 @@ if [ "$INTERACTIVE" = true ]; then
     else
         BLOCK_ICMP="n"
         INSTALL_UFW_CUSTOM_RULES="n"
-        EXTRACT_OPT_ARCHIVE="n"
         UFW_RULES_VERSION="6"
         UFW_INSTALL_SOURCE="1"
         UFW_SSH_PORT=""
@@ -2947,68 +2959,6 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                 rm -f "$UFW_PASS_FILE"
                 print_message "Archive extracted successfully"
 
-                # Check if we need to extract archive to /opt
-                if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
-                    print_message "Downloading separate opt.7z archive for /opt files..."
-
-                    OPT_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/opt.7z"
-                    OPT_ARCHIVE_FILE="/tmp/opt.7z"
-                    OPT_EXTRACT_DIR="/tmp/opt_extract"
-
-                    if wget -q --show-progress "$OPT_ARCHIVE_URL" -O "$OPT_ARCHIVE_FILE"; then
-                        print_message "opt.7z archive downloaded successfully"
-
-                        # Create extraction directory
-                        mkdir -p "$OPT_EXTRACT_DIR"
-
-                        # Extract with password (using temporary password file for security)
-                        print_message "Extracting opt.7z archive..."
-                        OPT_PASS_FILE=$(mktemp)
-                        chmod 600 "$OPT_PASS_FILE"
-                        printf "%s" "${UFW_CUSTOM_RULES_PASSWORD}" > "$OPT_PASS_FILE"
-                        if 7z x "-p$(cat "$OPT_PASS_FILE")" -o"${OPT_EXTRACT_DIR}" "$OPT_ARCHIVE_FILE" -y > /dev/null 2>&1; then
-                            rm -f "$OPT_PASS_FILE"
-                            print_message "opt.7z archive extracted successfully"
-
-                            # Copy all contents to /opt
-                            print_message "Copying files and folders to /opt..."
-                            if [ "$(ls -A ${OPT_EXTRACT_DIR})" ]; then
-                                cp -r "${OPT_EXTRACT_DIR}/"* /opt/
-                                print_message "Files copied to /opt successfully"
-
-                                # Make scripts in scripts folder executable (except .ini files)
-                                if [ -d "/opt/scripts" ]; then
-                                    print_message "Setting executable permissions for scripts in /opt/scripts..."
-
-                                    # Find all files in scripts directory and make them executable (except .ini)
-                                    find /opt/scripts -type f ! -name "*.ini" -exec chmod +x {} \;
-
-                                    # Count executable files
-                                    EXEC_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
-                                    print_message "Made $EXEC_COUNT file(s) executable in /opt/scripts"
-                                fi
-
-                                # List what was copied
-                                print_message "Contents copied to /opt:"
-                                ls -la /opt/ | grep -v "^total" | tail -n +2 | awk '{print "  - " $NF}'
-                            else
-                                print_warning "opt.7z archive is empty"
-                            fi
-
-                            # Cleanup
-                            rm -rf "$OPT_EXTRACT_DIR"
-                            rm -f "$OPT_ARCHIVE_FILE"
-                            print_message "opt.7z archive deleted"
-                        else
-                            print_error "Failed to extract opt.7z archive. Check if password is correct."
-                            rm -f "$OPT_PASS_FILE"
-                            rm -f "$OPT_ARCHIVE_FILE"
-                        fi
-                    else
-                        print_error "Failed to download opt.7z archive"
-                    fi
-                fi
-
                 # Find and install the script file
                 SCRIPT_FOUND=false
 
@@ -3084,6 +3034,94 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
     echo ""
 else
     print_message "Skipping custom UFW Docker rules (not requested)"
+fi
+
+# ============================================
+# EXTRACT OPT.7Z ARCHIVE TO /OPT
+# ============================================
+
+if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
+    echo ""
+    print_header "═══════════════════════════════════════════════════"
+    print_header "   Extracting opt.7z Archive to /opt"
+    print_header "═══════════════════════════════════════════════════"
+    echo ""
+
+    # Check if p7zip is installed, install if needed
+    if ! command -v 7z &> /dev/null; then
+        print_message "Installing p7zip-full for archive extraction..."
+        if apt-get install -y p7zip-full; then
+            print_message "p7zip-full installed successfully"
+        else
+            print_error "CRITICAL: Failed to install p7zip-full"
+            print_error "Cannot extract opt.7z archive"
+        fi
+    fi
+
+    # Only proceed if 7z is available
+    if command -v 7z &> /dev/null; then
+        OPT_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/opt.7z"
+        OPT_ARCHIVE_FILE="/tmp/opt.7z"
+        OPT_EXTRACT_DIR="/tmp/opt_extract"
+
+        print_message "Downloading opt.7z archive for /opt files..."
+        if wget -q --show-progress "$OPT_ARCHIVE_URL" -O "$OPT_ARCHIVE_FILE"; then
+            print_message "opt.7z archive downloaded successfully"
+
+            # Create extraction directory
+            mkdir -p "$OPT_EXTRACT_DIR"
+
+            # Extract with password (using temporary password file for security)
+            print_message "Extracting opt.7z archive..."
+            OPT_PASS_FILE=$(mktemp)
+            chmod 600 "$OPT_PASS_FILE"
+            printf "%s" "${OPT_ARCHIVE_PASSWORD}" > "$OPT_PASS_FILE"
+            if 7z x "-p$(cat "$OPT_PASS_FILE")" -o"${OPT_EXTRACT_DIR}" "$OPT_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+                rm -f "$OPT_PASS_FILE"
+                print_message "opt.7z archive extracted successfully"
+
+                # Copy all contents to /opt
+                print_message "Copying files and folders to /opt..."
+                if [ "$(ls -A ${OPT_EXTRACT_DIR})" ]; then
+                    cp -r "${OPT_EXTRACT_DIR}/"* /opt/
+                    print_message "Files copied to /opt successfully"
+
+                    # Make scripts in scripts folder executable (except .ini files)
+                    if [ -d "/opt/scripts" ]; then
+                        print_message "Setting executable permissions for scripts in /opt/scripts..."
+
+                        # Find all files in scripts directory and make them executable (except .ini)
+                        find /opt/scripts -type f ! -name "*.ini" -exec chmod +x {} \;
+
+                        # Count executable files
+                        EXEC_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
+                        print_message "Made $EXEC_COUNT file(s) executable in /opt/scripts"
+                    fi
+
+                    # List what was copied
+                    print_message "Contents copied to /opt:"
+                    ls -la /opt/ | grep -v "^total" | tail -n +2 | awk '{print "  - " $NF}'
+                else
+                    print_warning "opt.7z archive is empty"
+                fi
+
+                # Cleanup
+                rm -rf "$OPT_EXTRACT_DIR"
+                rm -f "$OPT_ARCHIVE_FILE"
+                print_message "Temporary files cleaned up"
+            else
+                print_error "Failed to extract opt.7z archive. Check if password is correct."
+                rm -f "$OPT_PASS_FILE"
+                rm -f "$OPT_ARCHIVE_FILE"
+            fi
+        else
+            print_error "Failed to download opt.7z archive"
+        fi
+    fi
+
+    echo ""
+else
+    print_message "Skipping opt.7z extraction (not requested)"
 fi
 
 # ============================================
