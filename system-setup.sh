@@ -999,99 +999,6 @@ echo ""
 print_message "Starting installation..."
 echo ""
 
-# ============================================
-# INSTALL RUSTDESK SERVER (DOCKER)
-# ============================================
-
-if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
-    print_message "Installing RustDesk server in Docker..."
-    echo ""
-    
-    RUSTDESK_DIR="/root/rustdesk"
-    RUSTDESK_COMPOSE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/docker-compose.yml"
-    RUSTDESK_SERVICE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/rustdesk-compose.service"
-    RUSTDESK_SERVICE_PATH="/etc/systemd/system/rustdesk-compose.service"
-    
-    # Create rustdesk directory
-    print_message "Creating directory: $RUSTDESK_DIR..."
-    if mkdir -p "$RUSTDESK_DIR"; then
-        print_message "Directory created successfully"
-    else
-        print_error "CRITICAL: Failed to create directory $RUSTDESK_DIR"
-        print_error "Installation cannot continue"
-        exit 1
-    fi
-    
-    # Download docker-compose.yml
-    print_message "Downloading docker-compose.yml..."
-    if curl -fsSL "$RUSTDESK_COMPOSE_URL" -o "${RUSTDESK_DIR}/docker-compose.yml"; then
-        print_message "docker-compose.yml downloaded successfully"
-    else
-        print_error "CRITICAL: Failed to download docker-compose.yml"
-        print_error "Installation cannot continue"
-        exit 1
-    fi
-    
-    # Download systemd service file
-    print_message "Downloading systemd service file..."
-    if curl -fsSL "$RUSTDESK_SERVICE_URL" -o "$RUSTDESK_SERVICE_PATH"; then
-        print_message "Service file downloaded successfully"
-    else
-        print_error "CRITICAL: Failed to download service file"
-        print_error "Installation cannot continue"
-        exit 1
-    fi
-    
-    # Reload systemd daemon
-    print_message "Reloading systemd daemon..."
-    if systemctl daemon-reload; then
-        print_message "Systemd daemon reloaded successfully"
-    else
-        print_error "CRITICAL: Failed to reload systemd daemon"
-        print_error "Installation cannot continue"
-        exit 1
-    fi
-    
-    # Enable rustdesk service
-    print_message "Enabling rustdesk-compose service..."
-    if systemctl enable rustdesk-compose.service; then
-        print_message "Service enabled successfully"
-    else
-        print_error "CRITICAL: Failed to enable rustdesk-compose service"
-        print_error "Installation cannot continue"
-        exit 1
-    fi
-    
-    # Check if Docker is installed (needed to start the service)
-    if command -v docker &> /dev/null; then
-        print_message "Docker found, starting rustdesk-compose service..."
-        if systemctl start rustdesk-compose.service; then
-            print_message "RustDesk service started successfully"
-            
-            # Check service status
-            sleep 3
-            if systemctl is-active --quiet rustdesk-compose.service; then
-                print_message "RustDesk service is running"
-            else
-                print_warning "RustDesk service is enabled but not running (Docker might not be installed yet)"
-                print_message "Service will start automatically after Docker installation"
-            fi
-        else
-            print_warning "Failed to start rustdesk-compose service"
-            print_message "Service will start automatically after Docker installation"
-        fi
-    else
-        print_message "Docker not installed yet - RustDesk service will start after Docker is installed"
-    fi
-    
-    print_message "RustDesk installation completed"
-    print_message "Directory: $RUSTDESK_DIR"
-    print_message "Service: rustdesk-compose.service"
-    echo ""
-else
-    print_message "Skipping RustDesk installation (not requested)"
-fi
-
 # Update package lists
 print_message "Updating package lists..."
 if apt-get update; then
@@ -1194,6 +1101,99 @@ elif [ "$OS" = "ubuntu" ]; then
     else
         print_message "No Ubuntu-specific packages to install"
     fi
+fi
+
+# ============================================
+# INSTALL RUSTDESK SERVER (DOCKER)
+# ============================================
+
+if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+    print_message "Installing RustDesk server in Docker..."
+    echo ""
+
+    RUSTDESK_DIR="/root/rustdesk"
+    RUSTDESK_COMPOSE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/docker-compose.yml"
+    RUSTDESK_SERVICE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/rustdesk-compose.service"
+    RUSTDESK_SERVICE_PATH="/etc/systemd/system/rustdesk-compose.service"
+
+    # Create rustdesk directory
+    print_message "Creating directory: $RUSTDESK_DIR..."
+    if mkdir -p "$RUSTDESK_DIR"; then
+        print_message "Directory created successfully"
+    else
+        print_error "CRITICAL: Failed to create directory $RUSTDESK_DIR"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+
+    # Download docker-compose.yml
+    print_message "Downloading docker-compose.yml..."
+    if curl -fsSL "$RUSTDESK_COMPOSE_URL" -o "${RUSTDESK_DIR}/docker-compose.yml"; then
+        print_message "docker-compose.yml downloaded successfully"
+    else
+        print_error "CRITICAL: Failed to download docker-compose.yml"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+
+    # Download systemd service file
+    print_message "Downloading systemd service file..."
+    if curl -fsSL "$RUSTDESK_SERVICE_URL" -o "$RUSTDESK_SERVICE_PATH"; then
+        print_message "Service file downloaded successfully"
+    else
+        print_error "CRITICAL: Failed to download service file"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+
+    # Reload systemd daemon
+    print_message "Reloading systemd daemon..."
+    if systemctl daemon-reload; then
+        print_message "Systemd daemon reloaded successfully"
+    else
+        print_error "CRITICAL: Failed to reload systemd daemon"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+
+    # Enable rustdesk service
+    print_message "Enabling rustdesk-compose service..."
+    if systemctl enable rustdesk-compose.service; then
+        print_message "Service enabled successfully"
+    else
+        print_error "CRITICAL: Failed to enable rustdesk-compose service"
+        print_error "Installation cannot continue"
+        exit 1
+    fi
+
+    # Check if Docker is installed (needed to start the service)
+    if command -v docker &> /dev/null; then
+        print_message "Docker found, starting rustdesk-compose service..."
+        if systemctl start rustdesk-compose.service; then
+            print_message "RustDesk service started successfully"
+
+            # Check service status
+            sleep 3
+            if systemctl is-active --quiet rustdesk-compose.service; then
+                print_message "RustDesk service is running"
+            else
+                print_warning "RustDesk service is enabled but not running (Docker might not be installed yet)"
+                print_message "Service will start automatically after Docker installation"
+            fi
+        else
+            print_warning "Failed to start rustdesk-compose service"
+            print_message "Service will start automatically after Docker installation"
+        fi
+    else
+        print_message "Docker not installed yet - RustDesk service will start after Docker is installed"
+    fi
+
+    print_message "RustDesk installation completed"
+    print_message "Directory: $RUSTDESK_DIR"
+    print_message "Service: rustdesk-compose.service"
+    echo ""
+else
+    print_message "Skipping RustDesk installation (not requested)"
 fi
 
 # ============================================
