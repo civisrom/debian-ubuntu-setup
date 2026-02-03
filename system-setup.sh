@@ -177,7 +177,7 @@ echo ""
 if [ "$INTERACTIVE" = true ]; then
     # Ask about RustDesk installation
     print_message "Do you want to install RustDesk server in Docker?"
-    print_message "This will create /root/rustdesk directory with docker-compose.yml"
+    print_message "This will create /opt/rustdesk directory with docker-compose.yml"
     print_message "and install it as a systemd service"
     read -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
     INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
@@ -1123,7 +1123,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     print_message "Installing RustDesk server in Docker..."
     echo ""
 
-    RUSTDESK_DIR="/root/rustdesk"
+    RUSTDESK_DIR="/opt/rustdesk"
     RUSTDESK_COMPOSE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/docker-compose.yml"
     RUSTDESK_SERVICE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/rustdesk-compose.service"
     RUSTDESK_SERVICE_PATH="/etc/systemd/system/rustdesk-compose.service"
@@ -3238,7 +3238,7 @@ print_message "- Packages installed"
 if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     if systemctl is-enabled --quiet rustdesk-compose.service 2>/dev/null; then
         print_message "- RustDesk Server: Installed and enabled"
-        print_message "  Directory: /root/rustdesk"
+        print_message "  Directory: /opt/rustdesk"
         print_message "  Service: rustdesk-compose.service"
         if systemctl is-active --quiet rustdesk-compose.service; then
             print_message "  Status: Running"
