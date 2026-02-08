@@ -588,15 +588,19 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "Do you want to install custom UFW Docker rules script?"
         print_message "Available versions:"
-        print_message "  v4 - ufw-docker-rules-v4.sh"
-        print_message "  v6 - ufw-docker-rules-v6.sh (newer version)"
+        print_message "  v4 - ufw-docker-rules-v4.sh (standard version)"
+        print_message "  v6 - ufw-docker-rules-v6.sh (enhanced with RustDesk support, recommended)"
+        print_message "Both versions support custom SSH port configuration"
+        print_message "Both versions available from archive or repository"
         print_message "Note: The script will run AFTER all other installations complete"
         read -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
         INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
-        
+
         if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
             echo ""
             print_message "Select version:"
+            print_message "  4 - Standard version"
+            print_message "  6 - Enhanced version with RustDesk support (recommended)"
             read -p "Enter version (4 or 6, default: 6): " UFW_RULES_VERSION
             UFW_RULES_VERSION=${UFW_RULES_VERSION:-6}
 
@@ -611,6 +615,7 @@ if [ "$INTERACTIVE" = true ]; then
             echo ""
             print_message "Select installation source:"
             print_message "  1 - Install from password-protected archive (ufw-docker-rules-v4.7z)"
+            print_message "      Archive contains both v4 and v6 scripts"
             print_message "  2 - Install from public repository (https://raw.githubusercontent.com/civisrom/ufw-rules-docker/...)"
             read -p "Choose source (1 or 2, default: 1): " UFW_INSTALL_SOURCE
             UFW_INSTALL_SOURCE=${UFW_INSTALL_SOURCE:-1}
@@ -2883,9 +2888,11 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
 
             # Replace SSH port in script if custom port is specified
             if [ -n "$UFW_SSH_PORT" ] && [ "$UFW_SSH_PORT" != "22" ]; then
-                print_message "Configuring script to use SSH port: $UFW_SSH_PORT"
+                print_message "Configuring script to use custom SSH port: $UFW_SSH_PORT"
                 # Replace hardcoded SSH_PORT=22 with custom port
-                sed -i "s/^SSH_PORT=22$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
+                if sed -i "s/^SSH_PORT=22$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"; then
+                    print_message "SSH port configured successfully in ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
+                fi
                 # Also replace SSH_PORT=${SSH_PORT:-22} pattern if exists
                 sed -i "s/^SSH_PORT=\${SSH_PORT:-22}$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
             fi
@@ -3000,9 +3007,11 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
 
                     # Replace SSH port in script if custom port is specified
                     if [ -n "$UFW_SSH_PORT" ] && [ "$UFW_SSH_PORT" != "22" ]; then
-                        print_message "Configuring script to use SSH port: $UFW_SSH_PORT"
+                        print_message "Configuring script to use custom SSH port: $UFW_SSH_PORT"
                         # Replace hardcoded SSH_PORT=22 with custom port
-                        sed -i "s/^SSH_PORT=22$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
+                        if sed -i "s/^SSH_PORT=22$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"; then
+                            print_message "SSH port configured successfully in ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
+                        fi
                         # Also replace SSH_PORT=${SSH_PORT:-22} pattern if exists
                         sed -i "s/^SSH_PORT=\${SSH_PORT:-22}$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
                     fi
@@ -3457,14 +3466,17 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         UFW_SOURCE_TEXT="$([ "$UFW_INSTALL_SOURCE" = "2" ] && echo "from repository" || echo "from archive")"
         print_message "- Custom UFW Docker rules: Installed and executed (v${UFW_RULES_VERSION}, ${UFW_SOURCE_TEXT})"
         print_message "  Script location: $UFW_SCRIPT_PATH"
+        # Show custom SSH port if configured
+        if [ -n "$UFW_SSH_PORT" ] && [ "$UFW_SSH_PORT" != "22" ]; then
+            print_message "  Custom SSH port configured: $UFW_SSH_PORT"
+        fi
+        # Show archive extraction info
         if [ "$UFW_INSTALL_SOURCE" = "1" ] && { [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; }; then
             print_message "  Archive extracted to: /opt"
             if [ -d "/opt/scripts" ]; then
                 SCRIPT_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
                 print_message "  Executable scripts in /opt/scripts: $SCRIPT_COUNT"
             fi
-        elif [ "$UFW_INSTALL_SOURCE" = "2" ] && [ -n "$UFW_SSH_PORT" ]; then
-            print_message "  Custom SSH port used: $UFW_SSH_PORT"
         fi
     else
         print_message "- Custom UFW Docker rules: Installation attempted but failed"
