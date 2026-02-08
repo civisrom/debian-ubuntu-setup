@@ -588,9 +588,10 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "Do you want to install custom UFW Docker rules script?"
         print_message "Available versions:"
-        print_message "  v4 - ufw-docker-rules-v4.sh (from archive or repository)"
-        print_message "  v6 - ufw-docker-rules-v6.sh (from repository only, with RustDesk support)"
+        print_message "  v4 - ufw-docker-rules-v4.sh (standard version)"
+        print_message "  v6 - ufw-docker-rules-v6.sh (enhanced with RustDesk support, recommended)"
         print_message "Both versions support custom SSH port configuration"
+        print_message "Both versions available from archive or repository"
         print_message "Note: The script will run AFTER all other installations complete"
         read -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
         INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
@@ -598,8 +599,8 @@ if [ "$INTERACTIVE" = true ]; then
         if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
             echo ""
             print_message "Select version:"
-            print_message "  4 - Standard version (archive or repository)"
-            print_message "  6 - Enhanced version with RustDesk support (repository only, recommended)"
+            print_message "  4 - Standard version"
+            print_message "  6 - Enhanced version with RustDesk support (recommended)"
             read -p "Enter version (4 or 6, default: 6): " UFW_RULES_VERSION
             UFW_RULES_VERSION=${UFW_RULES_VERSION:-6}
 
@@ -613,17 +614,11 @@ if [ "$INTERACTIVE" = true ]; then
             # Ask about installation source
             echo ""
             print_message "Select installation source:"
-            if [ "$UFW_RULES_VERSION" = "4" ]; then
-                print_message "  1 - Install from password-protected archive (ufw-docker-rules-v4.7z)"
-                print_message "  2 - Install from public repository (https://raw.githubusercontent.com/civisrom/ufw-rules-docker/...)"
-                read -p "Choose source (1 or 2, default: 1): " UFW_INSTALL_SOURCE
-                UFW_INSTALL_SOURCE=${UFW_INSTALL_SOURCE:-1}
-            else
-                print_message "  Note: v6 is only available from public repository"
-                print_message "  Source: https://raw.githubusercontent.com/civisrom/ufw-rules-docker/refs/heads/main/ufw-docker-rules-v6.sh"
-                UFW_INSTALL_SOURCE="2"
-                print_message "Using repository installation..."
-            fi
+            print_message "  1 - Install from password-protected archive (ufw-docker-rules-v4.7z)"
+            print_message "      Archive contains both v4 and v6 scripts"
+            print_message "  2 - Install from public repository (https://raw.githubusercontent.com/civisrom/ufw-rules-docker/...)"
+            read -p "Choose source (1 or 2, default: 1): " UFW_INSTALL_SOURCE
+            UFW_INSTALL_SOURCE=${UFW_INSTALL_SOURCE:-1}
 
             if [ "$UFW_INSTALL_SOURCE" = "1" ]; then
                 echo ""
