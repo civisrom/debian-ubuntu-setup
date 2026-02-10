@@ -1032,8 +1032,8 @@ COMMON_PACKAGES=(
     mc
     mc-data
     wget
-    iptables
-    ufw
+    #iptables
+    #ufw
     nano
     apt-utils
     curl
@@ -1079,7 +1079,7 @@ fi
 # Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
 # You can comment out (#) any package to disable its installation
 DEBIAN_PACKAGES=(
-    linux-headers-$(uname -r)
+    #linux-headers-$(uname -r)
     openvswitch-switch-dpdk
 )
 
