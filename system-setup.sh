@@ -1859,11 +1859,20 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
             
             # Comment out all lines containing inet6 or related to IPv6
             # This includes iface lines with inet6 and their parameters
+            # Also removes IPv6 addresses from dns-nameservers in IPv4 blocks
             awk '
             /^[[:space:]]*iface.*inet6/ {
                 # This is an inet6 interface definition
                 print "#" $0
                 in_inet6_block = 1
+                in_inet4_block = 0
+                next
+            }
+            /^[[:space:]]*iface.*inet[[:space:]]/ {
+                # This is an inet4 interface definition
+                in_inet4_block = 1
+                in_inet6_block = 0
+                print $0
                 next
             }
             in_inet6_block {
@@ -1876,6 +1885,34 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                     # This line is part of inet6 configuration
                     print "#" $0
                 }
+                next
+            }
+            in_inet4_block && /^[[:space:]]*dns-nameservers/ {
+                # In IPv4 block: remove IPv6 addresses from dns-nameservers
+                # Extract leading whitespace
+                match($0, /^[[:space:]]*/)
+                leading = substr($0, RSTART, RLENGTH)
+                # Build new line with only IPv4 addresses (skip anything containing ":")
+                result = leading "dns-nameservers"
+                has_ipv4 = 0
+                for (i = 2; i <= NF; i++) {
+                    if ($i !~ /:/) {
+                        result = result " " $i
+                        has_ipv4 = 1
+                    }
+                }
+                if (has_ipv4) {
+                    print result
+                }
+                # If no IPv4 addresses remain, skip the line entirely
+                next
+            }
+            in_inet4_block {
+                # Check if we are leaving the inet4 block
+                if (/^[[:space:]]*$/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
+                    in_inet4_block = 0
+                }
+                print $0
                 next
             }
             {
@@ -1897,6 +1934,27 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                 print_header "─────────────────────────────────────────────"
                 echo ""
                 
+                # Remove IPv6 nameservers from /etc/resolv.conf
+                RESOLV_FILE="/etc/resolv.conf"
+                if [ -f "$RESOLV_FILE" ]; then
+                    if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"; then
+                        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
+                        print_message "Original $RESOLV_FILE backed up"
+                        TEMP_RESOLV=$(mktemp)
+                        # Remove lines with IPv6 nameservers (addresses containing ":")
+                        grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "$TEMP_RESOLV"
+                        if [ -s "$TEMP_RESOLV" ]; then
+                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
+                            print_success "IPv6 nameservers removed from $RESOLV_FILE"
+                        else
+                            rm -f "$TEMP_RESOLV"
+                            print_warning "Not modifying $RESOLV_FILE - would result in empty file"
+                        fi
+                    else
+                        print_message "No IPv6 nameservers found in $RESOLV_FILE"
+                    fi
+                fi
+
                 print_warning "Network configuration changed. You may need to restart networking:"
                 print_message "  sudo systemctl restart networking"
                 print_message "  OR reboot the system"
