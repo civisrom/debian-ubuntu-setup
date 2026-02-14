@@ -840,30 +840,31 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "BBR Network Optimizer Options:"
         print_message "The following functions can be enabled/disabled:"
+        print_message "(Network tuning via sysctl is always applied by BBR with adaptive RAM profiles)"
         echo ""
-        
+
         # Force IPv4 for APT
         print_message "1. Force IPv4 for APT (recommended for IPv6 connectivity issues)"
         read -p "   Enable force_ipv4_apt? (Y/n): " BBR_FORCE_IPV4
         BBR_FORCE_IPV4=${BBR_FORCE_IPV4:-y}
-        
+
         # Full system update
         print_message "2. Full system update and upgrade (apt update && upgrade)"
         read -p "   Enable full_update_upgrade? (Y/n): " BBR_FULL_UPDATE
         BBR_FULL_UPDATE=${BBR_FULL_UPDATE:-y}
-        
+
         # Fix /etc/hosts
-        print_message "3. Fix /etc/hosts file (add hostname entry)"
+        print_message "3. Fix /etc/hosts file (add hostname loopback entry 127.0.1.1)"
         read -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
         BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
-        
+
         # Fix DNS
-        print_message "4. Fix DNS configuration (set Cloudflare DNS)"
+        print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
         read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
         BBR_FIX_DNS=${BBR_FIX_DNS:-y}
-        
+
         echo ""
-        print_message "BBR optimization settings will be applied after main installation"
+        print_message "BBR adaptive network tuning + selected options will be applied after main setup"
     else
         BBR_FORCE_IPV4="n"
         BBR_FULL_UPDATE="n"
@@ -990,7 +991,15 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
         print_message "  Custom UFW Docker rules: NO"
     fi
 fi
-print_message "  sysctl optimization: $([ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+        print_message "  sysctl optimization: YES (IPv6/security only — network tuning via BBR)"
+    else
+        print_message "  sysctl optimization: YES (full — IPv6/security + static network tuning)"
+    fi
+else
+    print_message "  sysctl optimization: NO"
+fi
 if [ "$OS" = "debian" ]; then
     print_message "  IPv6 disable via GRUB: $([ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ] && echo "YES (kernel level)" || echo "NO")"
 fi
@@ -1754,13 +1763,39 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         touch /etc/sysctl.conf.new
     fi
     
-    # Add new configuration with proper spacing
+    # Responsibility split:
+    # - IPv6 disable + security hardening + system limits: always written here
+    # - Network tuning (BBR, buffers, qdisc, TCP params): written here ONLY if
+    #   BBR optimizer is disabled; otherwise bbr.sh handles it with adaptive
+    #   RAM-based profiles (intelligent_settings) which is superior to static values
+
+    # === Part 1: IPv6 disable + security hardening (always) ===
     cat >> /etc/sysctl.conf.new << 'EOF'
 
-# Custom Network Optimizations
+# IPv6 Disable
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
+
+# Security Hardening
+net.ipv4.tcp_syncookies = 1
+
+# System Limits
+fs.inotify.max_user_instances = 8192
+net.ipv4.ip_local_port_range = 1024 45000
+EOF
+
+    # === Part 2: Network tuning (only if BBR optimizer is NOT enabled) ===
+    # When BBR optimizer is enabled, it applies intelligent_settings() which
+    # auto-detects RAM and applies optimal values (low/mid/high profiles)
+    # with adaptive qdisc (fq_codel/cake), buffer sizes, and VM tuning
+    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+        print_message "Network tuning will be handled by BBR optimizer (adaptive profiles)"
+    else
+        print_message "Applying static network tuning (BBR optimizer not selected)"
+        cat >> /etc/sysctl.conf.new << 'EOF'
+
+# Network Tuning (static fallback — BBR optimizer not enabled)
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 net.core.rmem_max = 67108864
@@ -1768,7 +1803,6 @@ net.core.wmem_max = 67108864
 net.core.wmem_default = 2097152
 net.core.netdev_max_backlog = 10240
 net.core.somaxconn = 8192
-net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_keepalive_time = 1200
@@ -1783,9 +1817,8 @@ net.ipv4.tcp_rmem = 16384 262144 8388608
 net.ipv4.tcp_wmem = 32768 524288 16777216
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_slow_start_after_idle = 0
-fs.inotify.max_user_instances = 8192
-net.ipv4.ip_local_port_range = 1024 45000
 EOF
+    fi
     
     mv /etc/sysctl.conf.new /etc/sysctl.conf
     print_message "sysctl.conf configured"
@@ -3435,8 +3468,11 @@ if [ "$4" = "fix_dns" ]; then
     fix_dns
 fi
 
-# Always run the main optimization (this is the core BBR functionality)
-print_message "Applying BBR network optimizations..."
+# Always run the main optimization — this handles network tuning via sysctl
+# with adaptive RAM-based profiles (low/mid/high), including:
+# BBR congestion control, qdisc (fq_codel/cake), TCP buffers, VM settings
+# system-setup.sh only writes IPv6/security params when BBR is enabled
+print_message "Applying BBR adaptive network optimizations..."
 intelligent_settings
 EOFWRAPPER
         
@@ -3566,7 +3602,11 @@ else
 fi
 
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-    print_message "- System parameters optimized (sysctl.conf)"
+    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+        print_message "- sysctl.conf: IPv6 disable + security (network tuning via BBR)"
+    else
+        print_message "- sysctl.conf: Full optimization (IPv6/security + static network tuning)"
+    fi
 else
     print_message "- sysctl: SKIPPED"
 fi
