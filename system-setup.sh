@@ -261,6 +261,7 @@ load_translations_ru() {
     TR["Advanced Network Optimization (BBR)"]="Расширенная сетевая оптимизация (BBR)"
     TR["Do you want to run the BBR Network Optimizer script?"]="Хотите запустить скрипт оптимизации сети BBR?"
     TR["This will apply TCP BBR congestion control and other network optimizations"]="Будет применён контроль перегрузки TCP BBR и другие сетевые оптимизации"
+    TR["Note: This script will run AFTER all other installations complete"]="Примечание: скрипт запустится ПОСЛЕ завершения всех остальных установок"
     TR["BBR Network Optimizer Options:"]="Параметры оптимизатора сети BBR:"
     TR["The following functions can be enabled/disabled:"]="Следующие функции можно включить/отключить:"
     TR["BBR optimization settings will be applied after main installation"]="Настройки оптимизации BBR будут применены после основной установки"
@@ -357,6 +358,10 @@ load_translations_ru() {
     TR["sysctl.conf configured"]="sysctl.conf настроен"
     TR["Applying sysctl settings..."]="Применение настроек sysctl..."
     TR["Some sysctl parameters may not have been applied"]="Некоторые параметры sysctl могли не примениться"
+    TR["Removing IPv6 nameservers from %s (IPv6 is now disabled)..."]="Удаление IPv6 nameserver из %s (IPv6 теперь отключен)..."
+    TR["IPv6 nameservers removed from %s"]="IPv6 nameserver удалены из %s"
+    TR["No IPv4 nameservers found, adding fallback DNS servers..."]="IPv4 nameserver не найдены, добавляем резервные DNS серверы..."
+    TR["Fallback DNS servers (8.8.8.8, 1.1.1.1) added to %s"]="Резервные DNS серверы (8.8.8.8, 1.1.1.1) добавлены в %s"
     TR["Skipping sysctl configuration (not requested)"]="Пропуск настройки sysctl (не запрошено)"
     TR["Original sysctl.conf backed up"]="Резервная копия sysctl.conf создана"
 
@@ -439,6 +444,7 @@ load_translations_ru() {
     TR["Running Docker installation script..."]="Запуск скрипта установки Docker..."
     TR["Docker installed successfully"]="Docker установлен успешно"
     TR["Failed to download Docker installation script"]="Не удалось загрузить скрипт установки Docker"
+    TR["Docker installation script failed (check network/DNS)"]="Скрипт установки Docker завершился с ошибкой (проверьте сеть/DNS)"
     TR["Failed to start Docker"]="Не удалось запустить Docker"
     TR["Failed to enable Docker"]="Не удалось включить Docker"
     TR["Creating docker group..."]="Создание группы docker..."
@@ -2080,7 +2086,7 @@ echo ""
 # Confirm settings
 print_header "═══════════════════════════════════════════════"
 print_message "Configuration Summary:"
-print_message "  OS: %s %s (%s)" "$OS" "$VERSION" "$VERSION_CODENAME"
+echo -n "  " && print_message "OS: %s %s (%s)" "$OS" "$VERSION" "$VERSION_CODENAME"
 
 print_message "  RustDesk Server: $([ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ] && t "YES (Docker)" || t "NO")"
 print_message "  Root password: $([ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ] && t "YES" || t "NO")"
@@ -2949,6 +2955,31 @@ EOF
     # Apply sysctl settings
     print_message "Applying sysctl settings..."
     sysctl -p || print_warning "Some sysctl parameters may not have been applied"
+
+    # IMPORTANT: After disabling IPv6 via sysctl, IPv6 nameservers in /etc/resolv.conf
+    # become unreachable. Clean them up immediately to prevent DNS resolution failures
+    # for subsequent network operations (Docker, Go, ipset downloads, etc.)
+    RESOLV_FILE="/etc/resolv.conf"
+    if [ -f "$RESOLV_FILE" ] && grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"; then
+        print_message "Removing IPv6 nameservers from %s (IPv6 is now disabled)..." "$RESOLV_FILE"
+        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.pre-sysctl.$(date +%Y%m%d-%H%M%S)~"
+        TEMP_RESOLV=$(mktemp)
+        grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "$TEMP_RESOLV"
+        if [ -s "$TEMP_RESOLV" ] && grep -qE "^[[:space:]]*nameserver" "$TEMP_RESOLV"; then
+            mv "$TEMP_RESOLV" "$RESOLV_FILE"
+            print_success "IPv6 nameservers removed from %s" "$RESOLV_FILE"
+        else
+            rm -f "$TEMP_RESOLV"
+            # No IPv4 nameservers remain — add fallback DNS to maintain connectivity
+            print_warning "No IPv4 nameservers found, adding fallback DNS servers..."
+            {
+                grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"
+                echo "nameserver 8.8.8.8"
+                echo "nameserver 1.1.1.1"
+            } > "${RESOLV_FILE}.tmp" && mv "${RESOLV_FILE}.tmp" "$RESOLV_FILE"
+            print_success "Fallback DNS servers (8.8.8.8, 1.1.1.1) added to %s" "$RESOLV_FILE"
+        fi
+    fi
 else
     print_message "Skipping sysctl configuration (not requested)"
 fi
@@ -3512,10 +3543,15 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             print_message "Reinstalling Docker..."
             # Use Docker's official installation script
             if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh; then
-                sh /tmp/get-docker.sh
-                rm /tmp/get-docker.sh
-                print_message "Docker installed successfully"
-                DOCKER_INSTALLED="yes"
+                if sh /tmp/get-docker.sh; then
+                    rm -f /tmp/get-docker.sh
+                    print_message "Docker installed successfully"
+                    DOCKER_INSTALLED="yes"
+                else
+                    rm -f /tmp/get-docker.sh
+                    print_error "Docker installation script failed (check network/DNS)"
+                    DOCKER_INSTALLED="no"
+                fi
             else
                 print_error "Failed to download Docker installation script"
                 DOCKER_INSTALLED="no"
@@ -3526,14 +3562,20 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
         print_message "Downloading Docker installation script..."
         if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh; then
             print_message "Running Docker installation script..."
-            sh /tmp/get-docker.sh
-            rm /tmp/get-docker.sh
-            print_message "Docker installed successfully"
-            DOCKER_INSTALLED="yes"
-            
-            # Start and enable Docker
-            systemctl start docker || print_warning "Failed to start Docker"
-            systemctl enable docker || print_warning "Failed to enable Docker"
+            if sh /tmp/get-docker.sh; then
+                rm -f /tmp/get-docker.sh
+                print_message "Docker installed successfully"
+                DOCKER_INSTALLED="yes"
+            else
+                rm -f /tmp/get-docker.sh
+                print_error "Docker installation script failed (check network/DNS)"
+                DOCKER_INSTALLED="no"
+            fi
+
+            # Start and enable Docker (only if installed)
+            if [ "$DOCKER_INSTALLED" = "yes" ]; then
+                systemctl start docker || print_warning "Failed to start Docker"
+                systemctl enable docker || print_warning "Failed to enable Docker"
             
             # Ensure docker group exists
             if ! getent group docker > /dev/null 2>&1; then
@@ -3561,6 +3603,7 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             if [ ! -z "$NEW_USERNAME" ] || [ ! -z "$SUDO_USER" ]; then
                 print_warning "Users need to log out and log back in (or run 'newgrp docker') for docker group to take effect"
             fi
+            fi  # end of DOCKER_INSTALLED=yes block
         else
             print_error "Failed to download Docker installation script"
             DOCKER_INSTALLED="no"
@@ -4611,7 +4654,7 @@ print_header "══════════════════════
 print_message "System setup completed successfully!"
 print_header "═════════════════════════════════════════"
 print_message "Summary:"
-print_message "- OS: %s %s (%s)" "$OS" "$VERSION" "$VERSION_CODENAME"
+echo -n "- " && print_message "OS: %s %s (%s)" "$OS" "$VERSION" "$VERSION_CODENAME"
 
 print_message "- Packages installed"
 
