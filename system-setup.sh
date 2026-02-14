@@ -31,7 +31,7 @@ declare -A TR
 t() {
     local key="$1"
     shift
-    local translated="${TR[$key]:-$key}"
+    local translated="${TR["$key"]:-$key}"
     if [ $# -gt 0 ]; then
         printf "$translated" "$@"
     else
@@ -43,7 +43,7 @@ t() {
 print_message() {
     local key="$1"
     shift
-    local msg="${TR[$key]:-$key}"
+    local msg="${TR["$key"]:-$key}"
     if [ $# -gt 0 ]; then
         msg=$(printf "$msg" "$@")
     fi
@@ -53,7 +53,7 @@ print_message() {
 print_error() {
     local key="$1"
     shift
-    local msg="${TR[$key]:-$key}"
+    local msg="${TR["$key"]:-$key}"
     if [ $# -gt 0 ]; then
         msg=$(printf "$msg" "$@")
     fi
@@ -63,7 +63,7 @@ print_error() {
 print_warning() {
     local key="$1"
     shift
-    local msg="${TR[$key]:-$key}"
+    local msg="${TR["$key"]:-$key}"
     if [ $# -gt 0 ]; then
         msg=$(printf "$msg" "$@")
     fi
@@ -73,7 +73,7 @@ print_warning() {
 print_header() {
     local key="$1"
     shift
-    local msg="${TR[$key]:-$key}"
+    local msg="${TR["$key"]:-$key}"
     if [ $# -gt 0 ]; then
         msg=$(printf "$msg" "$@")
     fi
@@ -83,7 +83,7 @@ print_header() {
 print_success() {
     local key="$1"
     shift
-    local msg="${TR[$key]:-$key}"
+    local msg="${TR["$key"]:-$key}"
     if [ $# -gt 0 ]; then
         msg=$(printf "$msg" "$@")
     fi
