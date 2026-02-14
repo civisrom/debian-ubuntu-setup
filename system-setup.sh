@@ -1311,37 +1311,37 @@ if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS
     
     # Write new sources.list based on version
     if [ "$VERSION" = "13" ] || [ "$DEBIAN_CODENAME" = "trixie" ]; then
-        # Debian 13 (Trixie) configuration - БЕЗ backports (testing не имеет backports)
+        # Debian 13 (Trixie) configuration - no backports (testing has no backports)
         cat > /etc/apt/sources.list << EOF
-### Основные репозитории Debian ${DEBIAN_CODENAME^}
+### Main Debian ${DEBIAN_CODENAME^} repositories
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 
-### Обновления безопасности
+### Security updates
 deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
 
-### Обновления релиза
+### Release updates
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
 EOF
         print_message "Configured Debian 13 (Trixie) repositories without backports"
     else
-        # Debian 12 (Bookworm) and older configuration - С backports
+        # Debian 12 (Bookworm) and older configuration - with backports
         cat > /etc/apt/sources.list << EOF
-### Основные репозитории Debian ${DEBIAN_CODENAME^}
+### Main Debian ${DEBIAN_CODENAME^} repositories
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 
-### Обновления безопасности
+### Security updates
 deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
 
-### Обновления стабильного релиза
+### Stable release updates
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
 
-### Backports (новые версии пакетов)
+### Backports (newer package versions)
 deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
 EOF
@@ -1748,9 +1748,72 @@ EOF
     mv /etc/sysctl.conf.new /etc/sysctl.conf
     print_message "sysctl.conf configured"
     
-    # Apply sysctl settings
+    # Apply sysctl settings (|| true to prevent set -e exit on unsupported params)
     print_message "Applying sysctl settings..."
-    sysctl -p
+    sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
+
+    # DNS recovery after IPv6 disable
+    # When IPv6 is disabled at runtime via sysctl, the system DNS resolver
+    # may still hold stale IPv6 connections/state, causing DNS resolution failures.
+    # We need to restart the resolver and ensure IPv4 nameservers are available.
+    print_message "Recovering DNS after IPv6 disable..."
+
+    # Ensure resolv.conf has IPv4 nameservers
+    RESOLV_FILE="/etc/resolv.conf"
+    if [ -f "$RESOLV_FILE" ]; then
+        # Check if there are any IPv4 nameservers
+        if ! grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "$RESOLV_FILE"; then
+            print_warning "No IPv4 nameservers found in $RESOLV_FILE, adding fallback DNS"
+            cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.pre-ipv6-disable.$(date +%Y%m%d-%H%M%S)~"
+            # Remove IPv6-only nameservers and add IPv4 fallback
+            grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "${RESOLV_FILE}.tmp" 2>/dev/null || true
+            echo "nameserver 1.1.1.1" >> "${RESOLV_FILE}.tmp"
+            echo "nameserver 8.8.8.8" >> "${RESOLV_FILE}.tmp"
+            mv "${RESOLV_FILE}.tmp" "$RESOLV_FILE"
+            print_message "Added Cloudflare (1.1.1.1) and Google (8.8.8.8) as fallback DNS"
+        fi
+    fi
+
+    # Restart systemd-resolved if active to clear stale IPv6 state
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        print_message "Restarting systemd-resolved to apply IPv4-only DNS..."
+        systemctl restart systemd-resolved
+        sleep 1
+    fi
+
+    # Flush DNS cache (do NOT restart networking - it would drop SSH sessions)
+    resolvectl flush-caches 2>/dev/null || true
+    systemd-resolve --flush-caches 2>/dev/null || true
+
+    # Verify DNS resolution works
+    print_message "Verifying DNS resolution..."
+    sleep 1
+    if getent hosts deb.debian.org &>/dev/null || getent hosts archive.ubuntu.com &>/dev/null; then
+        print_success "DNS resolution is working"
+    else
+        print_warning "DNS resolution test failed, attempting additional recovery..."
+        # Try adding fallback DNS even if IPv4 nameservers already exist
+        # (they might be unreachable IPv4-mapped IPv6 addresses)
+        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.dns-recovery.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
+        if ! grep -q "1.1.1.1" "$RESOLV_FILE" 2>/dev/null; then
+            echo "nameserver 1.1.1.1" >> "$RESOLV_FILE"
+        fi
+        if ! grep -q "8.8.8.8" "$RESOLV_FILE" 2>/dev/null; then
+            echo "nameserver 8.8.8.8" >> "$RESOLV_FILE"
+        fi
+        # Restart resolver again with new nameservers
+        if systemctl is-active systemd-resolved &>/dev/null; then
+            systemctl restart systemd-resolved
+        fi
+        sleep 2
+
+        # Final check
+        if getent hosts deb.debian.org &>/dev/null || getent hosts archive.ubuntu.com &>/dev/null; then
+            print_success "DNS resolution recovered after adding fallback nameservers"
+        else
+            print_warning "DNS may still have issues. Continuing anyway..."
+        fi
+    fi
 else
     print_message "Skipping sysctl configuration (not requested)"
 fi
@@ -1943,12 +2006,18 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                         TEMP_RESOLV=$(mktemp)
                         # Remove lines with IPv6 nameservers (addresses containing ":")
                         grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "$TEMP_RESOLV"
-                        if [ -s "$TEMP_RESOLV" ]; then
+                        # Check if any IPv4 nameservers remain after removing IPv6 ones
+                        if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9]+\.[0-9]+" "$TEMP_RESOLV" && [ -s "$TEMP_RESOLV" ]; then
                             mv "$TEMP_RESOLV" "$RESOLV_FILE"
                             print_success "IPv6 nameservers removed from $RESOLV_FILE"
                         else
-                            rm -f "$TEMP_RESOLV"
-                            print_warning "Not modifying $RESOLV_FILE - would result in empty file"
+                            # No IPv4 nameservers remain - add fallback DNS
+                            print_warning "No IPv4 nameservers would remain, adding fallback DNS"
+                            grep -vE "^[[:space:]]*nameserver" "$RESOLV_FILE" > "$TEMP_RESOLV" 2>/dev/null || true
+                            echo "nameserver 1.1.1.1" >> "$TEMP_RESOLV"
+                            echo "nameserver 8.8.8.8" >> "$TEMP_RESOLV"
+                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
+                            print_success "IPv6 nameservers replaced with Cloudflare and Google DNS"
                         fi
                     else
                         print_message "No IPv6 nameservers found in $RESOLV_FILE"
