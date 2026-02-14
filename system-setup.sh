@@ -794,6 +794,36 @@ if [ "$INTERACTIVE" = true ]; then
         CUSTOM_PORTS=""
     fi
     
+    # Ask about Swap Configuration
+    echo ""
+    print_header "═══════════════════════════════════════════════"
+    print_header "   Swap Configuration (swapfile + zram)"
+    print_header "═══════════════════════════════════════════════"
+    echo ""
+    TOTAL_RAM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+    TOTAL_RAM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+    print_message "Detected RAM: ${TOTAL_RAM_MB} MB (~${TOTAL_RAM_GB} GB)"
+    print_message "This will configure hybrid swap: swapfile (disk) + zram (compressed RAM)"
+    print_message "Recommended for VPS with limited memory"
+    read -p "Configure Swap? (y/N): " CONFIGURE_SWAP
+    CONFIGURE_SWAP=${CONFIGURE_SWAP:-n}
+
+    if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
+        echo ""
+        print_message "Swap setup mode:"
+        echo "  1) Auto-detect (choose template based on RAM size)"
+        echo "  2) Interactive wizard (full control over settings)"
+        echo ""
+        read -p "Select mode [1-2] (default: 1): " SWAP_MODE
+        SWAP_MODE=${SWAP_MODE:-1}
+
+        if [ "$SWAP_MODE" = "2" ]; then
+            SWAP_INTERACTIVE=true
+        else
+            SWAP_INTERACTIVE=false
+        fi
+    fi
+
     # Ask about BBR Network Optimizer
     echo ""
     print_header "═══════════════════════════════════════════════"
@@ -885,6 +915,9 @@ else
     INSTALL_GO="n"
     INSTALL_IPSET="n"
     INSTALL_RUSTDESK="n"
+    CONFIGURE_SWAP="n"
+    SWAP_MODE="1"
+    SWAP_INTERACTIVE=false
     RUN_BBR_OPTIMIZER="n"
     BBR_FORCE_IPV4="n"
     BBR_FULL_UPDATE="n"
@@ -986,6 +1019,15 @@ if [ ! -z "$CUSTOM_PORTS" ]; then
     print_message "  UFW Custom Ports: $CUSTOM_PORTS"
 else
     print_message "  UFW Custom Ports: None"
+fi
+if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
+    if [ "$SWAP_INTERACTIVE" = true ]; then
+        print_message "  Swap Configuration: YES (interactive wizard)"
+    else
+        print_message "  Swap Configuration: YES (auto-detect by RAM)"
+    fi
+else
+    print_message "  Swap Configuration: NO"
 fi
 if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     print_message "  BBR Network Optimizer: YES"
@@ -3296,6 +3338,58 @@ else
 fi
 
 # ============================================
+# CONFIGURE SWAP (SWAPFILE + ZRAM)
+# ============================================
+
+if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
+    echo ""
+    print_header "═══════════════════════════════════════════════════"
+    print_header "   Configuring Swap (swapfile + zram)"
+    print_header "═══════════════════════════════════════════════════"
+    echo ""
+
+    SWAP_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/swapfile-script/main/swap-setup.sh"
+    SWAP_SCRIPT_PATH="/tmp/swap-setup.sh"
+    SWAP_INSTALL_PATH="/usr/local/sbin/swap-setup.sh"
+
+    print_message "Downloading swap-setup.sh..."
+    if curl -fsSL "$SWAP_SCRIPT_URL" -o "$SWAP_SCRIPT_PATH"; then
+        print_message "Swap script downloaded successfully"
+        chmod +x "$SWAP_SCRIPT_PATH"
+
+        # Install to system path for future use
+        cp "$SWAP_SCRIPT_PATH" "$SWAP_INSTALL_PATH"
+        chmod +x "$SWAP_INSTALL_PATH"
+        print_message "Installed to $SWAP_INSTALL_PATH for future use"
+
+        # Run swap-setup.sh based on selected mode
+        if [ "$SWAP_INTERACTIVE" = true ]; then
+            print_message "Starting swap interactive wizard..."
+            bash "$SWAP_SCRIPT_PATH" || print_warning "Swap setup encountered an error"
+        else
+            print_message "Running swap auto-detect mode..."
+            bash "$SWAP_SCRIPT_PATH" --yes || print_warning "Swap setup encountered an error"
+        fi
+
+        # Cleanup temp file
+        rm -f "$SWAP_SCRIPT_PATH"
+
+        echo ""
+        print_header "═══════════════════════════════════════════════════"
+        print_message "Swap configuration completed"
+        print_message "You can manage swap later: sudo swap-setup.sh --status"
+        print_header "═══════════════════════════════════════════════════"
+        echo ""
+    else
+        print_error "Failed to download swap-setup.sh"
+        print_message "You can manually install it later:"
+        print_message "  wget -qO- https://raw.githubusercontent.com/civisrom/swapfile-script/main/install.sh | sudo bash"
+    fi
+else
+    print_message "Skipping swap configuration (not requested)"
+fi
+
+# ============================================
 # RUN BBR NETWORK OPTIMIZER
 # ============================================
 
@@ -3612,6 +3706,16 @@ else
     print_message "- Custom UFW Docker rules: Not installed"
 fi
 
+if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
+    print_message "- Swap Configuration: Configured"
+    if [ -f /usr/local/sbin/swap-setup.sh ]; then
+        print_message "  Swap script installed: /usr/local/sbin/swap-setup.sh"
+    fi
+    print_message "  Check status: sudo swap-setup.sh --status"
+else
+    print_message "- Swap Configuration: Not configured"
+fi
+
 if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     print_message "- BBR Network Optimizer: Executed"
     print_message "  Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
@@ -3698,6 +3802,11 @@ if command -v docker &> /dev/null; then
     fi
 fi
 
+if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
+    print_warning "$STEP_NUM. Check swap status: sudo swap-setup.sh --status"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+
 if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     print_warning "$STEP_NUM. Check crontab: sudo crontab -l"
     STEP_NUM=$((STEP_NUM + 1))
@@ -3727,6 +3836,10 @@ print_message "sudo crontab -l"
 if [ "$OS" = "debian" ]; then
     print_message "sudo nano /etc/default/grub"
     print_message "cat /proc/cmdline"
+fi
+if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
+    print_message "sudo swap-setup.sh --status    # Check swap"
+    print_message "sudo swap-setup.sh --remove    # Remove swap"
 fi
 if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     print_message "run-parts /etc/update-motd.d/  # Test MOTD"
