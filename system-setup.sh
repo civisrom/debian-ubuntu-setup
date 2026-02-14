@@ -1032,8 +1032,8 @@ COMMON_PACKAGES=(
     mc
     mc-data
     wget
-    #iptables
-    #ufw
+    iptables
+    ufw
     nano
     apt-utils
     curl
