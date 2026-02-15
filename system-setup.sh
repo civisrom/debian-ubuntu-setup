@@ -1137,12 +1137,17 @@ if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
 fi
 
 # Debian-specific packages
-# Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
 # You can comment out (#) any package to disable its installation
 DEBIAN_PACKAGES=(
-    linux-headers-$(uname -r)
     openvswitch-switch-dpdk
 )
+
+# Add linux-headers only if available for the running kernel
+if apt-cache show "linux-headers-$(uname -r)" &>/dev/null; then
+    DEBIAN_PACKAGES+=("linux-headers-$(uname -r)")
+else
+    print_warning "linux-headers-$(uname -r) not available (kernel updated without reboot?), skipping"
+fi
 
 # Ubuntu-specific packages
 # Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
@@ -2173,10 +2178,9 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     # Change SSH port
     if [ ! -z "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
         # Check if Port line exists (commented or not)
-        if grep -q "^#Port " "$SSHD_CONFIG" || grep -q "^Port " "$SSHD_CONFIG"; then
-            # Replace existing Port line
-            sed -i "s/^#Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
-            sed -i "s/^Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
+        if grep -q "^#\?Port " "$SSHD_CONFIG"; then
+            # Replace existing Port line (commented or uncommented) in one pass
+            sed -i "s/^#\?Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
             print_message "SSH port changed to $SSH_PORT"
         else
             # Add Port line after Include directive

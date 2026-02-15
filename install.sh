@@ -42,6 +42,17 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Check if wget is available
+if ! command -v wget &> /dev/null; then
+    print_warning "wget not found, attempting to install..."
+    if command -v apt-get &> /dev/null; then
+        apt-get update -qq && apt-get install -y -qq wget
+    else
+        print_error "wget is required but not installed and cannot be auto-installed"
+        exit 1
+    fi
+fi
+
 # Download script
 print_message "Downloading setup script..."
 if wget --show-progress "$SCRIPT_URL" -O "$TEMP_SCRIPT" 2>&1 | grep -v "^$"; then
