@@ -12,6 +12,12 @@ CHECKSUM_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/mai
 TEMP_SCRIPT="/tmp/system-setup-$$.sh"
 TEMP_CHECKSUM="/tmp/system-setup-$$.sha256"
 
+# Cleanup temporary files on exit (normal, error, or interrupt)
+cleanup() {
+    rm -f "$TEMP_SCRIPT" "$TEMP_CHECKSUM"
+}
+trap cleanup EXIT
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,7 +55,7 @@ fi
 print_message "Verifying integrity..."
 if wget -q "$CHECKSUM_URL" -O "$TEMP_CHECKSUM" 2>/dev/null; then
     # Extract expected checksum
-    EXPECTED_CHECKSUM=$(cat "$TEMP_CHECKSUM" | awk '{print $1}')
+    EXPECTED_CHECKSUM=$(awk '{print $1}' "$TEMP_CHECKSUM")
 
     # Calculate actual checksum
     ACTUAL_CHECKSUM=$(sha256sum "$TEMP_SCRIPT" | awk '{print $1}')
@@ -72,14 +78,15 @@ fi
 # Make executable
 chmod +x "$TEMP_SCRIPT"
 
-# Run script
+# Run script (disable set -e to capture exit code properly)
 print_message "Running setup script..."
+set +e
 bash "$TEMP_SCRIPT"
 EXIT_CODE=$?
+set -e
 
-# Cleanup
+# Cleanup is handled by trap, but log it
 print_message "Cleaning up temporary files..."
-rm -f "$TEMP_SCRIPT"
 
 if [ $EXIT_CODE -eq 0 ]; then
     print_message "Setup completed successfully and temporary files removed"
