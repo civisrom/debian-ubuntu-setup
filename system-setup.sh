@@ -145,18 +145,28 @@ else
     if [ "$OS" = "debian" ]; then
         if [ "$VERSION" != "12" ] && [ "$VERSION" != "13" ]; then
             print_warning "Detected Debian version: $VERSION (officially supported: 12, 13)"
-            read -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
-            CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
-            if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
+            if [ "$INTERACTIVE" = true ]; then
+                read -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+                CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
+                if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
+                    exit 1
+                fi
+            else
+                print_error "Unsupported Debian version in non-interactive mode"
                 exit 1
             fi
         fi
     elif [ "$OS" = "ubuntu" ]; then
         if [ "$VERSION" != "24.04" ] && [ "$VERSION" != "25.04" ]; then
             print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04, 25.04)"
-            read -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
-            CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
-            if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
+            if [ "$INTERACTIVE" = true ]; then
+                read -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+                CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
+                if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
+                    exit 1
+                fi
+            else
+                print_error "Unsupported Ubuntu version in non-interactive mode"
                 exit 1
             fi
         fi
@@ -701,7 +711,7 @@ if [ "$INTERACTIVE" = true ]; then
     else
         # Disable Tataranovich for Debian 13+
         ADD_TATARANOVICH_REPO="n"
-        if [ "$OS" = "debian" ] && [ "$VERSION" -ge "13" ]; then
+        if [ "$OS" = "debian" ] && [ "$VERSION" != "12" ]; then
             echo ""
             print_message "Note: Tataranovich repository is not available for Debian 13+"
         fi
@@ -927,9 +937,9 @@ else
     DISABLE_IPV6_GRUB="n"
     
     print_message "Non-interactive mode - using default settings:"
-    print_message "- Root password: YES"
+    print_message "- Root password: NO"
     print_message "- Create user: NO"
-    print_message "- SSH configuration: YES"
+    print_message "- SSH configuration: NO"
     print_message "- Python venv: NO"
     print_message "- Docker: NO"
     print_message "- ufw-docker: NO"
@@ -1127,12 +1137,17 @@ if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
 fi
 
 # Debian-specific packages
-# Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
 # You can comment out (#) any package to disable its installation
 DEBIAN_PACKAGES=(
-    linux-headers-$(uname -r)
     openvswitch-switch-dpdk
 )
+
+# Add linux-headers only if available for the running kernel
+if apt-cache show "linux-headers-$(uname -r)" &>/dev/null; then
+    DEBIAN_PACKAGES+=("linux-headers-$(uname -r)")
+else
+    print_warning "linux-headers-$(uname -r) not available (kernel updated without reboot?), skipping"
+fi
 
 # Ubuntu-specific packages
 # Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
@@ -1270,9 +1285,7 @@ fi
 
 if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
     print_message "Setting root password..."
-    chpasswd << EOF
-root:$ROOT_PASSWORD
-EOF
+    printf '%s:%s\n' "root" "$ROOT_PASSWORD" | chpasswd
     print_message "Root password set successfully"
     echo ""
 fi
@@ -1289,9 +1302,7 @@ if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
         print_message "User $NEW_USERNAME created successfully"
         
         # Set password
-        chpasswd << EOF
-$NEW_USERNAME:$NEW_USER_PASSWORD
-EOF
+        printf '%s:%s\n' "$NEW_USERNAME" "$NEW_USER_PASSWORD" | chpasswd
         print_message "Password set for $NEW_USERNAME"
         
         # Add user to sudo group
@@ -1322,7 +1333,7 @@ fi
 if ( [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] ) && [ ! -z "$NEW_USERNAME" ]; then
     print_message "Configuring SSH key for $NEW_USERNAME"
     
-    USER_HOME=$(eval echo ~$NEW_USERNAME)
+    USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
     
     # Create .ssh directory as user
     sudo -u "$NEW_USERNAME" bash << EOF
@@ -1695,7 +1706,7 @@ fi
 if ( [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] ) && [ ! -z "$NEW_USERNAME" ]; then
     print_message "Installing Oh My Zsh for $NEW_USERNAME"
     
-    USER_HOME=$(eval echo ~$NEW_USERNAME)
+    USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
     
     # Install Oh My Zsh as user
     print_message "Installing Oh My Zsh..."
@@ -2167,10 +2178,9 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     # Change SSH port
     if [ ! -z "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
         # Check if Port line exists (commented or not)
-        if grep -q "^#Port " "$SSHD_CONFIG" || grep -q "^Port " "$SSHD_CONFIG"; then
-            # Replace existing Port line
-            sed -i "s/^#Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
-            sed -i "s/^Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
+        if grep -q "^#\?Port " "$SSHD_CONFIG"; then
+            # Replace existing Port line (commented or uncommented) in one pass
+            sed -i "s/^#\?Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
             print_message "SSH port changed to $SSH_PORT"
         else
             # Add Port line after Include directive
@@ -2259,7 +2269,7 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     ufw --force default deny incoming
     ufw --force default allow outgoing
     ufw --force default deny forward
-    ufw --force default deny routed
+    ufw --force default deny routed 2>/dev/null || print_warning "UFW 'deny routed' not supported in this version, skipping"
     print_message "UFW default policies configured"
     
     # Allow SSH (use configured port)
@@ -2531,7 +2541,7 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
         print_message "Installing latest version of Go for user $NEW_USERNAME..."
         echo ""
         
-        USER_HOME=$(eval echo ~$NEW_USERNAME)
+        USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
         
         # Get the latest Go version from official website
         print_message "Fetching latest Go version..."
@@ -2687,52 +2697,53 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
         print_message "Downloading ipset from: $IPSET_URL"
         if wget -q --show-progress "$IPSET_URL" -O "/tmp/${IPSET_ARCHIVE}"; then
             print_message "ipset downloaded successfully"
-            
+
             # Extract ipset
             print_message "Extracting ipset..."
-            cd /tmp
-            tar xjf "${IPSET_ARCHIVE}"
-            
+            tar xjf "/tmp/${IPSET_ARCHIVE}" -C /tmp
+
             IPSET_DIR="ipset-${LATEST_IPSET_VERSION}"
-            
+
             if [ -d "/tmp/${IPSET_DIR}" ]; then
-                cd "/tmp/${IPSET_DIR}"
-                
-                # Configure with proper kernel source
-                print_message "Configuring ipset with kernel headers..."
-                if ./configure --prefix=/usr --with-kmod=no; then
-                    print_message "Configuration successful"
-                    
-                    # Build
-                    print_message "Building ipset (using $(nproc) cores)..."
-                    if make -j$(nproc); then
-                        print_message "Build successful"
-                        
-                        # Install
-                        print_message "Installing ipset..."
-                        if make install; then
-                            print_message "ipset installed successfully"
-                            
-                            # Verify installation
-                            if ipset --version &> /dev/null; then
-                                IPSET_INSTALLED_VERSION=$(ipset --version)
-                                print_message "ipset version: $IPSET_INSTALLED_VERSION"
+                # Build in subshell to avoid changing working directory
+                (
+                    cd "/tmp/${IPSET_DIR}"
+
+                    # Configure with proper kernel source
+                    print_message "Configuring ipset with kernel headers..."
+                    if ./configure --prefix=/usr --with-kmod=no; then
+                        print_message "Configuration successful"
+
+                        # Build
+                        print_message "Building ipset (using $(nproc) cores)..."
+                        if make -j$(nproc); then
+                            print_message "Build successful"
+
+                            # Install
+                            print_message "Installing ipset..."
+                            if make install; then
+                                print_message "ipset installed successfully"
                             else
-                                print_warning "ipset installed but version check failed"
+                                print_error "Failed to install ipset"
                             fi
                         else
-                            print_error "Failed to install ipset"
+                            print_error "Failed to build ipset"
                         fi
                     else
-                        print_error "Failed to build ipset"
+                        print_error "Failed to configure ipset"
+                        print_error "Check that kernel headers are properly installed"
                     fi
+                )
+
+                # Verify installation (outside subshell)
+                if ipset --version &> /dev/null; then
+                    IPSET_INSTALLED_VERSION=$(ipset --version)
+                    print_message "ipset version: $IPSET_INSTALLED_VERSION"
                 else
-                    print_error "Failed to configure ipset"
-                    print_error "Check that kernel headers are properly installed"
+                    print_warning "ipset installed but version check failed"
                 fi
-                
+
                 # Cleanup
-                cd /tmp
                 rm -rf "/tmp/${IPSET_DIR}" "/tmp/${IPSET_ARCHIVE}"
             else
                 print_error "Failed to extract ipset"
@@ -2770,10 +2781,11 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
         # Activate virtual environment and install packages
         print_message "Installing Python packages..."
         source "$VENV_PATH/bin/activate"
-        
-        # Upgrade pip first
+
+        # Upgrade pip first (disable set -e to prevent script termination on pip failures)
+        set +e
         pip install --upgrade pip
-        
+
         # Install packages
         pip install --upgrade \
             requests \
@@ -2801,11 +2813,17 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
             "python-telegram-bot[job-queue]" \
             urllib3 \
             chardet
-        
-        print_message "Python packages installed successfully"
+        PIP_EXIT_CODE=$?
+        set -e
+
+        if [ $PIP_EXIT_CODE -eq 0 ]; then
+            print_message "Python packages installed successfully"
+        else
+            print_warning "Some Python packages may have failed to install (exit code: $PIP_EXIT_CODE)"
+        fi
         print_message "Virtual environment location: $VENV_PATH"
         print_message "To activate: source $VENV_PATH/bin/activate"
-        
+
         deactivate
     else
         print_error "Failed to create virtual environment"
@@ -3448,7 +3466,12 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
         cat > /tmp/bbr_wrapper.sh << 'EOFWRAPPER'
 #!/bin/bash
 
-# Source the original BBR script
+# Define print_message in case bbr.sh doesn't provide it
+print_message() {
+    echo -e "\033[0;32m[INFO]\033[0m $1"
+}
+
+# Source the original BBR script (may override print_message)
 source /tmp/bbr_optimizer.sh
 
 # Run selected functions based on parameters
@@ -3687,7 +3710,7 @@ if command -v go &> /dev/null || [ -f /usr/local/go/bin/go ]; then
         GO_VERSION=$(/usr/local/go/bin/go version 2>/dev/null || echo "unknown")
         print_message "- Go: Installed ($GO_VERSION)"
         if [ ! -z "$NEW_USERNAME" ]; then
-            USER_HOME=$(eval echo ~$NEW_USERNAME)
+            USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
             if [ -f "$USER_HOME/.zshrc" ]; then
                 print_message "  Configured in: $USER_HOME/.zshrc"
             elif [ -f "$USER_HOME/.bashrc" ]; then
