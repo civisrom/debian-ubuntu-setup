@@ -47,6 +47,94 @@ is_yes() {
     [ "$1" = "y" ] || [ "$1" = "Y" ]
 }
 
+# Reusable DNS recovery function
+# Called after any operation that may break DNS (IPv6 disable, resolv.conf edits)
+# Handles both systemd-resolved and classic resolv.conf setups
+ensure_dns_works() {
+    local caller_context="${1:-unknown}"
+    local RESOLV_FILE="/etc/resolv.conf"
+
+    # Step 1: Configure systemd-resolved with IPv4 upstream DNS (if active)
+    # Writing to resolv.conf alone is insufficient when systemd-resolved manages it,
+    # because resolved ignores resolv.conf and uses its own config for upstream DNS
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        local RESOLVED_CONF="/etc/systemd/resolved.conf"
+        local RESOLVED_DROP="/etc/systemd/resolved.conf.d"
+
+        # Check if upstream DNS already has IPv4 public DNS configured
+        if ! grep -qE "^DNS=.*1\.1\.1\.1" "$RESOLVED_CONF" 2>/dev/null && \
+           ! grep -qE "^DNS=.*1\.1\.1\.1" "$RESOLVED_DROP"/*.conf 2>/dev/null; then
+
+            mkdir -p "$RESOLVED_DROP"
+            cat > "${RESOLVED_DROP}/ipv4-dns.conf" << 'DNSEOF'
+[Resolve]
+DNS=1.1.1.1 8.8.8.8
+FallbackDNS=1.0.0.1 8.8.4.4
+DNSEOF
+            print_message "[$caller_context] Configured systemd-resolved with IPv4 DNS"
+        fi
+
+        systemctl restart systemd-resolved
+        sleep 1
+
+        # Flush caches
+        resolvectl flush-caches 2>/dev/null || true
+    fi
+
+    # Step 2: Ensure resolv.conf has real IPv4 nameservers (not just 127.0.0.53 stub)
+    if [ -f "$RESOLV_FILE" ]; then
+        # Check for real (non-loopback) IPv4 nameservers
+        if ! grep -qE "^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|8\.8\.4\.4)" "$RESOLV_FILE"; then
+            cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.dns.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
+            # Remove IPv6 nameservers (addresses containing ":")
+            grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "${RESOLV_FILE}.tmp" 2>/dev/null || true
+            # Add public IPv4 DNS
+            echo "nameserver 1.1.1.1" >> "${RESOLV_FILE}.tmp"
+            echo "nameserver 8.8.8.8" >> "${RESOLV_FILE}.tmp"
+            mv "${RESOLV_FILE}.tmp" "$RESOLV_FILE"
+            print_message "[$caller_context] Added 1.1.1.1 and 8.8.8.8 to resolv.conf"
+        fi
+    fi
+
+    # Step 3: Verify DNS actually works (with retry)
+    sleep 1
+    local dns_ok=false
+    for domain in deb.debian.org archive.ubuntu.com google.com; do
+        if getent hosts "$domain" &>/dev/null; then
+            dns_ok=true
+            break
+        fi
+    done
+
+    if [ "$dns_ok" = true ]; then
+        print_success "[$caller_context] DNS resolution verified"
+    else
+        print_warning "[$caller_context] DNS resolution failed, forcing direct nameservers..."
+        # Last resort: overwrite resolv.conf completely with known-good DNS
+        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.force.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
+        # Preserve non-nameserver lines (search, options, etc.)
+        grep -vE "^[[:space:]]*nameserver" "$RESOLV_FILE" > "${RESOLV_FILE}.tmp" 2>/dev/null || true
+        echo "nameserver 1.1.1.1" >> "${RESOLV_FILE}.tmp"
+        echo "nameserver 8.8.8.8" >> "${RESOLV_FILE}.tmp"
+        echo "nameserver 1.0.0.1" >> "${RESOLV_FILE}.tmp"
+        mv "${RESOLV_FILE}.tmp" "$RESOLV_FILE"
+
+        # If systemd-resolved is active, stop it temporarily so resolv.conf is used directly
+        if systemctl is-active systemd-resolved &>/dev/null; then
+            print_warning "[$caller_context] Restarting systemd-resolved with new config..."
+            systemctl restart systemd-resolved
+            sleep 2
+        fi
+
+        # Final verification
+        if getent hosts deb.debian.org &>/dev/null || getent hosts archive.ubuntu.com &>/dev/null; then
+            print_success "[$caller_context] DNS resolution recovered"
+        else
+            print_warning "[$caller_context] DNS may still have issues. Continuing anyway..."
+        fi
+    fi
+}
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root"
@@ -1838,68 +1926,8 @@ EOF
     print_message "Applying sysctl settings..."
     sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
 
-    # DNS recovery after IPv6 disable
-    # When IPv6 is disabled at runtime via sysctl, the system DNS resolver
-    # may still hold stale IPv6 connections/state, causing DNS resolution failures.
-    # We need to restart the resolver and ensure IPv4 nameservers are available.
-    print_message "Recovering DNS after IPv6 disable..."
-
-    # Ensure resolv.conf has IPv4 nameservers
-    RESOLV_FILE="/etc/resolv.conf"
-    if [ -f "$RESOLV_FILE" ]; then
-        # Check if there are any IPv4 nameservers
-        if ! grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "$RESOLV_FILE"; then
-            print_warning "No IPv4 nameservers found in $RESOLV_FILE, adding fallback DNS"
-            cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.pre-ipv6-disable.$(date +%Y%m%d-%H%M%S)~"
-            # Remove IPv6-only nameservers and add IPv4 fallback
-            grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "${RESOLV_FILE}.tmp" 2>/dev/null || true
-            echo "nameserver 1.1.1.1" >> "${RESOLV_FILE}.tmp"
-            echo "nameserver 8.8.8.8" >> "${RESOLV_FILE}.tmp"
-            mv "${RESOLV_FILE}.tmp" "$RESOLV_FILE"
-            print_message "Added Cloudflare (1.1.1.1) and Google (8.8.8.8) as fallback DNS"
-        fi
-    fi
-
-    # Restart systemd-resolved if active to clear stale IPv6 state
-    if systemctl is-active systemd-resolved &>/dev/null; then
-        print_message "Restarting systemd-resolved to apply IPv4-only DNS..."
-        systemctl restart systemd-resolved
-        sleep 1
-    fi
-
-    # Flush DNS cache (do NOT restart networking - it would drop SSH sessions)
-    resolvectl flush-caches 2>/dev/null || true
-    systemd-resolve --flush-caches 2>/dev/null || true
-
-    # Verify DNS resolution works
-    print_message "Verifying DNS resolution..."
-    sleep 1
-    if getent hosts deb.debian.org &>/dev/null || getent hosts archive.ubuntu.com &>/dev/null; then
-        print_success "DNS resolution is working"
-    else
-        print_warning "DNS resolution test failed, attempting additional recovery..."
-        # Try adding fallback DNS even if IPv4 nameservers already exist
-        # (they might be unreachable IPv4-mapped IPv6 addresses)
-        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.dns-recovery.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
-        if ! grep -q "1.1.1.1" "$RESOLV_FILE" 2>/dev/null; then
-            echo "nameserver 1.1.1.1" >> "$RESOLV_FILE"
-        fi
-        if ! grep -q "8.8.8.8" "$RESOLV_FILE" 2>/dev/null; then
-            echo "nameserver 8.8.8.8" >> "$RESOLV_FILE"
-        fi
-        # Restart resolver again with new nameservers
-        if systemctl is-active systemd-resolved &>/dev/null; then
-            systemctl restart systemd-resolved
-        fi
-        sleep 2
-
-        # Final check
-        if getent hosts deb.debian.org &>/dev/null || getent hosts archive.ubuntu.com &>/dev/null; then
-            print_success "DNS resolution recovered after adding fallback nameservers"
-        else
-            print_warning "DNS may still have issues. Continuing anyway..."
-        fi
-    fi
+    # DNS recovery after IPv6 disable via sysctl
+    ensure_dns_works "sysctl-ipv6-disable"
 else
     print_message "Skipping sysctl configuration (not requested)"
 fi
@@ -2129,8 +2157,22 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
         fi
     fi
     echo ""
+
+    # DNS recovery after modifying /etc/network/interfaces and resolv.conf
+    ensure_dns_works "comment-ipv6-interfaces"
 else
     print_message "Skipping IPv6 commenting in /etc/network/interfaces (not requested)"
+fi
+
+# ============================================
+# DNS VERIFICATION BEFORE NETWORK-DEPENDENT OPERATIONS
+# ============================================
+
+# Multiple sections above may have disabled IPv6 (sysctl, GRUB, interfaces),
+# each of which can break DNS. Run a final DNS check before Docker/Go/ipset/etc.
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || \
+   [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ]; then
+    ensure_dns_works "pre-download-verification"
 fi
 
 # ============================================
