@@ -1842,340 +1842,6 @@ EOF
 fi
 
 # ============================================
-# CONFIGURE SYSCTL.CONF
-# ============================================
-
-# Configure sysctl.conf
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-    print_message "Configuring system parameters (sysctl.conf)..."
-    
-    # Backup original sysctl.conf
-    if [ -f /etc/sysctl.conf ]; then
-        cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)~
-        print_message "Original sysctl.conf backed up"
-    fi
-    
-    # Preserve only comments and empty lines from original file
-    if [ -f /etc/sysctl.conf ]; then
-        grep -E '^#|^$' /etc/sysctl.conf > /etc/sysctl.conf.new 2>/dev/null || true
-    else
-        touch /etc/sysctl.conf.new
-    fi
-    
-    # Responsibility split:
-    # - IPv6 disable + security hardening + system limits: always written here
-    # - Network tuning (BBR, buffers, qdisc, TCP params): written here ONLY if
-    #   BBR optimizer is disabled; otherwise bbr.sh handles it with adaptive
-    #   RAM-based profiles (intelligent_settings) which is superior to static values
-
-    # === Part 1: IPv6 disable + security hardening (always) ===
-    cat >> /etc/sysctl.conf.new << 'EOF'
-
-# IPv6 Disable
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-
-# Security Hardening
-net.ipv4.tcp_syncookies = 1
-
-# System Limits
-fs.inotify.max_user_instances = 8192
-net.ipv4.ip_local_port_range = 1024 45000
-EOF
-
-    # === Part 2: Network tuning (only if BBR optimizer is NOT enabled) ===
-    # When BBR optimizer is enabled, it applies intelligent_settings() which
-    # auto-detects RAM and applies optimal values (low/mid/high profiles)
-    # with adaptive qdisc (fq_codel/cake), buffer sizes, and VM tuning
-    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
-        print_message "Network tuning will be handled by BBR optimizer (adaptive profiles)"
-    else
-        print_message "Applying static network tuning (BBR optimizer not selected)"
-        cat >> /etc/sysctl.conf.new << 'EOF'
-
-# Network Tuning (static fallback — BBR optimizer not enabled)
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
-net.core.wmem_default = 2097152
-net.core.netdev_max_backlog = 10240
-net.core.somaxconn = 8192
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 1200
-net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_max_syn_backlog = 10240
-net.ipv4.tcp_max_tw_buckets = 5000
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_mem = 25600 51200 102400
-net.ipv4.udp_mem = 25600 51200 102400
-net.ipv4.tcp_rmem = 16384 262144 8388608
-net.ipv4.tcp_wmem = 32768 524288 16777216
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_slow_start_after_idle = 0
-EOF
-    fi
-    
-    mv /etc/sysctl.conf.new /etc/sysctl.conf
-    print_message "sysctl.conf configured"
-    
-    # Apply sysctl settings (|| true to prevent set -e exit on unsupported params)
-    print_message "Applying sysctl settings..."
-    sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
-
-    # DNS recovery after IPv6 disable via sysctl
-    ensure_dns_works "sysctl-ipv6-disable"
-else
-    print_message "Skipping sysctl configuration (not requested)"
-fi
-
-# ============================================
-# DISABLE IPv6 VIA GRUB (DEBIAN ONLY)
-# ============================================
-
-if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
-    print_message "Disabling IPv6 at kernel level via GRUB..."
-    
-    GRUB_CONFIG="/etc/default/grub"
-    
-    # Backup original grub config
-    if [ -f "$GRUB_CONFIG" ]; then
-        cp "$GRUB_CONFIG" "${GRUB_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Original GRUB config backed up"
-    else
-        print_error "GRUB config file not found: $GRUB_CONFIG"
-        print_warning "Skipping IPv6 GRUB disable"
-        DISABLE_IPV6_GRUB="n"
-    fi
-    
-    if [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; then
-        # Check if ipv6.disable is already present
-        if grep -q "ipv6.disable=1" "$GRUB_CONFIG"; then
-            print_warning "IPv6 disable parameter already present in GRUB config"
-        else
-            # Modify GRUB_CMDLINE_LINUX_DEFAULT
-            if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"; then
-                # Get current value
-                CURRENT_VALUE=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG" | cut -d'"' -f2)
-                
-                # Add ipv6.disable=1 to the existing parameters
-                if [ -z "$CURRENT_VALUE" ]; then
-                    # Empty, just add ipv6.disable=1
-                    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"/' "$GRUB_CONFIG"
-                else
-                    # Add to existing parameters
-                    NEW_VALUE="${CURRENT_VALUE} ipv6.disable=1"
-                    sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"${NEW_VALUE}\"/" "$GRUB_CONFIG"
-                fi
-                
-                print_message "Added ipv6.disable=1 to GRUB_CMDLINE_LINUX_DEFAULT"
-            else
-                # Line doesn't exist, add it
-                echo 'GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"' >> "$GRUB_CONFIG"
-                print_message "Added GRUB_CMDLINE_LINUX_DEFAULT with ipv6.disable=1"
-            fi
-            
-            # Update GRUB
-            print_message "Updating GRUB configuration..."
-            update-grub 2>&1 | tee /tmp/grub-update.log
-            if [ ${PIPESTATUS[0]} -eq 0 ]; then
-                print_success "GRUB configuration updated successfully"
-                print_warning "IPv6 will be disabled at kernel level after reboot"
-            else
-                print_error "Failed to update GRUB configuration"
-                print_warning "Check /tmp/grub-update.log for details"
-                
-                # Try to restore backup
-                print_warning "Attempting to restore GRUB config from backup..."
-                LATEST_BACKUP=$(ls -t ${GRUB_CONFIG}.backup.*~ 2>/dev/null | head -1)
-                if [ ! -z "$LATEST_BACKUP" ]; then
-                    cp "$LATEST_BACKUP" "$GRUB_CONFIG"
-                    print_message "GRUB config restored from backup"
-                fi
-            fi
-        fi
-        
-        # Display current GRUB_CMDLINE_LINUX_DEFAULT
-        print_message "Current GRUB_CMDLINE_LINUX_DEFAULT:"
-        grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"
-    fi
-    echo ""
-else
-    if [ "$OS" = "debian" ]; then
-        print_message "Skipping IPv6 GRUB disable (not requested)"
-    fi
-fi
-
-# ============================================
-# COMMENT IPv6 IN /etc/network/interfaces
-# ============================================
-
-if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ]; then
-    print_message "Commenting out IPv6 configuration in /etc/network/interfaces..."
-    
-    INTERFACES_FILE="/etc/network/interfaces"
-    
-    if [ ! -f "$INTERFACES_FILE" ]; then
-        print_warning "File $INTERFACES_FILE not found"
-        print_message "Your system may use netplan or NetworkManager instead"
-        print_message "Skipping /etc/network/interfaces IPv6 configuration"
-    else
-        # Backup original interfaces file
-        cp "$INTERFACES_FILE" "${INTERFACES_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Original $INTERFACES_FILE backed up"
-        
-        # Check if there are any inet6 lines
-        if grep -q "inet6" "$INTERFACES_FILE"; then
-            print_message "Found IPv6 configuration in $INTERFACES_FILE"
-            
-            # Create temporary file
-            TEMP_FILE=$(mktemp)
-            
-            # Comment out all lines containing inet6 or related to IPv6
-            # This includes iface lines with inet6 and their parameters
-            # Also removes IPv6 addresses from dns-nameservers in IPv4 blocks
-            awk '
-            /^[[:space:]]*iface.*inet6/ {
-                # This is an inet6 interface definition
-                print "#" $0
-                in_inet6_block = 1
-                in_inet4_block = 0
-                next
-            }
-            /^[[:space:]]*iface.*inet[[:space:]]/ {
-                # This is an inet4 interface definition
-                in_inet4_block = 1
-                in_inet6_block = 0
-                print $0
-                next
-            }
-            in_inet6_block {
-                # We are in an inet6 block
-                if (/^[[:space:]]*$/ || /^[[:space:]]*#/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
-                    # End of inet6 block
-                    in_inet6_block = 0
-                    print $0
-                } else {
-                    # This line is part of inet6 configuration
-                    print "#" $0
-                }
-                next
-            }
-            in_inet4_block && /^[[:space:]]*dns-nameservers/ {
-                # In IPv4 block: remove IPv6 addresses from dns-nameservers
-                # Extract leading whitespace
-                match($0, /^[[:space:]]*/)
-                leading = substr($0, RSTART, RLENGTH)
-                # Build new line with only IPv4 addresses (skip anything containing ":")
-                result = leading "dns-nameservers"
-                has_ipv4 = 0
-                for (i = 2; i <= NF; i++) {
-                    if ($i !~ /:/) {
-                        result = result " " $i
-                        has_ipv4 = 1
-                    }
-                }
-                if (has_ipv4) {
-                    print result
-                }
-                # If no IPv4 addresses remain, skip the line entirely
-                next
-            }
-            in_inet4_block {
-                # Check if we are leaving the inet4 block
-                if (/^[[:space:]]*$/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
-                    in_inet4_block = 0
-                }
-                print $0
-                next
-            }
-            {
-                # Regular line, print as is
-                print $0
-            }
-            ' "$INTERFACES_FILE" > "$TEMP_FILE"
-            
-            # Verify the temporary file is not empty
-            if [ -s "$TEMP_FILE" ]; then
-                # Replace original file
-                mv "$TEMP_FILE" "$INTERFACES_FILE"
-                print_success "IPv6 configuration commented out in $INTERFACES_FILE"
-                
-                echo ""
-                print_message "Modified $INTERFACES_FILE preview:"
-                print_header "─────────────────────────────────────────────"
-                grep -A 2 -B 2 "inet6" "$INTERFACES_FILE" 2>/dev/null || print_message "No IPv6 lines remaining (all commented)"
-                print_header "─────────────────────────────────────────────"
-                echo ""
-                
-                # Remove IPv6 nameservers from /etc/resolv.conf
-                RESOLV_FILE="/etc/resolv.conf"
-                if [ -f "$RESOLV_FILE" ]; then
-                    if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"; then
-                        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
-                        print_message "Original $RESOLV_FILE backed up"
-                        TEMP_RESOLV=$(mktemp)
-                        # Remove lines with IPv6 nameservers (addresses containing ":")
-                        grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "$TEMP_RESOLV"
-                        # Check if any IPv4 nameservers remain after removing IPv6 ones
-                        if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9]+\.[0-9]+" "$TEMP_RESOLV" && [ -s "$TEMP_RESOLV" ]; then
-                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
-                            print_success "IPv6 nameservers removed from $RESOLV_FILE"
-                        else
-                            # No IPv4 nameservers remain - add fallback DNS
-                            print_warning "No IPv4 nameservers would remain, adding fallback DNS"
-                            grep -vE "^[[:space:]]*nameserver" "$RESOLV_FILE" > "$TEMP_RESOLV" 2>/dev/null || true
-                            echo "nameserver 1.1.1.1" >> "$TEMP_RESOLV"
-                            echo "nameserver 8.8.8.8" >> "$TEMP_RESOLV"
-                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
-                            print_success "IPv6 nameservers replaced with Cloudflare and Google DNS"
-                        fi
-                    else
-                        print_message "No IPv6 nameservers found in $RESOLV_FILE"
-                    fi
-                fi
-
-                print_warning "Network configuration changed. You may need to restart networking:"
-                print_message "  sudo systemctl restart networking"
-                print_message "  OR reboot the system"
-            else
-                print_error "Failed to create modified interfaces file"
-                rm -f "$TEMP_FILE"
-                # Restore from backup
-                LATEST_BACKUP=$(ls -t ${INTERFACES_FILE}.backup.*~ 2>/dev/null | head -1)
-                if [ ! -z "$LATEST_BACKUP" ]; then
-                    cp "$LATEST_BACKUP" "$INTERFACES_FILE"
-                    print_message "Restored from backup"
-                fi
-            fi
-        else
-            print_message "No IPv6 configuration found in $INTERFACES_FILE"
-            print_message "File is already without IPv6 or uses different format"
-        fi
-    fi
-    echo ""
-
-    # DNS recovery after modifying /etc/network/interfaces and resolv.conf
-    ensure_dns_works "comment-ipv6-interfaces"
-else
-    print_message "Skipping IPv6 commenting in /etc/network/interfaces (not requested)"
-fi
-
-# ============================================
-# DNS VERIFICATION BEFORE NETWORK-DEPENDENT OPERATIONS
-# ============================================
-
-# Multiple sections above may have disabled IPv6 (sysctl, GRUB, interfaces),
-# each of which can break DNS. Run a final DNS check before Docker/Go/ipset/etc.
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || \
-   [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ]; then
-    ensure_dns_works "pre-download-verification"
-fi
-
-# ============================================
 # CONFIGURE SSH
 # ============================================
 
@@ -3586,6 +3252,331 @@ EOFWRAPPER
     fi
 else
     print_message "Skipping BBR Network Optimizer (not requested)"
+fi
+
+# ============================================
+# CONFIGURE SYSCTL.CONF
+# ============================================
+# NOTE: This section is intentionally placed AFTER all network-dependent
+# operations (Docker, Go, ipset, pip, MOTD, UFW rules, swap, BBR, opt.7z).
+# Reason: sysctl disables IPv6 at runtime, which breaks DNS resolution
+# on systems where the resolver depends on IPv6 upstream DNS.
+# By running this last, we avoid the need for fragile DNS recovery hacks.
+
+# Configure sysctl.conf
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+    print_message "Configuring system parameters (sysctl.conf)..."
+
+    # Backup original sysctl.conf
+    if [ -f /etc/sysctl.conf ]; then
+        cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)~
+        print_message "Original sysctl.conf backed up"
+    fi
+
+    # Preserve only comments and empty lines from original file
+    if [ -f /etc/sysctl.conf ]; then
+        grep -E '^#|^$' /etc/sysctl.conf > /etc/sysctl.conf.new 2>/dev/null || true
+    else
+        touch /etc/sysctl.conf.new
+    fi
+
+    # Responsibility split:
+    # - IPv6 disable + security hardening + system limits: always written here
+    # - Network tuning (BBR, buffers, qdisc, TCP params): written here ONLY if
+    #   BBR optimizer is disabled; otherwise bbr.sh handles it with adaptive
+    #   RAM-based profiles (intelligent_settings) which is superior to static values
+
+    # === Part 1: IPv6 disable + security hardening (always) ===
+    cat >> /etc/sysctl.conf.new << 'EOF'
+
+# IPv6 Disable
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+
+# Security Hardening
+net.ipv4.tcp_syncookies = 1
+
+# System Limits
+fs.inotify.max_user_instances = 8192
+net.ipv4.ip_local_port_range = 1024 45000
+EOF
+
+    # === Part 2: Network tuning (only if BBR optimizer is NOT enabled) ===
+    # When BBR optimizer is enabled, it applies intelligent_settings() which
+    # auto-detects RAM and applies optimal values (low/mid/high profiles)
+    # with adaptive qdisc (fq_codel/cake), buffer sizes, and VM tuning
+    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
+        print_message "Network tuning will be handled by BBR optimizer (adaptive profiles)"
+    else
+        print_message "Applying static network tuning (BBR optimizer not selected)"
+        cat >> /etc/sysctl.conf.new << 'EOF'
+
+# Network Tuning (static fallback — BBR optimizer not enabled)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.wmem_default = 2097152
+net.core.netdev_max_backlog = 10240
+net.core.somaxconn = 8192
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_keepalive_time = 1200
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_max_syn_backlog = 10240
+net.ipv4.tcp_max_tw_buckets = 5000
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mem = 25600 51200 102400
+net.ipv4.udp_mem = 25600 51200 102400
+net.ipv4.tcp_rmem = 16384 262144 8388608
+net.ipv4.tcp_wmem = 32768 524288 16777216
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+EOF
+    fi
+
+    mv /etc/sysctl.conf.new /etc/sysctl.conf
+    print_message "sysctl.conf configured"
+
+    # Apply sysctl settings (|| true to prevent set -e exit on unsupported params)
+    print_message "Applying sysctl settings..."
+    sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
+
+    # Minimal DNS recovery: ensure resolv.conf has IPv4 DNS after IPv6 disable
+    ensure_dns_works "sysctl-ipv6-disable"
+else
+    print_message "Skipping sysctl configuration (not requested)"
+fi
+
+# ============================================
+# DISABLE IPv6 VIA GRUB (DEBIAN ONLY)
+# ============================================
+
+if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+    print_message "Disabling IPv6 at kernel level via GRUB..."
+
+    GRUB_CONFIG="/etc/default/grub"
+
+    # Backup original grub config
+    if [ -f "$GRUB_CONFIG" ]; then
+        cp "$GRUB_CONFIG" "${GRUB_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original GRUB config backed up"
+    else
+        print_error "GRUB config file not found: $GRUB_CONFIG"
+        print_warning "Skipping IPv6 GRUB disable"
+        DISABLE_IPV6_GRUB="n"
+    fi
+
+    if [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; then
+        # Check if ipv6.disable is already present
+        if grep -q "ipv6.disable=1" "$GRUB_CONFIG"; then
+            print_warning "IPv6 disable parameter already present in GRUB config"
+        else
+            # Modify GRUB_CMDLINE_LINUX_DEFAULT
+            if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"; then
+                # Get current value
+                CURRENT_VALUE=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG" | cut -d'"' -f2)
+
+                # Add ipv6.disable=1 to the existing parameters
+                if [ -z "$CURRENT_VALUE" ]; then
+                    # Empty, just add ipv6.disable=1
+                    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"/' "$GRUB_CONFIG"
+                else
+                    # Add to existing parameters
+                    NEW_VALUE="${CURRENT_VALUE} ipv6.disable=1"
+                    sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"${NEW_VALUE}\"/" "$GRUB_CONFIG"
+                fi
+
+                print_message "Added ipv6.disable=1 to GRUB_CMDLINE_LINUX_DEFAULT"
+            else
+                # Line doesn't exist, add it
+                echo 'GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"' >> "$GRUB_CONFIG"
+                print_message "Added GRUB_CMDLINE_LINUX_DEFAULT with ipv6.disable=1"
+            fi
+
+            # Update GRUB
+            print_message "Updating GRUB configuration..."
+            update-grub 2>&1 | tee /tmp/grub-update.log
+            if [ ${PIPESTATUS[0]} -eq 0 ]; then
+                print_success "GRUB configuration updated successfully"
+                print_warning "IPv6 will be disabled at kernel level after reboot"
+            else
+                print_error "Failed to update GRUB configuration"
+                print_warning "Check /tmp/grub-update.log for details"
+
+                # Try to restore backup
+                print_warning "Attempting to restore GRUB config from backup..."
+                LATEST_BACKUP=$(ls -t ${GRUB_CONFIG}.backup.*~ 2>/dev/null | head -1)
+                if [ ! -z "$LATEST_BACKUP" ]; then
+                    cp "$LATEST_BACKUP" "$GRUB_CONFIG"
+                    print_message "GRUB config restored from backup"
+                fi
+            fi
+        fi
+
+        # Display current GRUB_CMDLINE_LINUX_DEFAULT
+        print_message "Current GRUB_CMDLINE_LINUX_DEFAULT:"
+        grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"
+    fi
+    echo ""
+else
+    if [ "$OS" = "debian" ]; then
+        print_message "Skipping IPv6 GRUB disable (not requested)"
+    fi
+fi
+
+# ============================================
+# COMMENT IPv6 IN /etc/network/interfaces
+# ============================================
+
+if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ]; then
+    print_message "Commenting out IPv6 configuration in /etc/network/interfaces..."
+
+    INTERFACES_FILE="/etc/network/interfaces"
+
+    if [ ! -f "$INTERFACES_FILE" ]; then
+        print_warning "File $INTERFACES_FILE not found"
+        print_message "Your system may use netplan or NetworkManager instead"
+        print_message "Skipping /etc/network/interfaces IPv6 configuration"
+    else
+        # Backup original interfaces file
+        cp "$INTERFACES_FILE" "${INTERFACES_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original $INTERFACES_FILE backed up"
+
+        # Check if there are any inet6 lines
+        if grep -q "inet6" "$INTERFACES_FILE"; then
+            print_message "Found IPv6 configuration in $INTERFACES_FILE"
+
+            # Create temporary file
+            TEMP_FILE=$(mktemp)
+
+            # Comment out all lines containing inet6 or related to IPv6
+            # This includes iface lines with inet6 and their parameters
+            # Also removes IPv6 addresses from dns-nameservers in IPv4 blocks
+            awk '
+            /^[[:space:]]*iface.*inet6/ {
+                # This is an inet6 interface definition
+                print "#" $0
+                in_inet6_block = 1
+                in_inet4_block = 0
+                next
+            }
+            /^[[:space:]]*iface.*inet[[:space:]]/ {
+                # This is an inet4 interface definition
+                in_inet4_block = 1
+                in_inet6_block = 0
+                print $0
+                next
+            }
+            in_inet6_block {
+                # We are in an inet6 block
+                if (/^[[:space:]]*$/ || /^[[:space:]]*#/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
+                    # End of inet6 block
+                    in_inet6_block = 0
+                    print $0
+                } else {
+                    # This line is part of inet6 configuration
+                    print "#" $0
+                }
+                next
+            }
+            in_inet4_block && /^[[:space:]]*dns-nameservers/ {
+                # In IPv4 block: remove IPv6 addresses from dns-nameservers
+                # Extract leading whitespace
+                match($0, /^[[:space:]]*/)
+                leading = substr($0, RSTART, RLENGTH)
+                # Build new line with only IPv4 addresses (skip anything containing ":")
+                result = leading "dns-nameservers"
+                has_ipv4 = 0
+                for (i = 2; i <= NF; i++) {
+                    if ($i !~ /:/) {
+                        result = result " " $i
+                        has_ipv4 = 1
+                    }
+                }
+                if (has_ipv4) {
+                    print result
+                }
+                # If no IPv4 addresses remain, skip the line entirely
+                next
+            }
+            in_inet4_block {
+                # Check if we are leaving the inet4 block
+                if (/^[[:space:]]*$/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
+                    in_inet4_block = 0
+                }
+                print $0
+                next
+            }
+            {
+                # Regular line, print as is
+                print $0
+            }
+            ' "$INTERFACES_FILE" > "$TEMP_FILE"
+
+            # Verify the temporary file is not empty
+            if [ -s "$TEMP_FILE" ]; then
+                # Replace original file
+                mv "$TEMP_FILE" "$INTERFACES_FILE"
+                print_success "IPv6 configuration commented out in $INTERFACES_FILE"
+
+                echo ""
+                print_message "Modified $INTERFACES_FILE preview:"
+                print_header "─────────────────────────────────────────────"
+                grep -A 2 -B 2 "inet6" "$INTERFACES_FILE" 2>/dev/null || print_message "No IPv6 lines remaining (all commented)"
+                print_header "─────────────────────────────────────────────"
+                echo ""
+
+                # Remove IPv6 nameservers from /etc/resolv.conf
+                RESOLV_FILE="/etc/resolv.conf"
+                if [ -f "$RESOLV_FILE" ]; then
+                    if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"; then
+                        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
+                        print_message "Original $RESOLV_FILE backed up"
+                        TEMP_RESOLV=$(mktemp)
+                        # Remove lines with IPv6 nameservers (addresses containing ":")
+                        grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "$TEMP_RESOLV"
+                        # Check if any IPv4 nameservers remain after removing IPv6 ones
+                        if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9]+\.[0-9]+" "$TEMP_RESOLV" && [ -s "$TEMP_RESOLV" ]; then
+                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
+                            print_success "IPv6 nameservers removed from $RESOLV_FILE"
+                        else
+                            # No IPv4 nameservers remain - add fallback DNS
+                            print_warning "No IPv4 nameservers would remain, adding fallback DNS"
+                            grep -vE "^[[:space:]]*nameserver" "$RESOLV_FILE" > "$TEMP_RESOLV" 2>/dev/null || true
+                            echo "nameserver 1.1.1.1" >> "$TEMP_RESOLV"
+                            echo "nameserver 8.8.8.8" >> "$TEMP_RESOLV"
+                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
+                            print_success "IPv6 nameservers replaced with Cloudflare and Google DNS"
+                        fi
+                    else
+                        print_message "No IPv6 nameservers found in $RESOLV_FILE"
+                    fi
+                fi
+
+                print_warning "Network configuration changed. You may need to restart networking:"
+                print_message "  sudo systemctl restart networking"
+                print_message "  OR reboot the system"
+            else
+                print_error "Failed to create modified interfaces file"
+                rm -f "$TEMP_FILE"
+                # Restore from backup
+                LATEST_BACKUP=$(ls -t ${INTERFACES_FILE}.backup.*~ 2>/dev/null | head -1)
+                if [ ! -z "$LATEST_BACKUP" ]; then
+                    cp "$LATEST_BACKUP" "$INTERFACES_FILE"
+                    print_message "Restored from backup"
+                fi
+            fi
+        else
+            print_message "No IPv6 configuration found in $INTERFACES_FILE"
+            print_message "File is already without IPv6 or uses different format"
+        fi
+    fi
+    echo ""
+else
+    print_message "Skipping IPv6 commenting in /etc/network/interfaces (not requested)"
 fi
 
 # ============================================
