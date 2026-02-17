@@ -1241,7 +1241,7 @@ fi
 # Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
 # You can comment out (#) any package to disable its installation
 UBUNTU_PACKAGES=(
-    #linux-headers-$(uname -r)
+    linux-headers-$(uname -r)
     landscape-common
     update-notifier-common
     ubuntu-keyring
