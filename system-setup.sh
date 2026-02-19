@@ -634,6 +634,22 @@ if [ "$INTERACTIVE" = true ]; then
         else
             SSH_ROOT_LOGIN=""
         fi
+
+        # PrintMotd
+        print_message "PrintMotd - Display /etc/motd content on SSH login"
+        read -p "Configure PrintMotd? (y/N): " CONFIG_PRINT_MOTD
+        CONFIG_PRINT_MOTD=${CONFIG_PRINT_MOTD:-n}
+        if [ "$CONFIG_PRINT_MOTD" = "y" ] || [ "$CONFIG_PRINT_MOTD" = "Y" ]; then
+            read -p "Set PrintMotd to yes or no? (Y/n): " SSH_PRINT_MOTD
+            SSH_PRINT_MOTD=${SSH_PRINT_MOTD:-y}
+            if [ "$SSH_PRINT_MOTD" = "y" ] || [ "$SSH_PRINT_MOTD" = "Y" ]; then
+                SSH_PRINT_MOTD="yes"
+            else
+                SSH_PRINT_MOTD="no"
+            fi
+        else
+            SSH_PRINT_MOTD=""
+        fi
     else
         SSH_PORT="22"
         SSH_ALLOW_USERS=""
@@ -641,6 +657,7 @@ if [ "$INTERACTIVE" = true ]; then
         SSH_PASSWORD_AUTH=""
         SSH_EMPTY_PASSWORDS=""
         SSH_ROOT_LOGIN=""
+        SSH_PRINT_MOTD=""
     fi
     
     # Ask about Python virtual environment
@@ -1043,6 +1060,7 @@ else
     SSH_PASSWORD_AUTH=""
     SSH_EMPTY_PASSWORDS=""
     SSH_ROOT_LOGIN=""
+    SSH_PRINT_MOTD=""
     CREATE_VENV="n"
     VENV_PATH=""
     INSTALL_DOCKER="n"
@@ -1122,6 +1140,9 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     fi
     if [ ! -z "$SSH_ROOT_LOGIN" ]; then
         print_message "    - PermitRootLogin: $SSH_ROOT_LOGIN"
+    fi
+    if [ ! -z "$SSH_PRINT_MOTD" ]; then
+        print_message "    - PrintMotd: $SSH_PRINT_MOTD"
     fi
 fi
 print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ] && echo "YES (Path: $VENV_PATH)" || echo "NO")"
@@ -1989,7 +2010,12 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     if [ ! -z "$SSH_ROOT_LOGIN" ]; then
         configure_ssh_parameter "PermitRootLogin" "$SSH_ROOT_LOGIN" "$SSHD_CONFIG"
     fi
-    
+
+    # Configure PrintMotd
+    if [ ! -z "$SSH_PRINT_MOTD" ]; then
+        configure_ssh_parameter "PrintMotd" "$SSH_PRINT_MOTD" "$SSHD_CONFIG"
+    fi
+
     # Add AllowUsers if specified
     if [ ! -z "$SSH_ALLOW_USERS" ]; then
         # Remove existing AllowUsers lines
@@ -3753,6 +3779,9 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     fi
     if [ ! -z "$SSH_ROOT_LOGIN" ]; then
         print_message "  - PermitRootLogin: $SSH_ROOT_LOGIN"
+    fi
+    if [ ! -z "$SSH_PRINT_MOTD" ]; then
+        print_message "  - PrintMotd: $SSH_PRINT_MOTD"
     fi
 else
     print_message "- SSH: NOT CONFIGURED"
