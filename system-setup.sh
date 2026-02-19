@@ -274,18 +274,27 @@ echo ""
 
 if [ "$INTERACTIVE" = true ]; then
     # Ask about RustDesk installation
-    print_message "Do you want to install RustDesk server in Docker?"
-    print_message "This will create /opt/rustdesk directory with docker-compose.yml"
-    print_message "and install it as a systemd service"
+    print_header "───────────────────────────────────────────────"
+    print_header "   RustDesk Server (Docker)"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Install RustDesk server in Docker?"
+    print_message "  - Creates /opt/rustdesk with docker-compose.yml"
+    print_message "  - Registers systemd service (rustdesk-compose.service)"
+    print_message "  - Containers: hbbs (signal) + hbbr (relay)"
     read -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
     INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
 
     echo ""
 
     # Ask about extracting opt.7z archive
-    print_message "Do you want to extract additional files to /opt?"
-    print_message "This will download opt.7z and copy all its contents to /opt"
-    print_message "Files in 'scripts' subfolder will be made executable (except .ini)"
+    print_header "───────────────────────────────────────────────"
+    print_header "   Additional Files (opt.7z)"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Extract additional files to /opt?"
+    print_message "  - Downloads opt.7z and copies contents to /opt"
+    print_message "  - Scripts in 'scripts' subfolder will be made executable"
     read -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
     EXTRACT_OPT_ARCHIVE=${EXTRACT_OPT_ARCHIVE:-n}
 
@@ -306,7 +315,11 @@ if [ "$INTERACTIVE" = true ]; then
     echo ""
 
     # Ask about root password
-    print_message "Do you want to set a password for root user?"
+    print_header "───────────────────────────────────────────────"
+    print_header "   Users and Access"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Set a password for root user?"
     read -p "Set root password? (y/N): " SET_ROOT_PASSWORD
     SET_ROOT_PASSWORD=${SET_ROOT_PASSWORD:-n}
     
@@ -501,7 +514,11 @@ if [ "$INTERACTIVE" = true ]; then
     echo ""
     
     # Ask about SSH configuration
-    print_message "Do you want to configure SSH (change port and set AllowUsers)?"
+    print_header "───────────────────────────────────────────────"
+    print_header "   SSH Configuration"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Configure SSH (change port, AllowUsers, authentication)?"
     read -p "Configure SSH? (y/N): " CONFIGURE_SSH
     CONFIGURE_SSH=${CONFIGURE_SSH:-n}
     
@@ -627,58 +644,70 @@ if [ "$INTERACTIVE" = true ]; then
     fi
     
     # Ask about Python virtual environment
-    print_message "Do you want to create Python virtual environment?"
+    print_header "───────────────────────────────────────────────"
+    print_header "   Software Installation"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Create Python virtual environment?"
     read -p "Create Python venv? (y/N): " CREATE_VENV
     CREATE_VENV=${CREATE_VENV:-n}
-    
+
     if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
         read -p "Enter path for virtual environment (default: /root/skripts): " VENV_PATH
         VENV_PATH=${VENV_PATH:-/root/skripts}
     else
         VENV_PATH=""
     fi
-    
+
+    echo ""
+
     # Ask about Docker installation
-    print_message "Do you want to install Docker?"
+    print_message "Install Docker (container runtime)?"
     read -p "Install Docker? (y/N): " INSTALL_DOCKER
     INSTALL_DOCKER=${INSTALL_DOCKER:-n}
-    
+
+    echo ""
+
     # Ask about ufw-docker installation (separate from Docker)
-    print_message "Do you want to install ufw-docker (UFW integration for Docker)?"
-    print_message "Note: This can be installed even without Docker"
+    print_message "Install ufw-docker (UFW integration for Docker)?"
+    print_message "  Note: Can be installed even without Docker"
     read -p "Install ufw-docker? (y/N): " INSTALL_UFW_DOCKER
     INSTALL_UFW_DOCKER=${INSTALL_UFW_DOCKER:-n}
-    
-    # Ask about Go installation
+
     echo ""
-    print_message "Do you want to install the latest version of Go?"
+
+    # Ask about Go installation
+    print_message "Install the latest version of Go?"
     if [ ! -z "$NEW_USERNAME" ]; then
-        print_message "Go will be installed for user: $NEW_USERNAME"
+        print_message "  Go will be installed for user: $NEW_USERNAME"
     else
-        print_message "Note: Go installation requires a user to be created"
+        print_message "  Note: Go installation requires a user to be created"
     fi
     read -p "Install Go? (y/N): " INSTALL_GO
     INSTALL_GO=${INSTALL_GO:-n}
     
     # Ask about ipset installation
     echo ""
-    print_message "Do you want to build and install the latest version of ipset?"
-    print_message "This will compile ipset from source"
+    print_message "Build and install the latest version of ipset from source?"
     read -p "Install ipset? (y/N): " INSTALL_IPSET
     INSTALL_IPSET=${INSTALL_IPSET:-n}
-    
+
     echo ""
-    
+
     # Ask about UFW configuration
-    print_message "Do you want to configure UFW firewall?"
+    print_header "───────────────────────────────────────────────"
+    print_header "   Firewall (UFW)"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Configure UFW firewall?"
     read -p "Configure UFW? (Y/n): " CONFIGURE_UFW
     CONFIGURE_UFW=${CONFIGURE_UFW:-y}
-    
+
     # Ask about ICMP blocking (only if UFW is enabled)
     if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
         echo ""
-        print_message "Do you want to block ICMP (ping) requests?"
-        print_message "Note: This will make your server invisible to ping"
+        print_message "Block ICMP (ping) requests?"
+        print_message "  Note: Server will not respond to ping"
         read -p "Block ICMP? (y/N): " BLOCK_ICMP
         BLOCK_ICMP=${BLOCK_ICMP:-n}
         
@@ -765,10 +794,27 @@ if [ "$INTERACTIVE" = true ]; then
     fi
     
     # Ask about sysctl configuration
-    print_message "Do you want to optimize system parameters (sysctl.conf)?"
+    echo ""
+    print_header "───────────────────────────────────────────────"
+    print_header "   System Parameters (sysctl.conf)"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Optimize system parameters (sysctl.conf)?"
+    print_message "Includes: IPv6 disable, TCP syncookies, system limits"
     read -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
     CONFIGURE_SYSCTL=${CONFIGURE_SYSCTL:-y}
-    
+
+    if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+        echo ""
+        print_message "Enable IP forwarding (net.ipv4.ip_forward = 1)?"
+        print_message "Required for: Docker networks, NAT, VPN, routing between interfaces"
+        print_message "If unsure — choose Y (recommended for servers with Docker)"
+        read -p "Enable IP forwarding? (Y/n): " ENABLE_IP_FORWARD
+        ENABLE_IP_FORWARD=${ENABLE_IP_FORWARD:-y}
+    else
+        ENABLE_IP_FORWARD="n"
+    fi
+
     # Ask about IPv6 disable via GRUB (Debian only)
     if [ "$OS" = "debian" ]; then
         echo ""
@@ -858,33 +904,40 @@ if [ "$INTERACTIVE" = true ]; then
     fi
     
     # Ask about disabling IPv6 in /etc/network/interfaces
+    print_header "───────────────────────────────────────────────"
+    print_header "   Miscellaneous"
+    print_header "───────────────────────────────────────────────"
     echo ""
-    print_message "Do you want to disable IPv6 in /etc/network/interfaces?"
-    print_message "This will comment out all inet6 configuration lines"
-    print_message "Note: This is useful if you're using static network configuration"
+    print_message "Disable IPv6 in /etc/network/interfaces?"
+    print_message "  Comments out all inet6 configuration lines"
+    print_message "  Useful for static network configuration"
     read -p "Comment out IPv6 in /etc/network/interfaces? (y/N): " COMMENT_IPV6_INTERFACES
     COMMENT_IPV6_INTERFACES=${COMMENT_IPV6_INTERFACES:-n}
-    
+
+    echo ""
+
     # Ask about MOTD installation
-    print_message "Do you want to install custom MOTD (Message of the Day)?"
+    print_message "Install custom MOTD (Message of the Day)?"
     read -p "Install MOTD? (y/N): " INSTALL_MOTD
     INSTALL_MOTD=${INSTALL_MOTD:-n}
-    
+
     # Ask for UFW ports (if UFW is enabled)
     if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
         echo ""
-        print_message "UFW Firewall Configuration"
+        print_header "───────────────────────────────────────────────"
+        print_header "   UFW Additional Ports"
+        print_header "───────────────────────────────────────────────"
+        echo ""
         print_message "Port $SSH_PORT (SSH) will be allowed automatically"
         echo ""
-        print_message "You can add additional ports to UFW"
-        print_message "Format examples:"
+        print_message "Additional ports format:"
         print_message "  Single port:     8080"
         print_message "  With protocol:   8080/tcp  or  53/udp"
         print_message "  Multiple ports:  8080,8443,9000"
-        print_message "  Mixed:          8080/tcp,53/udp,3000"
+        print_message "  Mixed:           8080/tcp,53/udp,3000"
         echo ""
         read -p "Enter additional ports (comma-separated, press Enter to skip): " CUSTOM_PORTS
-        
+
         if [ ! -z "$CUSTOM_PORTS" ]; then
             print_message "Custom ports will be configured: $CUSTOM_PORTS"
         fi
@@ -1000,6 +1053,7 @@ else
     UFW_RULES_VERSION="6"
     UFW_CUSTOM_RULES_PASSWORD=""
     CONFIGURE_SYSCTL="y"
+    ENABLE_IP_FORWARD="n"
     CONFIGURE_REPOS="y"
     INSTALL_MOTD="n"
     CUSTOM_PORTS=""
@@ -1034,6 +1088,7 @@ else
     print_message "- UFW: YES"
     print_message "- Block ICMP: NO"
     print_message "- sysctl: YES"
+    print_message "- IP forwarding: NO"
     print_message "- Repositories: YES"
     print_message "- MOTD: NO"
     print_message "- Custom UFW Port: None"
@@ -1095,6 +1150,8 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     else
         print_message "  sysctl optimization: YES (full — IPv6/security + static network tuning)"
     fi
+    print_message "  IP forwarding: $([ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "  rp_filter (reverse path): YES (always enabled)"
 else
     print_message "  sysctl optimization: NO"
 fi
@@ -1337,31 +1394,46 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         exit 1
     fi
 
-    # Check if Docker is installed (needed to start the service)
-    if command -v docker &> /dev/null; then
-        print_message "Docker found, starting rustdesk-compose service..."
-        if systemctl start rustdesk-compose.service; then
-            print_message "RustDesk service started successfully"
+    # Check if Docker is installed and running (needed to start the service)
+    if command -v docker &> /dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+        print_message "Docker is running, starting RustDesk containers..."
 
-            # Check service status
-            sleep 3
+        # Pull images first to avoid timeout on slow connections
+        if docker compose -f "${RUSTDESK_DIR}/docker-compose.yml" pull 2>/dev/null; then
+            print_message "RustDesk images pulled successfully"
+        else
+            print_warning "Failed to pull images (will try on service start)"
+        fi
+
+        if systemctl start rustdesk-compose.service; then
+            sleep 5
             if systemctl is-active --quiet rustdesk-compose.service; then
-                print_message "RustDesk service is running"
+                print_success "RustDesk service is running"
+                # Show container status
+                docker compose -f "${RUSTDESK_DIR}/docker-compose.yml" ps 2>/dev/null || true
             else
-                print_warning "RustDesk service is enabled but not running (Docker might not be installed yet)"
-                print_message "Service will start automatically after Docker installation"
+                print_warning "RustDesk service started but containers may still be initializing"
+                print_message "Check status: systemctl status rustdesk-compose.service"
+                print_message "Check logs:   docker compose -f ${RUSTDESK_DIR}/docker-compose.yml logs"
             fi
         else
-            print_warning "Failed to start rustdesk-compose service"
-            print_message "Service will start automatically after Docker installation"
+            print_warning "Failed to start RustDesk service"
+            print_message "Try manually: systemctl start rustdesk-compose.service"
+            print_message "Check logs:   journalctl -u rustdesk-compose.service"
         fi
+    elif command -v docker &> /dev/null; then
+        print_message "Docker is installed but not running"
+        print_message "RustDesk containers will start after Docker service is active"
     else
-        print_message "Docker not installed yet - RustDesk service will start after Docker is installed"
+        print_message "Docker is not installed yet"
+        print_message "RustDesk containers will start automatically after Docker installation"
     fi
 
-    print_message "RustDesk installation completed"
-    print_message "Directory: $RUSTDESK_DIR"
-    print_message "Service: rustdesk-compose.service"
+    echo ""
+    print_success "RustDesk installation completed"
+    print_message "  Directory: $RUSTDESK_DIR"
+    print_message "  Service:   rustdesk-compose.service"
+    print_message "  Manage:    systemctl {start|stop|restart|status} rustdesk-compose.service"
     echo ""
 else
     print_message "Skipping RustDesk installation (not requested)"
@@ -2206,8 +2278,29 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
                 print_message "Docker Compose version: $(docker compose version)"
             fi
         fi
+
+        # Start RustDesk containers if the service was previously enabled
+        # RustDesk section runs BEFORE Docker installation, so the service
+        # is enabled but containers couldn't start without Docker.
+        # Now that Docker is installed and running, start the RustDesk service.
+        if systemctl is-enabled --quiet rustdesk-compose.service 2>/dev/null; then
+            echo ""
+            print_message "RustDesk service detected, starting containers..."
+            if systemctl start rustdesk-compose.service; then
+                sleep 3
+                if systemctl is-active --quiet rustdesk-compose.service; then
+                    print_success "RustDesk containers started successfully"
+                else
+                    print_warning "RustDesk service started but may still be pulling images"
+                    print_message "Check status: systemctl status rustdesk-compose.service"
+                fi
+            else
+                print_warning "Failed to start RustDesk service"
+                print_message "Try manually: systemctl start rustdesk-compose.service"
+            fi
+        fi
     fi
-    
+
     echo ""
 else
     print_message "Skipping Docker installation (not requested)"
@@ -3296,11 +3389,25 @@ net.ipv6.conf.lo.disable_ipv6 = 1
 
 # Security Hardening
 net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
 
 # System Limits
 fs.inotify.max_user_instances = 8192
 net.ipv4.ip_local_port_range = 1024 45000
 EOF
+
+    # === Part 1.1: IP forwarding (optional, based on user choice) ===
+    if [ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ]; then
+        cat >> /etc/sysctl.conf.new << 'EOF'
+
+# IP Forwarding (Docker, NAT, VPN, routing)
+net.ipv4.ip_forward = 1
+EOF
+        print_message "IP forwarding enabled (net.ipv4.ip_forward = 1)"
+    else
+        print_message "IP forwarding not enabled (skipped by user)"
+    fi
 
     # === Part 2: Network tuning (only if BBR optimizer is NOT enabled) ===
     # When BBR optimizer is enabled, it applies intelligent_settings() which
@@ -3663,6 +3770,12 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     else
         print_message "- sysctl.conf: Full optimization (IPv6/security + static network tuning)"
     fi
+    if [ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ]; then
+        print_message "  IP forwarding: ENABLED"
+    else
+        print_message "  IP forwarding: DISABLED"
+    fi
+    print_message "  rp_filter (reverse path filtering): ENABLED"
 else
     print_message "- sysctl: SKIPPED"
 fi
