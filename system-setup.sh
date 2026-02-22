@@ -683,6 +683,18 @@ if [ "$INTERACTIVE" = true ]; then
     read -p "Install Docker? (y/N): " INSTALL_DOCKER
     INSTALL_DOCKER=${INSTALL_DOCKER:-n}
 
+    if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+        echo ""
+        print_message "Disable Docker iptables management?"
+        print_message "  Creates /etc/docker/daemon.json with {\"iptables\": false}"
+        print_message "  Recommended when using nftables or external firewall"
+        print_message "  Docker will NOT create any iptables/nat rules"
+        read -p "Disable Docker iptables? (y/N): " DOCKER_DISABLE_IPTABLES
+        DOCKER_DISABLE_IPTABLES=${DOCKER_DISABLE_IPTABLES:-n}
+    else
+        DOCKER_DISABLE_IPTABLES="n"
+    fi
+
     echo ""
 
     # Ask about ufw-docker installation (separate from Docker)
@@ -809,7 +821,49 @@ if [ "$INTERACTIVE" = true ]; then
         UFW_INSTALL_SOURCE="1"
         UFW_SSH_PORT=""
     fi
-    
+
+    # Ask about nftables
+    echo ""
+    print_header "───────────────────────────────────────────────"
+    print_header "   nftables Firewall"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Switch to nftables as the packet filter?"
+    print_message "  - Replaces iptables/UFW with nftables"
+    print_message "  - Disables UFW if active"
+    print_message "  - Flushes all iptables rules"
+    print_message "  - Installs and enables nftables service"
+    read -p "Enable nftables? (y/N): " ENABLE_NFTABLES
+    ENABLE_NFTABLES=${ENABLE_NFTABLES:-n}
+
+    if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
+        # Warn about UFW conflict and auto-disable UFW options
+        if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+            print_warning "nftables selected — UFW configuration will be skipped"
+            CONFIGURE_UFW="n"
+            BLOCK_ICMP="n"
+            INSTALL_UFW_CUSTOM_RULES="n"
+            INSTALL_UFW_DOCKER="n"
+            CUSTOM_PORTS=""
+        fi
+
+        # Ask about nftables.conf from opt.7z
+        if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
+            echo ""
+            print_message "Install nftables.conf rules from opt.7z archive?"
+            print_message "  File will be copied to /etc/nftables.conf"
+            print_message "  Syntax will be verified before applying"
+            read -p "Install nftables.conf from archive? (Y/n): " INSTALL_NFTABLES_CONF
+            INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-y}
+        else
+            INSTALL_NFTABLES_CONF="n"
+            print_message "nftables.conf from opt.7z is not available (opt.7z extraction not selected)"
+            print_message "Default nftables configuration will be used"
+        fi
+    else
+        INSTALL_NFTABLES_CONF="n"
+    fi
+
     # Ask about sysctl configuration
     echo ""
     print_header "───────────────────────────────────────────────"
@@ -1064,6 +1118,9 @@ else
     CREATE_VENV="n"
     VENV_PATH=""
     INSTALL_DOCKER="n"
+    DOCKER_DISABLE_IPTABLES="n"
+    ENABLE_NFTABLES="n"
+    INSTALL_NFTABLES_CONF="n"
     CONFIGURE_UFW="y"
     BLOCK_ICMP="n"
     INSTALL_UFW_CUSTOM_RULES="n"
@@ -1102,7 +1159,9 @@ else
     print_message "- SSH configuration: NO"
     print_message "- Python venv: NO"
     print_message "- Docker: NO"
+    print_message "- Docker iptables disable: NO"
     print_message "- ufw-docker: NO"
+    print_message "- nftables: NO"
     print_message "- UFW: YES"
     print_message "- Block ICMP: NO"
     print_message "- sysctl: YES"
@@ -1147,9 +1206,16 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
 fi
 print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ] && echo "YES (Path: $VENV_PATH)" || echo "NO")"
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+    print_message "    - Docker iptables disable: $([ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ] && echo "YES (daemon.json)" || echo "NO")"
+fi
 print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Go language: $([ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ] && echo "YES (latest version)" || echo "NO")"
 print_message "  ipset: $([ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ] && echo "YES (build from source)" || echo "NO")"
+print_message "  nftables: $([ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
+    print_message "    - nftables.conf from opt.7z: $([ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ] && echo "YES" || echo "NO")"
+fi
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     print_message "  Block ICMP (ping): $([ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] && echo "YES" || echo "NO")"
@@ -2296,6 +2362,76 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
         fi
     fi
     
+    # Create daemon.json to disable Docker iptables management
+    if [ "$DOCKER_INSTALLED" = "yes" ]; then
+        if [ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ]; then
+            print_message "Configuring Docker daemon: disabling iptables management..."
+            mkdir -p /etc/docker
+
+            DAEMON_JSON="/etc/docker/daemon.json"
+            if [ -f "$DAEMON_JSON" ] && [ -s "$DAEMON_JSON" ]; then
+                # Backup existing daemon.json
+                cp "$DAEMON_JSON" "${DAEMON_JSON}.backup.$(date +%Y%m%d-%H%M%S)~"
+                print_message "Existing daemon.json backed up"
+
+                # Try to merge with existing config using python3
+                if command -v python3 &>/dev/null; then
+                    python3 -c "
+import json, sys
+try:
+    with open('$DAEMON_JSON') as f:
+        config = json.load(f)
+except:
+    config = {}
+config['iptables'] = False
+with open('$DAEMON_JSON', 'w') as f:
+    json.dump(config, f, indent=2)
+    f.write('\n')
+" 2>/dev/null
+                    if [ $? -eq 0 ]; then
+                        print_message "daemon.json updated (merged with existing config)"
+                    else
+                        # Fallback: overwrite
+                        cat > "$DAEMON_JSON" << 'DEOF'
+{
+  "iptables": false
+}
+DEOF
+                        print_message "daemon.json overwritten (merge failed)"
+                    fi
+                else
+                    # No python3 — overwrite
+                    cat > "$DAEMON_JSON" << 'DEOF'
+{
+  "iptables": false
+}
+DEOF
+                    print_message "daemon.json overwritten"
+                fi
+            else
+                # No existing daemon.json — create new
+                cat > "$DAEMON_JSON" << 'DEOF'
+{
+  "iptables": false
+}
+DEOF
+                print_message "daemon.json created"
+            fi
+
+            # Restart Docker to apply daemon.json
+            if systemctl is-active --quiet docker 2>/dev/null; then
+                print_message "Restarting Docker to apply daemon.json..."
+                systemctl restart docker
+                sleep 2
+                if systemctl is-active --quiet docker 2>/dev/null; then
+                    print_success "Docker restarted with iptables disabled"
+                else
+                    print_warning "Docker failed to restart — check: journalctl -u docker"
+                fi
+            fi
+        fi
+    fi
+
     # Verify Docker installation
     if [ "$DOCKER_INSTALLED" = "yes" ]; then
         if docker --version &> /dev/null; then
@@ -3216,6 +3352,199 @@ else
 fi
 
 # ============================================
+# ENABLE NFTABLES FIREWALL
+# ============================================
+# NOTE: This section runs AFTER opt.7z extraction (nftables.conf may be in archive)
+# and AFTER UFW/Docker sections. Order of operations:
+#   1. Stop and disable UFW (if active)
+#   2. Flush all iptables rules and chains
+#   3. Install nftables package (if not present)
+#   4. Enable and start nftables service
+#   5. Optionally install nftables.conf from opt.7z archive
+
+if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
+    echo ""
+    print_header "═══════════════════════════════════════════════════"
+    print_header "   Enabling nftables Firewall"
+    print_header "═══════════════════════════════════════════════════"
+    echo ""
+
+    NFTABLES_OK=true
+
+    # --- Step 1: Disable UFW if installed and active ---
+    if command -v ufw &>/dev/null; then
+        print_message "Step 1: Disabling UFW..."
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
+            ufw disable
+            print_message "UFW disabled"
+        else
+            print_message "UFW is already inactive"
+        fi
+        # Prevent UFW from starting on boot
+        systemctl disable ufw 2>/dev/null || true
+        systemctl stop ufw 2>/dev/null || true
+        print_message "UFW service stopped and disabled"
+    else
+        print_message "Step 1: UFW not installed — skipping"
+    fi
+
+    # --- Step 2: Flush all iptables rules ---
+    print_message "Step 2: Flushing iptables rules..."
+    if command -v iptables &>/dev/null; then
+        # Flush filter table
+        iptables -F 2>/dev/null || true
+        iptables -X 2>/dev/null || true
+        # Flush nat table
+        iptables -t nat -F 2>/dev/null || true
+        iptables -t nat -X 2>/dev/null || true
+        # Flush mangle table
+        iptables -t mangle -F 2>/dev/null || true
+        iptables -t mangle -X 2>/dev/null || true
+        # Flush raw table
+        iptables -t raw -F 2>/dev/null || true
+        iptables -t raw -X 2>/dev/null || true
+        # Reset default policies to ACCEPT (safe state before nftables takes over)
+        iptables -P INPUT ACCEPT 2>/dev/null || true
+        iptables -P FORWARD ACCEPT 2>/dev/null || true
+        iptables -P OUTPUT ACCEPT 2>/dev/null || true
+        print_message "iptables rules flushed (all tables)"
+    else
+        print_message "iptables not found — skipping flush"
+    fi
+
+    # Also flush ip6tables if available
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -F 2>/dev/null || true
+        ip6tables -X 2>/dev/null || true
+        ip6tables -t nat -F 2>/dev/null || true
+        ip6tables -t nat -X 2>/dev/null || true
+        ip6tables -t mangle -F 2>/dev/null || true
+        ip6tables -t mangle -X 2>/dev/null || true
+        ip6tables -P INPUT ACCEPT 2>/dev/null || true
+        ip6tables -P FORWARD ACCEPT 2>/dev/null || true
+        ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
+        print_message "ip6tables rules flushed"
+    fi
+
+    # --- Step 3: Install nftables if not present ---
+    print_message "Step 3: Checking nftables installation..."
+    if command -v nft &>/dev/null; then
+        print_message "nftables is already installed: $(nft --version 2>/dev/null || echo 'unknown version')"
+    else
+        print_message "Installing nftables..."
+        if apt-get install -y nftables; then
+            print_message "nftables installed successfully"
+        else
+            print_error "Failed to install nftables"
+            NFTABLES_OK=false
+        fi
+    fi
+
+    # --- Step 4: Enable and start nftables service ---
+    if [ "$NFTABLES_OK" = true ]; then
+        print_message "Step 4: Enabling nftables service..."
+        systemctl enable nftables 2>/dev/null
+        if systemctl start nftables 2>/dev/null; then
+            print_message "nftables service started and enabled"
+        else
+            print_warning "nftables service failed to start (will retry after config)"
+        fi
+    fi
+
+    # --- Step 5: Install nftables.conf from opt.7z archive ---
+    if [ "$NFTABLES_OK" = true ]; then
+        if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
+            print_message "Step 5: Installing nftables.conf from opt.7z..."
+
+            NFTABLES_SRC="/opt/nftables.conf"
+            NFTABLES_DST="/etc/nftables.conf"
+
+            if [ -f "$NFTABLES_SRC" ]; then
+                # Backup existing nftables.conf
+                if [ -f "$NFTABLES_DST" ]; then
+                    cp "$NFTABLES_DST" "${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
+                    print_message "Existing $NFTABLES_DST backed up"
+                fi
+
+                # Copy new config
+                cp "$NFTABLES_SRC" "$NFTABLES_DST"
+                print_message "nftables.conf copied to $NFTABLES_DST"
+
+                # Syntax check
+                print_message "Verifying nftables.conf syntax..."
+                if nft -c -f "$NFTABLES_DST" 2>/tmp/nft_syntax_err; then
+                    print_success "nftables.conf syntax is valid"
+
+                    # Apply configuration
+                    print_message "Applying nftables configuration..."
+                    if nft -f "$NFTABLES_DST" 2>/tmp/nft_apply_err; then
+                        print_success "nftables rules applied successfully"
+
+                        # Restart service to load from config
+                        systemctl restart nftables 2>/dev/null || true
+                        sleep 1
+
+                        # Show current ruleset summary
+                        print_message "Current nftables ruleset:"
+                        nft list ruleset 2>/dev/null | head -30
+                        RULES_COUNT=$(nft list ruleset 2>/dev/null | grep -c "rule" || echo "0")
+                        print_message "Total rules loaded: $RULES_COUNT"
+                    else
+                        print_error "Failed to apply nftables configuration"
+                        if [ -f /tmp/nft_apply_err ]; then
+                            print_error "Error: $(cat /tmp/nft_apply_err)"
+                        fi
+                        # Restore backup
+                        LATEST_BACKUP=$(ls -t ${NFTABLES_DST}.backup.*~ 2>/dev/null | head -1)
+                        if [ ! -z "$LATEST_BACKUP" ]; then
+                            cp "$LATEST_BACKUP" "$NFTABLES_DST"
+                            nft -f "$NFTABLES_DST" 2>/dev/null || true
+                            print_warning "Previous nftables.conf restored from backup"
+                        fi
+                    fi
+                    rm -f /tmp/nft_apply_err
+                else
+                    print_error "nftables.conf syntax error!"
+                    if [ -f /tmp/nft_syntax_err ]; then
+                        print_error "Error: $(cat /tmp/nft_syntax_err)"
+                    fi
+                    # Restore backup
+                    LATEST_BACKUP=$(ls -t ${NFTABLES_DST}.backup.*~ 2>/dev/null | head -1)
+                    if [ ! -z "$LATEST_BACKUP" ]; then
+                        cp "$LATEST_BACKUP" "$NFTABLES_DST"
+                        print_warning "Previous nftables.conf restored from backup"
+                    fi
+                    print_message "Fix the syntax and apply manually: nft -f $NFTABLES_DST"
+                fi
+                rm -f /tmp/nft_syntax_err
+            else
+                print_warning "nftables.conf not found at $NFTABLES_SRC"
+                print_message "Make sure the file exists in the opt.7z archive"
+                print_message "You can install it manually later: cp /path/to/nftables.conf $NFTABLES_DST"
+            fi
+        else
+            print_message "Step 5: Skipping nftables.conf installation (not requested)"
+        fi
+    fi
+
+    if [ "$NFTABLES_OK" = true ]; then
+        echo ""
+        print_success "nftables firewall enabled"
+        print_message "  Service: nftables.service"
+        print_message "  Config:  /etc/nftables.conf"
+        print_message "  Manage:  systemctl {start|stop|restart|status} nftables"
+        print_message "  Rules:   nft list ruleset"
+    else
+        print_error "nftables setup failed — check errors above"
+    fi
+    echo ""
+else
+    if [ "$CONFIGURE_UFW" != "y" ] && [ "$CONFIGURE_UFW" != "Y" ]; then
+        print_message "Skipping nftables (not requested)"
+    fi
+fi
+
+# ============================================
 # CONFIGURE SWAP (SWAPFILE + ZRAM)
 # ============================================
 
@@ -3861,8 +4190,32 @@ else
     print_message "- UFW: SKIPPED"
 fi
 
+if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
+    if systemctl is-active --quiet nftables 2>/dev/null; then
+        print_message "- nftables: ENABLED and running"
+    else
+        print_message "- nftables: ENABLED (service not active — check configuration)"
+    fi
+    if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
+        if [ -f /etc/nftables.conf ]; then
+            print_message "  nftables.conf: Installed from opt.7z"
+        else
+            print_message "  nftables.conf: Installation attempted but file missing"
+        fi
+    fi
+else
+    print_message "- nftables: Not configured"
+fi
+
 if command -v docker &> /dev/null; then
     print_message "- Docker: Installed"
+    if [ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ]; then
+        if [ -f /etc/docker/daemon.json ] && grep -q '"iptables"' /etc/docker/daemon.json 2>/dev/null; then
+            print_message "  Docker iptables: DISABLED (daemon.json)"
+        else
+            print_message "  Docker iptables: daemon.json may not have been applied"
+        fi
+    fi
 else
     print_message "- Docker: Not installed"
     if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
@@ -4019,6 +4372,11 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
+if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
+    print_warning "$STEP_NUM. Check nftables: nft list ruleset"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     print_warning "$STEP_NUM. Check sysctl: sysctl net.ipv4.tcp_congestion_control"
     STEP_NUM=$((STEP_NUM + 1))
@@ -4070,6 +4428,15 @@ if [ "$OS" = "ubuntu" ]; then
     print_message "sudo nano /etc/apt/sources.list.d/ubuntu.sources"
 fi
 print_message "sudo nano /etc/ssh/sshd_config"
+if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
+    print_message "nft list ruleset                # Show nftables rules"
+    print_message "sudo nano /etc/nftables.conf    # Edit nftables config"
+    print_message "nft -c -f /etc/nftables.conf    # Verify syntax"
+    print_message "nft -f /etc/nftables.conf       # Apply config"
+fi
+if [ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ]; then
+    print_message "sudo nano /etc/docker/daemon.json  # Docker daemon config"
+fi
 print_message "sudo crontab -l"
 if [ "$OS" = "debian" ]; then
     print_message "sudo nano /etc/default/grub"
