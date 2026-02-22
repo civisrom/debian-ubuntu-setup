@@ -3380,10 +3380,12 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         else
             print_message "UFW is already inactive"
         fi
-        # Prevent UFW from starting on boot
-        systemctl disable ufw 2>/dev/null || true
+        # Stop, disable and mask UFW to prevent any future activation
+        # mask creates a symlink to /dev/null — strongest form of disable
         systemctl stop ufw 2>/dev/null || true
-        print_message "UFW service stopped and disabled"
+        systemctl disable ufw 2>/dev/null || true
+        systemctl mask ufw 2>/dev/null || true
+        print_message "UFW service stopped, disabled and masked"
     else
         print_message "Step 1: UFW not installed — skipping"
     fi
