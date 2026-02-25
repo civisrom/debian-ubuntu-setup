@@ -830,7 +830,7 @@ if [ "$INTERACTIVE" = true ]; then
     echo ""
     print_message "Switch to nftables as the packet filter?"
     print_message "  - Replaces iptables/UFW with nftables"
-    print_message "  - Disables UFW if active"
+    print_message "  - Disables and masks UFW if installed"
     print_message "  - Flushes all iptables rules"
     print_message "  - Installs and enables nftables service"
     read -p "Enable nftables? (y/N): " ENABLE_NFTABLES
@@ -847,21 +847,59 @@ if [ "$INTERACTIVE" = true ]; then
             CUSTOM_PORTS=""
         fi
 
-        # Ask about nftables.conf from opt.7z
+        # Ask about nftables config profile from opt.7z
         if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
             echo ""
-            print_message "Install nftables.conf rules from opt.7z archive?"
-            print_message "  File will be copied to /etc/nftables.conf"
-            print_message "  Syntax will be verified before applying"
-            read -p "Install nftables.conf from archive? (Y/n): " INSTALL_NFTABLES_CONF
-            INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-y}
+            print_message "Install nftables configuration from opt.7z archive?"
+            print_message "  Available profiles:"
+            print_message "    1) relay  — for relay/proxy servers (relay_nftables.conf)"
+            print_message "    2) docker — for servers with Docker (docker_nftables.conf)"
+            print_message "    3) native — for standard servers without Docker (native_nftables.conf)"
+            echo ""
+            read -p "Install nftables config from archive? (y/N): " INSTALL_NFTABLES_CONF
+            INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
+
+            if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
+                read -p "Select profile [1-3] (default: 2): " NFTABLES_PROFILE_NUM
+                NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-2}
+
+                case $NFTABLES_PROFILE_NUM in
+                    1)
+                        NFTABLES_PROFILE="relay"
+                        print_message "Selected: relay (relay_nftables.conf)"
+                        ;;
+                    3)
+                        NFTABLES_PROFILE="native"
+                        print_message "Selected: native (native_nftables.conf)"
+                        ;;
+                    *)
+                        NFTABLES_PROFILE="docker"
+                        print_message "Selected: docker (docker_nftables.conf)"
+                        ;;
+                esac
+
+                # Ask about logging script
+                echo ""
+                print_message "Install nftables logging script for '${NFTABLES_PROFILE}' profile?"
+                print_message "  Script: ${NFTABLES_PROFILE}_logging.sh"
+                print_message "  Configures rsyslog/journald rules for nftables log messages"
+                read -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
+                INSTALL_NFTABLES_LOGGING=${INSTALL_NFTABLES_LOGGING:-y}
+            else
+                NFTABLES_PROFILE=""
+                INSTALL_NFTABLES_LOGGING="n"
+            fi
         else
             INSTALL_NFTABLES_CONF="n"
-            print_message "nftables.conf from opt.7z is not available (opt.7z extraction not selected)"
+            NFTABLES_PROFILE=""
+            INSTALL_NFTABLES_LOGGING="n"
+            print_message "nftables config from opt.7z not available (opt.7z extraction not selected)"
             print_message "Default nftables configuration will be used"
         fi
     else
         INSTALL_NFTABLES_CONF="n"
+        NFTABLES_PROFILE=""
+        INSTALL_NFTABLES_LOGGING="n"
     fi
 
     # Ask about sysctl configuration
@@ -1121,6 +1159,8 @@ else
     DOCKER_DISABLE_IPTABLES="n"
     ENABLE_NFTABLES="n"
     INSTALL_NFTABLES_CONF="n"
+    NFTABLES_PROFILE=""
+    INSTALL_NFTABLES_LOGGING="n"
     CONFIGURE_UFW="y"
     BLOCK_ICMP="n"
     INSTALL_UFW_CUSTOM_RULES="n"
@@ -1214,7 +1254,12 @@ print_message "  Go language: $([ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y"
 print_message "  ipset: $([ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ] && echo "YES (build from source)" || echo "NO")"
 print_message "  nftables: $([ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
-    print_message "    - nftables.conf from opt.7z: $([ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ] && echo "YES" || echo "NO")"
+    if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
+        print_message "    - Config profile: ${NFTABLES_PROFILE} (${NFTABLES_PROFILE}_nftables.conf)"
+        print_message "    - Logging script: $([ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ] && echo "YES (${NFTABLES_PROFILE}_logging.sh)" || echo "NO")"
+    else
+        print_message "    - Config from opt.7z: NO (default config)"
+    fi
 fi
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
@@ -3354,13 +3399,15 @@ fi
 # ============================================
 # ENABLE NFTABLES FIREWALL
 # ============================================
-# NOTE: This section runs AFTER opt.7z extraction (nftables.conf may be in archive)
-# and AFTER UFW/Docker sections. Order of operations:
-#   1. Stop and disable UFW (if active)
-#   2. Flush all iptables rules and chains
+# NOTE: This section runs AFTER opt.7z extraction so config files are available.
+# Order of operations:
+#   1. Check and disable UFW (stop, disable, mask)
+#   2. Flush all iptables/ip6tables rules and chains
 #   3. Install nftables package (if not present)
 #   4. Enable and start nftables service
-#   5. Optionally install nftables.conf from opt.7z archive
+#   5. Install nftables config from opt.7z (relay/docker/native profile)
+#   6. Run logging setup script matching the selected profile
+#   7. Verify syntax and apply nftables configuration
 
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     echo ""
@@ -3371,57 +3418,54 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 
     NFTABLES_OK=true
 
-    # --- Step 1: Disable UFW if installed and active ---
-    if command -v ufw &>/dev/null; then
-        print_message "Step 1: Disabling UFW..."
-        if ufw status 2>/dev/null | grep -q "Status: active"; then
-            ufw disable
-            print_message "UFW disabled"
-        else
-            print_message "UFW is already inactive"
+    # --- Step 1: Check and disable UFW ---
+    print_message "Step 1: Checking UFW status..."
+    if dpkg -l ufw 2>/dev/null | grep -q "^ii"; then
+        print_message "UFW package is installed"
+        if command -v ufw &>/dev/null; then
+            UFW_STATUS=$(ufw status 2>/dev/null | head -1 || echo "unknown")
+            print_message "UFW status: $UFW_STATUS"
+            if echo "$UFW_STATUS" | grep -q "active"; then
+                print_message "Disabling UFW firewall..."
+                ufw disable
+                print_message "UFW disabled"
+            else
+                print_message "UFW is already inactive"
+            fi
         fi
         # Stop, disable and mask UFW to prevent any future activation
         # mask creates a symlink to /dev/null — strongest form of disable
         systemctl stop ufw 2>/dev/null || true
         systemctl disable ufw 2>/dev/null || true
         systemctl mask ufw 2>/dev/null || true
-        print_message "UFW service stopped, disabled and masked"
+        print_success "UFW service: stopped, disabled, masked"
     else
-        print_message "Step 1: UFW not installed — skipping"
+        print_message "UFW is not installed — skipping"
     fi
 
     # --- Step 2: Flush all iptables rules ---
+    echo ""
     print_message "Step 2: Flushing iptables rules..."
     if command -v iptables &>/dev/null; then
-        # Flush filter table
-        iptables -F 2>/dev/null || true
-        iptables -X 2>/dev/null || true
-        # Flush nat table
-        iptables -t nat -F 2>/dev/null || true
-        iptables -t nat -X 2>/dev/null || true
-        # Flush mangle table
-        iptables -t mangle -F 2>/dev/null || true
-        iptables -t mangle -X 2>/dev/null || true
-        # Flush raw table
-        iptables -t raw -F 2>/dev/null || true
-        iptables -t raw -X 2>/dev/null || true
+        # Flush all tables: filter, nat, mangle, raw
+        for TABLE in filter nat mangle raw; do
+            iptables -t "$TABLE" -F 2>/dev/null || true
+            iptables -t "$TABLE" -X 2>/dev/null || true
+        done
         # Reset default policies to ACCEPT (safe state before nftables takes over)
         iptables -P INPUT ACCEPT 2>/dev/null || true
         iptables -P FORWARD ACCEPT 2>/dev/null || true
         iptables -P OUTPUT ACCEPT 2>/dev/null || true
-        print_message "iptables rules flushed (all tables)"
+        print_message "iptables rules flushed (filter, nat, mangle, raw)"
     else
-        print_message "iptables not found — skipping flush"
+        print_message "iptables not found — skipping"
     fi
 
-    # Also flush ip6tables if available
     if command -v ip6tables &>/dev/null; then
-        ip6tables -F 2>/dev/null || true
-        ip6tables -X 2>/dev/null || true
-        ip6tables -t nat -F 2>/dev/null || true
-        ip6tables -t nat -X 2>/dev/null || true
-        ip6tables -t mangle -F 2>/dev/null || true
-        ip6tables -t mangle -X 2>/dev/null || true
+        for TABLE in filter nat mangle raw; do
+            ip6tables -t "$TABLE" -F 2>/dev/null || true
+            ip6tables -t "$TABLE" -X 2>/dev/null || true
+        done
         ip6tables -P INPUT ACCEPT 2>/dev/null || true
         ip6tables -P FORWARD ACCEPT 2>/dev/null || true
         ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
@@ -3429,111 +3473,173 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     fi
 
     # --- Step 3: Install nftables if not present ---
+    echo ""
     print_message "Step 3: Checking nftables installation..."
     if command -v nft &>/dev/null; then
         print_message "nftables is already installed: $(nft --version 2>/dev/null || echo 'unknown version')"
     else
-        print_message "Installing nftables..."
+        print_message "Installing nftables package..."
         if apt-get install -y nftables; then
-            print_message "nftables installed successfully"
+            print_success "nftables installed successfully"
         else
-            print_error "Failed to install nftables"
+            print_error "CRITICAL: Failed to install nftables"
             NFTABLES_OK=false
         fi
     fi
 
     # --- Step 4: Enable and start nftables service ---
     if [ "$NFTABLES_OK" = true ]; then
+        echo ""
         print_message "Step 4: Enabling nftables service..."
         systemctl enable nftables 2>/dev/null
         if systemctl start nftables 2>/dev/null; then
-            print_message "nftables service started and enabled"
+            print_success "nftables service started and enabled"
         else
-            print_warning "nftables service failed to start (will retry after config)"
+            print_warning "nftables service failed to start (will retry after config apply)"
         fi
     fi
 
-    # --- Step 5: Install nftables.conf from opt.7z archive ---
+    # --- Step 5: Install nftables config from opt.7z archive ---
+    if [ "$NFTABLES_OK" = true ] && { [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; }; then
+        echo ""
+        print_message "Step 5: Installing nftables config (profile: ${NFTABLES_PROFILE})..."
+
+        NFTABLES_SRC="/opt/nftables/${NFTABLES_PROFILE}_nftables.conf"
+        NFTABLES_DST="/etc/nftables.conf"
+
+        if [ -f "$NFTABLES_SRC" ]; then
+            # Backup existing nftables.conf
+            if [ -f "$NFTABLES_DST" ]; then
+                cp "$NFTABLES_DST" "${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
+                print_message "Existing $NFTABLES_DST backed up"
+            fi
+
+            # Copy selected profile config as /etc/nftables.conf
+            cp "$NFTABLES_SRC" "$NFTABLES_DST"
+            chmod 755 "$NFTABLES_DST"
+            chown root:root "$NFTABLES_DST"
+            print_success "Copied ${NFTABLES_PROFILE}_nftables.conf -> $NFTABLES_DST"
+            print_message "  Permissions: 755, Owner: root:root"
+        else
+            print_error "Config file not found: $NFTABLES_SRC"
+            print_message "Expected path in opt.7z archive: nftables/${NFTABLES_PROFILE}_nftables.conf"
+            print_warning "Skipping config installation — using default nftables.conf"
+            # Don't set NFTABLES_OK=false: nftables service itself is fine
+            INSTALL_NFTABLES_CONF="skipped"
+        fi
+    elif [ "$NFTABLES_OK" = true ]; then
+        echo ""
+        print_message "Step 5: Skipping config installation (not requested)"
+    fi
+
+    # --- Step 6: Run logging setup script ---
+    if [ "$NFTABLES_OK" = true ] && { [ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ]; } && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
+        echo ""
+        print_message "Step 6: Running logging setup (profile: ${NFTABLES_PROFILE})..."
+
+        LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_PROFILE}_logging.sh"
+
+        if [ -f "$LOGGING_SCRIPT" ]; then
+            # Make script executable
+            chmod +x "$LOGGING_SCRIPT"
+            print_message "Running: $LOGGING_SCRIPT"
+
+            # Execute logging setup script
+            if bash "$LOGGING_SCRIPT"; then
+                print_success "Logging setup completed (${NFTABLES_PROFILE}_logging.sh)"
+            else
+                print_warning "Logging setup script returned an error"
+                print_message "You can run it manually later: bash $LOGGING_SCRIPT"
+            fi
+        else
+            print_warning "Logging script not found: $LOGGING_SCRIPT"
+            print_message "Expected path in opt.7z archive: nftables/logging/${NFTABLES_PROFILE}_logging.sh"
+        fi
+    elif [ "$NFTABLES_OK" = true ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
+        echo ""
+        print_message "Step 6: Skipping logging setup (not requested)"
+    fi
+
+    # --- Step 7: Verify syntax and apply nftables configuration ---
     if [ "$NFTABLES_OK" = true ]; then
-        if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
-            print_message "Step 5: Installing nftables.conf from opt.7z..."
+        echo ""
+        NFTABLES_DST="/etc/nftables.conf"
 
-            NFTABLES_SRC="/opt/nftables.conf"
-            NFTABLES_DST="/etc/nftables.conf"
+        if [ -f "$NFTABLES_DST" ]; then
+            print_message "Step 7: Verifying and applying nftables configuration..."
 
-            if [ -f "$NFTABLES_SRC" ]; then
-                # Backup existing nftables.conf
-                if [ -f "$NFTABLES_DST" ]; then
-                    cp "$NFTABLES_DST" "${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
-                    print_message "Existing $NFTABLES_DST backed up"
-                fi
+            # Syntax check (dry-run)
+            print_message "Checking syntax: nft -c -f $NFTABLES_DST"
+            if nft -c -f "$NFTABLES_DST" 2>/tmp/nft_syntax_err; then
+                print_success "Syntax check passed"
 
-                # Copy new config
-                cp "$NFTABLES_SRC" "$NFTABLES_DST"
-                print_message "nftables.conf copied to $NFTABLES_DST"
+                # Apply configuration
+                print_message "Applying rules: nft -f $NFTABLES_DST"
+                # Flush existing ruleset before loading new config to avoid conflicts
+                nft flush ruleset 2>/dev/null || true
+                if nft -f "$NFTABLES_DST" 2>/tmp/nft_apply_err; then
+                    print_success "nftables rules applied successfully"
 
-                # Syntax check
-                print_message "Verifying nftables.conf syntax..."
-                if nft -c -f "$NFTABLES_DST" 2>/tmp/nft_syntax_err; then
-                    print_success "nftables.conf syntax is valid"
+                    # Restart service to ensure config is loaded persistently
+                    systemctl restart nftables 2>/dev/null || true
+                    sleep 1
 
-                    # Apply configuration
-                    print_message "Applying nftables configuration..."
-                    if nft -f "$NFTABLES_DST" 2>/tmp/nft_apply_err; then
-                        print_success "nftables rules applied successfully"
-
-                        # Restart service to load from config
-                        systemctl restart nftables 2>/dev/null || true
-                        sleep 1
-
-                        # Show current ruleset summary
-                        print_message "Current nftables ruleset:"
-                        nft list ruleset 2>/dev/null | head -30
-                        RULES_COUNT=$(nft list ruleset 2>/dev/null | grep -c "rule" || echo "0")
-                        print_message "Total rules loaded: $RULES_COUNT"
-                    else
-                        print_error "Failed to apply nftables configuration"
-                        if [ -f /tmp/nft_apply_err ]; then
-                            print_error "Error: $(cat /tmp/nft_apply_err)"
-                        fi
-                        # Restore backup
-                        LATEST_BACKUP=$(ls -t ${NFTABLES_DST}.backup.*~ 2>/dev/null | head -1)
-                        if [ ! -z "$LATEST_BACKUP" ]; then
-                            cp "$LATEST_BACKUP" "$NFTABLES_DST"
-                            nft -f "$NFTABLES_DST" 2>/dev/null || true
-                            print_warning "Previous nftables.conf restored from backup"
-                        fi
-                    fi
-                    rm -f /tmp/nft_apply_err
+                    # Show ruleset summary
+                    echo ""
+                    print_message "Current nftables ruleset:"
+                    nft list ruleset 2>/dev/null | head -40
+                    RULES_COUNT=$(nft list ruleset 2>/dev/null | grep -c "rule" || echo "0")
+                    echo ""
+                    print_message "Total rules loaded: $RULES_COUNT"
                 else
-                    print_error "nftables.conf syntax error!"
-                    if [ -f /tmp/nft_syntax_err ]; then
-                        print_error "Error: $(cat /tmp/nft_syntax_err)"
+                    print_error "Failed to apply nftables configuration"
+                    if [ -f /tmp/nft_apply_err ] && [ -s /tmp/nft_apply_err ]; then
+                        print_error "Error details:"
+                        cat /tmp/nft_apply_err
                     fi
                     # Restore backup
                     LATEST_BACKUP=$(ls -t ${NFTABLES_DST}.backup.*~ 2>/dev/null | head -1)
                     if [ ! -z "$LATEST_BACKUP" ]; then
                         cp "$LATEST_BACKUP" "$NFTABLES_DST"
+                        nft flush ruleset 2>/dev/null || true
+                        nft -f "$NFTABLES_DST" 2>/dev/null || true
                         print_warning "Previous nftables.conf restored from backup"
                     fi
-                    print_message "Fix the syntax and apply manually: nft -f $NFTABLES_DST"
                 fi
-                rm -f /tmp/nft_syntax_err
+                rm -f /tmp/nft_apply_err
             else
-                print_warning "nftables.conf not found at $NFTABLES_SRC"
-                print_message "Make sure the file exists in the opt.7z archive"
-                print_message "You can install it manually later: cp /path/to/nftables.conf $NFTABLES_DST"
+                print_error "Syntax error in $NFTABLES_DST!"
+                if [ -f /tmp/nft_syntax_err ] && [ -s /tmp/nft_syntax_err ]; then
+                    print_error "Error details:"
+                    cat /tmp/nft_syntax_err
+                fi
+                # Restore backup on syntax error
+                LATEST_BACKUP=$(ls -t ${NFTABLES_DST}.backup.*~ 2>/dev/null | head -1)
+                if [ ! -z "$LATEST_BACKUP" ]; then
+                    cp "$LATEST_BACKUP" "$NFTABLES_DST"
+                    print_warning "Previous nftables.conf restored from backup"
+                fi
+                print_message "Fix the syntax and apply manually:"
+                print_message "  nano $NFTABLES_DST"
+                print_message "  nft -c -f $NFTABLES_DST  # verify"
+                print_message "  nft -f $NFTABLES_DST     # apply"
             fi
+            rm -f /tmp/nft_syntax_err
         else
-            print_message "Step 5: Skipping nftables.conf installation (not requested)"
+            print_message "Step 7: No $NFTABLES_DST found — nftables will use empty ruleset"
+            print_message "You can create one manually or copy from /opt/nftables/"
         fi
     fi
 
+    # --- Summary ---
+    echo ""
     if [ "$NFTABLES_OK" = true ]; then
-        echo ""
-        print_success "nftables firewall enabled"
+        print_success "nftables firewall setup completed"
         print_message "  Service: nftables.service"
         print_message "  Config:  /etc/nftables.conf"
+        if [ ! -z "$NFTABLES_PROFILE" ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
+            print_message "  Profile: ${NFTABLES_PROFILE}"
+        fi
         print_message "  Manage:  systemctl {start|stop|restart|status} nftables"
         print_message "  Rules:   nft list ruleset"
     else
@@ -4198,11 +4304,15 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     else
         print_message "- nftables: ENABLED (service not active — check configuration)"
     fi
-    if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
-        if [ -f /etc/nftables.conf ]; then
-            print_message "  nftables.conf: Installed from opt.7z"
-        else
-            print_message "  nftables.conf: Installation attempted but file missing"
+    if [ ! -z "$NFTABLES_PROFILE" ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
+        print_message "  Profile: ${NFTABLES_PROFILE} (${NFTABLES_PROFILE}_nftables.conf)"
+    fi
+    if [ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ]; then
+        print_message "  Logging: ${NFTABLES_PROFILE}_logging.sh executed"
+    fi
+    if dpkg -l ufw 2>/dev/null | grep -q "^ii"; then
+        if systemctl is-masked --quiet ufw 2>/dev/null; then
+            print_message "  UFW: disabled and masked"
         fi
     fi
 else
@@ -4431,10 +4541,18 @@ if [ "$OS" = "ubuntu" ]; then
 fi
 print_message "sudo nano /etc/ssh/sshd_config"
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
-    print_message "nft list ruleset                # Show nftables rules"
-    print_message "sudo nano /etc/nftables.conf    # Edit nftables config"
-    print_message "nft -c -f /etc/nftables.conf    # Verify syntax"
-    print_message "nft -f /etc/nftables.conf       # Apply config"
+    print_message "nft list ruleset                       # Show nftables rules"
+    print_message "sudo nano /etc/nftables.conf           # Edit nftables config"
+    print_message "nft -c -f /etc/nftables.conf           # Verify syntax"
+    print_message "nft -f /etc/nftables.conf              # Apply config"
+    print_message "systemctl restart nftables             # Reload service"
+    if [ ! -z "$NFTABLES_PROFILE" ]; then
+        print_message "ls /opt/nftables/                      # Available configs"
+        print_message "ls /opt/nftables/logging/              # Logging scripts"
+    fi
+    if dpkg -l ufw 2>/dev/null | grep -q "^ii"; then
+        print_message "systemctl unmask ufw                   # Re-enable UFW (if needed)"
+    fi
 fi
 if [ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ]; then
     print_message "sudo nano /etc/docker/daemon.json  # Docker daemon config"
