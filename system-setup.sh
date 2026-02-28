@@ -1406,6 +1406,7 @@ COMMON_PACKAGES=(
     python3
     python3-venv
     vim
+    rsync
 )
 
 # Add zsh if requested
@@ -1417,6 +1418,7 @@ fi
 # You can comment out (#) any package to disable its installation
 DEBIAN_PACKAGES=(
     openvswitch-switch-dpdk
+    linux-headers-$(uname -r)
 )
 
 # Add linux-headers only if available for the running kernel
