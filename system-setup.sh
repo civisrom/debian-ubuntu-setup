@@ -723,6 +723,15 @@ if [ "$INTERACTIVE" = true ]; then
 
     echo ""
 
+    # Ask about rclone installation
+    print_message "Install rclone (cloud storage sync tool)?"
+    print_message "  Supports: S3, Google Drive, Dropbox, SFTP, and 70+ backends"
+    print_message "  Installed via official script from rclone.org"
+    read -p "Install rclone? (y/N): " INSTALL_RCLONE
+    INSTALL_RCLONE=${INSTALL_RCLONE:-n}
+
+    echo ""
+
     # Ask about UFW configuration
     print_header "───────────────────────────────────────────────"
     print_header "   Firewall (UFW)"
@@ -1182,6 +1191,7 @@ else
     COMMENT_IPV6_INTERFACES="n"
     INSTALL_GO="n"
     INSTALL_IPSET="n"
+    INSTALL_RCLONE="n"
     INSTALL_RUSTDESK="n"
     CONFIGURE_SWAP="n"
     SWAP_MODE="1"
@@ -1252,6 +1262,7 @@ fi
 print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Go language: $([ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ] && echo "YES (latest version)" || echo "NO")"
 print_message "  ipset: $([ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ] && echo "YES (build from source)" || echo "NO")"
+print_message "  rclone: $([ "$INSTALL_RCLONE" = "y" ] || [ "$INSTALL_RCLONE" = "Y" ] && echo "YES (official script)" || echo "NO")"
 print_message "  nftables: $([ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
@@ -2764,6 +2775,53 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
     echo ""
 else
     print_message "Skipping ipset installation (not requested)"
+fi
+
+# ============================================
+# INSTALL RCLONE
+# ============================================
+
+if [ "$INSTALL_RCLONE" = "y" ] || [ "$INSTALL_RCLONE" = "Y" ]; then
+    print_message "Installing rclone..."
+    echo ""
+
+    if command -v rclone &>/dev/null; then
+        RCLONE_CURRENT=$(rclone version 2>/dev/null | head -1 || echo "unknown")
+        print_warning "rclone is already installed: $RCLONE_CURRENT"
+        print_message "The official script will update it to the latest version"
+    fi
+
+    # Verify curl is available (should be, but check)
+    if ! command -v curl &>/dev/null; then
+        print_error "curl is required but not found"
+        print_message "Installing curl..."
+        apt-get install -y curl || true
+    fi
+
+    # Download and run the official rclone install script
+    print_message "Downloading official rclone install script from rclone.org..."
+    if curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh; then
+        print_message "Running rclone install script..."
+        if bash /tmp/rclone-install.sh; then
+            rm -f /tmp/rclone-install.sh
+            if command -v rclone &>/dev/null; then
+                RCLONE_VERSION=$(rclone version 2>/dev/null | head -1 || echo "unknown")
+                print_success "rclone installed: $RCLONE_VERSION"
+            else
+                print_warning "Install script finished but rclone not found in PATH"
+            fi
+        else
+            print_error "rclone install script failed"
+            rm -f /tmp/rclone-install.sh
+        fi
+    else
+        print_error "Failed to download rclone install script"
+        print_message "You can install manually: curl https://rclone.org/install.sh | sudo bash"
+    fi
+
+    echo ""
+else
+    print_message "Skipping rclone installation (not requested)"
 fi
 
 # ============================================
@@ -4374,6 +4432,17 @@ else
         print_message "- ipset: Installation attempted but not found"
     else
         print_message "- ipset: Not installed"
+    fi
+fi
+
+if command -v rclone &>/dev/null; then
+    RCLONE_VERSION=$(rclone version 2>/dev/null | head -1 || echo "unknown")
+    print_message "- rclone: Installed ($RCLONE_VERSION)"
+else
+    if [ "$INSTALL_RCLONE" = "y" ] || [ "$INSTALL_RCLONE" = "Y" ]; then
+        print_message "- rclone: Installation attempted but not found"
+    else
+        print_message "- rclone: Not installed"
     fi
 fi
 
