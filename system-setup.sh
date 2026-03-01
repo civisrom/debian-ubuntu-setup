@@ -1166,10 +1166,15 @@ if [ "$INTERACTIVE" = true ]; then
         read -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
         BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
 
-        # Fix DNS
-        print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
-        read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
-        BBR_FIX_DNS=${BBR_FIX_DNS:-y}
+        # Fix DNS (skip if systemd-resolved is configured separately)
+        if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+            print_message "4. Fix DNS — SKIPPED (systemd-resolved is configured separately)"
+            BBR_FIX_DNS="n"
+        else
+            print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
+            read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
+            BBR_FIX_DNS=${BBR_FIX_DNS:-y}
+        fi
 
         echo ""
         print_message "BBR adaptive network tuning + selected options will be applied after main setup"
@@ -1391,7 +1396,11 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     print_message "    - Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
     print_message "    - Full Update: $([ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ] && echo "YES" || echo "NO")"
     print_message "    - Fix /etc/hosts: $([ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ] && echo "YES" || echo "NO")"
-    print_message "    - Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
+    if { [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; } && [ "$BBR_FIX_DNS" = "n" ]; then
+        print_message "    - Fix DNS: SKIPPED (systemd-resolved configured)"
+    else
+        print_message "    - Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
+    fi
 else
     print_message "  BBR Network Optimizer: NO"
 fi
@@ -3894,7 +3903,12 @@ EOFWRAPPER
         fi
         
         if [ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ]; then
-            PARAM4="fix_dns"
+            # Skip BBR DNS fix if systemd-resolved is configured (would conflict)
+            if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+                print_warning "Skipping BBR fix_dns — systemd-resolved is configured separately"
+            else
+                PARAM4="fix_dns"
+            fi
         fi
         
         print_message "Running BBR Network Optimizer with selected options..."
@@ -4025,7 +4039,12 @@ EOF
     sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
 
     # Minimal DNS recovery: ensure resolv.conf has IPv4 DNS after IPv6 disable
-    ensure_dns_works "sysctl-ipv6-disable"
+    # Skip if systemd-resolved will be configured next (avoid creating conflicting drop-ins)
+    if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+        print_message "Skipping DNS recovery — systemd-resolved will be configured next"
+    else
+        ensure_dns_works "sysctl-ipv6-disable"
+    fi
 else
     print_message "Skipping sysctl configuration (not requested)"
 fi
@@ -4368,8 +4387,11 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                 echo ""
 
                 # Remove IPv6 nameservers from /etc/resolv.conf
+                # Skip if systemd-resolved manages resolv.conf (it's a symlink)
                 RESOLV_FILE="/etc/resolv.conf"
-                if [ -f "$RESOLV_FILE" ]; then
+                if { [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; } && [ -L "$RESOLV_FILE" ]; then
+                    print_message "Skipping resolv.conf cleanup — managed by systemd-resolved"
+                elif [ -f "$RESOLV_FILE" ]; then
                     if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"; then
                         cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
                         print_message "Original $RESOLV_FILE backed up"
