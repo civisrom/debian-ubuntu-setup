@@ -933,6 +933,45 @@ if [ "$INTERACTIVE" = true ]; then
         ENABLE_IP_FORWARD="n"
     fi
 
+    # Ask about systemd-resolved configuration
+    echo ""
+    print_message "Configure systemd-resolved DNS resolver?"
+    print_message "  - Installs libnss-resolve (NSS module for systemd-resolved)"
+    print_message "  - Configures /etc/systemd/resolved.conf"
+    print_message "  - Creates symlink /etc/resolv.conf -> /run/systemd/resolve/resolv.conf"
+    print_message "  - Enables and starts systemd-resolved service"
+    read -p "Configure systemd-resolved? (y/N): " CONFIGURE_RESOLVED
+    CONFIGURE_RESOLVED=${CONFIGURE_RESOLVED:-n}
+
+    if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+        echo ""
+        print_message "Enter primary DNS server for systemd-resolved:"
+        print_message "  127.0.0.1 — local DNS resolver (unbound, pihole, adguard, etc.)"
+        print_message "  1.1.1.1   — Cloudflare"
+        print_message "  8.8.8.8   — Google"
+        print_message "  9.9.9.9   — Quad9"
+        read -p "DNS server (default: 127.0.0.1): " RESOLVED_DNS
+        RESOLVED_DNS=${RESOLVED_DNS:-127.0.0.1}
+
+        echo ""
+        print_message "Disable DNS stub listener (DNSStubListener=no)?"
+        print_message "  Recommended when using a local DNS resolver on port 53"
+        print_message "  Frees port 53 for your local resolver (unbound, pihole, etc.)"
+        read -p "Disable DNSStubListener? (Y/n): " RESOLVED_STUB_LISTENER_OFF
+        RESOLVED_STUB_LISTENER_OFF=${RESOLVED_STUB_LISTENER_OFF:-y}
+
+        echo ""
+        print_message "Enable DNS over TLS (DoT)?"
+        print_message "  Encrypts DNS queries to upstream resolver"
+        print_message "  Note: Upstream DNS server must support DoT"
+        read -p "Enable DNSOverTLS? (y/N): " RESOLVED_DNS_OVER_TLS
+        RESOLVED_DNS_OVER_TLS=${RESOLVED_DNS_OVER_TLS:-n}
+    else
+        RESOLVED_DNS=""
+        RESOLVED_STUB_LISTENER_OFF=""
+        RESOLVED_DNS_OVER_TLS=""
+    fi
+
     # Ask about IPv6 disable via GRUB (Debian only)
     if [ "$OS" = "debian" ]; then
         echo ""
@@ -1127,10 +1166,15 @@ if [ "$INTERACTIVE" = true ]; then
         read -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
         BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
 
-        # Fix DNS
-        print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
-        read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
-        BBR_FIX_DNS=${BBR_FIX_DNS:-y}
+        # Fix DNS (skip if systemd-resolved is configured separately)
+        if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+            print_message "4. Fix DNS — SKIPPED (systemd-resolved is configured separately)"
+            BBR_FIX_DNS="n"
+        else
+            print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
+            read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
+            BBR_FIX_DNS=${BBR_FIX_DNS:-y}
+        fi
 
         echo ""
         print_message "BBR adaptive network tuning + selected options will be applied after main setup"
@@ -1178,6 +1222,10 @@ else
     UFW_CUSTOM_RULES_PASSWORD=""
     CONFIGURE_SYSCTL="y"
     ENABLE_IP_FORWARD="n"
+    CONFIGURE_RESOLVED="n"
+    RESOLVED_DNS=""
+    RESOLVED_STUB_LISTENER_OFF=""
+    RESOLVED_DNS_OVER_TLS=""
     CONFIGURE_REPOS="y"
     INSTALL_MOTD="n"
     CUSTOM_PORTS=""
@@ -1216,6 +1264,7 @@ else
     print_message "- Block ICMP: NO"
     print_message "- sysctl: YES"
     print_message "- IP forwarding: NO"
+    print_message "- systemd-resolved: NO"
     print_message "- Repositories: YES"
     print_message "- MOTD: NO"
     print_message "- Custom UFW Port: None"
@@ -1298,6 +1347,12 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
 else
     print_message "  sysctl optimization: NO"
 fi
+print_message "  systemd-resolved: $([ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ] && echo "YES" || echo "NO")"
+if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+    print_message "    - DNS server: ${RESOLVED_DNS}"
+    print_message "    - DNSStubListener: $([ "$RESOLVED_STUB_LISTENER_OFF" = "y" ] || [ "$RESOLVED_STUB_LISTENER_OFF" = "Y" ] && echo "disabled" || echo "enabled (default)")"
+    print_message "    - DNSOverTLS: $([ "$RESOLVED_DNS_OVER_TLS" = "y" ] || [ "$RESOLVED_DNS_OVER_TLS" = "Y" ] && echo "yes" || echo "no")"
+fi
 if [ "$OS" = "debian" ]; then
     print_message "  IPv6 disable via GRUB: $([ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ] && echo "YES (kernel level)" || echo "NO")"
 fi
@@ -1341,7 +1396,11 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     print_message "    - Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
     print_message "    - Full Update: $([ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ] && echo "YES" || echo "NO")"
     print_message "    - Fix /etc/hosts: $([ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ] && echo "YES" || echo "NO")"
-    print_message "    - Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
+    if { [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; } && [ "$BBR_FIX_DNS" = "n" ]; then
+        print_message "    - Fix DNS: SKIPPED (systemd-resolved configured)"
+    else
+        print_message "    - Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
+    fi
 else
     print_message "  BBR Network Optimizer: NO"
 fi
@@ -3844,7 +3903,12 @@ EOFWRAPPER
         fi
         
         if [ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ]; then
-            PARAM4="fix_dns"
+            # Skip BBR DNS fix if systemd-resolved is configured (would conflict)
+            if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+                print_warning "Skipping BBR fix_dns — systemd-resolved is configured separately"
+            else
+                PARAM4="fix_dns"
+            fi
         fi
         
         print_message "Running BBR Network Optimizer with selected options..."
@@ -3975,9 +4039,172 @@ EOF
     sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
 
     # Minimal DNS recovery: ensure resolv.conf has IPv4 DNS after IPv6 disable
-    ensure_dns_works "sysctl-ipv6-disable"
+    # Skip if systemd-resolved will be configured next (avoid creating conflicting drop-ins)
+    if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+        print_message "Skipping DNS recovery — systemd-resolved will be configured next"
+    else
+        ensure_dns_works "sysctl-ipv6-disable"
+    fi
 else
     print_message "Skipping sysctl configuration (not requested)"
+fi
+
+# ============================================
+# CONFIGURE SYSTEMD-RESOLVED
+# ============================================
+# NOTE: Placed after sysctl (which disables IPv6 and recovers DNS)
+# so resolved is configured with final DNS settings.
+# Steps:
+#   1. Install libnss-resolve (updates /etc/nsswitch.conf automatically)
+#   2. Write /etc/systemd/resolved.conf
+#   3. Backup and replace /etc/resolv.conf with symlink (ln -sf, no prompt)
+#   4. Enable and restart systemd-resolved
+
+if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+    print_message "Configuring systemd-resolved..."
+
+    # Step 1: Install libnss-resolve
+    # This installs libnss_resolve.so and updates /etc/nsswitch.conf
+    # hosts: files dns → hosts: files resolve [!UNAVAIL=return] dns
+    print_message "Step 1: Installing libnss-resolve..."
+    if dpkg -l libnss-resolve 2>/dev/null | grep -q "^ii"; then
+        print_message "libnss-resolve is already installed"
+    else
+        if apt-get install -y libnss-resolve; then
+            print_success "libnss-resolve installed successfully"
+        else
+            print_error "Failed to install libnss-resolve"
+            print_warning "systemd-resolved configuration may not work properly without NSS module"
+        fi
+    fi
+
+    # Verify nsswitch.conf was updated
+    if [ -f /etc/nsswitch.conf ]; then
+        if grep -q "resolve" /etc/nsswitch.conf; then
+            print_message "nsswitch.conf already contains 'resolve' entry"
+        else
+            print_warning "nsswitch.conf does not contain 'resolve' — adding manually"
+            cp /etc/nsswitch.conf "/etc/nsswitch.conf.backup.$(date +%Y%m%d-%H%M%S)~"
+            sed -i 's/^hosts:.*/hosts:          files resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+            print_message "Updated /etc/nsswitch.conf hosts line"
+        fi
+    fi
+
+    # Step 2: Configure /etc/systemd/resolved.conf
+    print_message "Step 2: Configuring /etc/systemd/resolved.conf..."
+    RESOLVED_CONF="/etc/systemd/resolved.conf"
+
+    if [ -f "$RESOLVED_CONF" ]; then
+        cp "$RESOLVED_CONF" "${RESOLVED_CONF}.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original resolved.conf backed up"
+    fi
+
+    # Determine DNSOverTLS value
+    if [ "$RESOLVED_DNS_OVER_TLS" = "y" ] || [ "$RESOLVED_DNS_OVER_TLS" = "Y" ]; then
+        RESOLVED_DOT_VALUE="yes"
+    else
+        RESOLVED_DOT_VALUE="no"
+    fi
+
+    # Determine DNSStubListener value
+    if [ "$RESOLVED_STUB_LISTENER_OFF" = "y" ] || [ "$RESOLVED_STUB_LISTENER_OFF" = "Y" ]; then
+        RESOLVED_STUB_VALUE="no"
+    else
+        RESOLVED_STUB_VALUE="yes"
+    fi
+
+    cat > "$RESOLVED_CONF" << REOF
+[Resolve]
+# Some examples of DNS servers which may be used for DNS= and FallbackDNS=:
+# Cloudflare: 1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com 2606:4700:4700::1111#cloudflare-dns.com 2606:4700:4700::1001#cloudflare-dns.com
+# Google:     8.8.8.8#dns.google 8.8.4.4#dns.google 2001:4860:4860::8888#dns.google 2001:4860:4860::8844#dns.google
+# Quad9:      9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net 2620:fe::fe#dns.quad9.net 2620:fe::9#dns.quad9.net
+DNS=${RESOLVED_DNS}
+#FallbackDNS=
+#Domains=
+#DNSSEC=no
+DNSOverTLS=${RESOLVED_DOT_VALUE}
+DNSStubListener=${RESOLVED_STUB_VALUE}
+#MulticastDNS=no
+#LLMNR=no
+#Cache=no-negative
+#CacheFromLocalhost=no
+#DNSStubListenerExtra=
+#ReadEtcHosts=yes
+#ResolveUnicastSingleLabel=no
+REOF
+    print_success "Written $RESOLVED_CONF (DNS=${RESOLVED_DNS}, DNSOverTLS=${RESOLVED_DOT_VALUE}, DNSStubListener=${RESOLVED_STUB_VALUE})"
+
+    # Step 3: Create symlink /etc/resolv.conf -> /run/systemd/resolve/resolv.conf
+    # Using ln -sf to force replacement without interactive prompt (replaces ln -svi)
+    print_message "Step 3: Creating resolv.conf symlink..."
+    RESOLV_LINK_TARGET="/run/systemd/resolve/resolv.conf"
+
+    # Backup current resolv.conf (only if it's a regular file, not already a symlink)
+    if [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+        cp /etc/resolv.conf "/etc/resolv.conf.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original /etc/resolv.conf backed up"
+    elif [ -L /etc/resolv.conf ]; then
+        CURRENT_LINK=$(readlink -f /etc/resolv.conf 2>/dev/null || echo "unknown")
+        print_message "Current /etc/resolv.conf is already a symlink -> $CURRENT_LINK"
+    fi
+
+    # Create the symlink (ln -sf forces overwrite without prompt)
+    ln -sf "$RESOLV_LINK_TARGET" /etc/resolv.conf
+    if [ -L /etc/resolv.conf ]; then
+        print_success "Symlink created: /etc/resolv.conf -> $RESOLV_LINK_TARGET"
+    else
+        print_error "Failed to create symlink /etc/resolv.conf"
+    fi
+
+    # Step 4: Enable and restart systemd-resolved
+    print_message "Step 4: Enabling and starting systemd-resolved..."
+    systemctl enable systemd-resolved 2>/dev/null || print_warning "Failed to enable systemd-resolved"
+    systemctl restart systemd-resolved 2>/dev/null || print_warning "Failed to restart systemd-resolved"
+
+    # Verify service status
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        print_success "systemd-resolved is active and running"
+
+        # Show resolved status
+        if command -v resolvectl &>/dev/null; then
+            print_message "Current DNS configuration:"
+            resolvectl status 2>/dev/null | head -15 || true
+        fi
+    else
+        print_error "systemd-resolved failed to start"
+        print_message "Check status: systemctl status systemd-resolved"
+        print_message "Check journal: journalctl -xeu systemd-resolved"
+
+        # If resolved failed and resolv.conf is now a broken symlink, restore backup
+        if [ -L /etc/resolv.conf ] && [ ! -f /etc/resolv.conf ]; then
+            print_warning "resolv.conf symlink is broken (resolved not running)"
+            LATEST_RESOLV_BACKUP=$(ls -t /etc/resolv.conf.backup.*~ 2>/dev/null | head -1)
+            if [ -n "$LATEST_RESOLV_BACKUP" ]; then
+                rm -f /etc/resolv.conf
+                cp "$LATEST_RESOLV_BACKUP" /etc/resolv.conf
+                print_message "Restored /etc/resolv.conf from backup"
+            else
+                # Write minimal working resolv.conf as emergency fallback
+                rm -f /etc/resolv.conf
+                printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
+                print_message "Created emergency /etc/resolv.conf with public DNS"
+            fi
+        fi
+    fi
+
+    # Remove any drop-in configs that might conflict with our resolved.conf
+    if [ -d /etc/systemd/resolved.conf.d ]; then
+        if ls /etc/systemd/resolved.conf.d/*.conf &>/dev/null; then
+            print_warning "Found drop-in configs in /etc/systemd/resolved.conf.d/ — these may override resolved.conf"
+            ls -la /etc/systemd/resolved.conf.d/*.conf 2>/dev/null || true
+        fi
+    fi
+
+    echo ""
+    print_success "systemd-resolved configuration complete"
+else
+    print_message "Skipping systemd-resolved configuration (not requested)"
 fi
 
 # ============================================
@@ -4160,8 +4387,11 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                 echo ""
 
                 # Remove IPv6 nameservers from /etc/resolv.conf
+                # Skip if systemd-resolved manages resolv.conf (it's a symlink)
                 RESOLV_FILE="/etc/resolv.conf"
-                if [ -f "$RESOLV_FILE" ]; then
+                if { [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; } && [ -L "$RESOLV_FILE" ]; then
+                    print_message "Skipping resolv.conf cleanup — managed by systemd-resolved"
+                elif [ -f "$RESOLV_FILE" ]; then
                     if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"; then
                         cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
                         print_message "Original $RESOLV_FILE backed up"
@@ -4304,6 +4534,22 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     print_message "  rp_filter (reverse path filtering): ENABLED"
 else
     print_message "- sysctl: SKIPPED"
+fi
+
+if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        print_message "- systemd-resolved: ACTIVE"
+    else
+        print_message "- systemd-resolved: CONFIGURED (service not active — check status)"
+    fi
+    print_message "  DNS: ${RESOLVED_DNS}"
+    print_message "  DNSStubListener: $([ "$RESOLVED_STUB_LISTENER_OFF" = "y" ] || [ "$RESOLVED_STUB_LISTENER_OFF" = "Y" ] && echo "disabled" || echo "enabled")"
+    print_message "  DNSOverTLS: $([ "$RESOLVED_DNS_OVER_TLS" = "y" ] || [ "$RESOLVED_DNS_OVER_TLS" = "Y" ] && echo "yes" || echo "no")"
+    if [ -L /etc/resolv.conf ]; then
+        print_message "  resolv.conf: symlink -> $(readlink /etc/resolv.conf 2>/dev/null)"
+    fi
+else
+    print_message "- systemd-resolved: Not configured"
 fi
 
 if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
@@ -4502,7 +4748,7 @@ fi
 
 print_message ""
 
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || { [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; }; then
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ] || { [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; }; then
     print_message "Backup files saved with timestamp (format: filename.backup.YYYYMMDD-HHMMSS~):"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "- /etc/sysctl.conf.backup.*~"
@@ -4526,6 +4772,10 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     fi
     if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
         print_message "- /etc/default/grub.backup.*~"
+    fi
+    if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+        print_message "- /etc/systemd/resolved.conf.backup.*~"
+        print_message "- /etc/resolv.conf.backup.*~ (if was a regular file)"
     fi
     print_message ""
 fi
@@ -4562,6 +4812,11 @@ fi
 
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     print_warning "$STEP_NUM. Check sysctl: sysctl net.ipv4.tcp_congestion_control"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+
+if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+    print_warning "$STEP_NUM. Check DNS: resolvectl status"
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
@@ -4627,6 +4882,13 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 fi
 if [ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ]; then
     print_message "sudo nano /etc/docker/daemon.json  # Docker daemon config"
+fi
+if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+    print_message "resolvectl status                      # Check resolved status"
+    print_message "resolvectl query example.com           # Test DNS resolution"
+    print_message "sudo nano /etc/systemd/resolved.conf   # Edit resolved config"
+    print_message "systemctl restart systemd-resolved     # Restart resolved"
+    print_message "ls -la /etc/resolv.conf                # Check resolv.conf symlink"
 fi
 print_message "sudo crontab -l"
 if [ "$OS" = "debian" ]; then
