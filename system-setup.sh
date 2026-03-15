@@ -3680,13 +3680,13 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 
                 # Copy selected profile config as /etc/nftables.conf
                 cp "$NFTABLES_SRC" "$NFTABLES_DST"
-                chmod 600 "$NFTABLES_DST"
+                chmod 755 "$NFTABLES_DST"
                 chown root:root "$NFTABLES_DST"
 
                 # Verify the copy was successful
                 if [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ] && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
                     print_success "Installed ${NFTABLES_PROFILE}_nftables.conf -> $NFTABLES_DST"
-                    print_message "  Permissions: 600, Owner: root:root"
+                    print_message "  Permissions: 755, Owner: root:root"
                     print_message "  File size: $(wc -c < "$NFTABLES_DST") bytes"
                 else
                     print_error "CRITICAL: Config file copy verification failed!"
@@ -3694,7 +3694,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                     print_error "Destination: $NFTABLES_DST ($(wc -c < "$NFTABLES_DST" 2>/dev/null || echo 0) bytes)"
                     # Force retry with install command
                     print_message "Retrying with install command..."
-                    install -m 600 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST"
+                    install -m 755 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST"
                     if cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
                         print_success "Retry successful: ${NFTABLES_PROFILE}_nftables.conf -> $NFTABLES_DST"
                     else
