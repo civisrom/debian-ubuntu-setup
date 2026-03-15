@@ -3431,6 +3431,8 @@ fi
 # EXTRACT OPT.7Z ARCHIVE TO /OPT
 # ============================================
 
+OPT_EXTRACTED_OK=false
+
 if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
     echo ""
     print_header "═══════════════════════════════════════════════════"
@@ -3476,6 +3478,42 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
                 if [ "$(ls -A ${OPT_EXTRACT_DIR})" ]; then
                     cp -r "${OPT_EXTRACT_DIR}/"* /opt/
                     print_message "Files copied to /opt successfully"
+
+                    # Verify nftables directory was extracted (critical for config installation)
+                    if [ -d "/opt/nftables" ]; then
+                        print_success "nftables directory found in /opt"
+                        OPT_EXTRACTED_OK=true
+                        # List nftables configs for verification
+                        print_message "Available nftables configs:"
+                        ls -la /opt/nftables/*.conf 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .conf files found in /opt/nftables/"
+                        if [ -d "/opt/nftables/logging" ]; then
+                            print_message "Available logging scripts:"
+                            ls -la /opt/nftables/logging/*.sh 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .sh files found in /opt/nftables/logging/"
+                        else
+                            print_warning "nftables/logging directory not found in archive"
+                        fi
+                    else
+                        print_warning "nftables directory NOT found after extraction"
+                        print_warning "Archive may have different internal structure"
+                        # Try to find nftables files in case of nested directory
+                        FOUND_NFTABLES=$(find /opt -name "*_nftables.conf" -type f 2>/dev/null | head -1)
+                        if [ -n "$FOUND_NFTABLES" ]; then
+                            FOUND_DIR=$(dirname "$FOUND_NFTABLES")
+                            print_message "Found nftables configs in: $FOUND_DIR"
+                            print_message "Restructuring: moving files to /opt/nftables/..."
+                            mkdir -p /opt/nftables
+                            cp "$FOUND_DIR"/*_nftables.conf /opt/nftables/ 2>/dev/null
+                            # Also try to find and copy logging scripts
+                            FOUND_LOGGING=$(find /opt -name "*_logging.sh" -type f 2>/dev/null | head -1)
+                            if [ -n "$FOUND_LOGGING" ]; then
+                                FOUND_LOG_DIR=$(dirname "$FOUND_LOGGING")
+                                mkdir -p /opt/nftables/logging
+                                cp "$FOUND_LOG_DIR"/*_logging.sh /opt/nftables/logging/ 2>/dev/null
+                            fi
+                            OPT_EXTRACTED_OK=true
+                            print_success "nftables files restructured to /opt/nftables/"
+                        fi
+                    fi
 
                     # Make scripts in scripts folder executable (except .ini files)
                     if [ -d "/opt/scripts" ]; then
@@ -3623,28 +3661,56 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         echo ""
         print_message "Step 5: Installing nftables config (profile: ${NFTABLES_PROFILE})..."
 
-        NFTABLES_SRC="/opt/nftables/${NFTABLES_PROFILE}_nftables.conf"
-        NFTABLES_DST="/etc/nftables.conf"
-
-        if [ -f "$NFTABLES_SRC" ]; then
-            # Backup existing nftables.conf
-            if [ -f "$NFTABLES_DST" ]; then
-                cp "$NFTABLES_DST" "${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
-                print_message "Existing $NFTABLES_DST backed up"
-            fi
-
-            # Copy selected profile config as /etc/nftables.conf
-            cp "$NFTABLES_SRC" "$NFTABLES_DST"
-            chmod 755 "$NFTABLES_DST"
-            chown root:root "$NFTABLES_DST"
-            print_success "Copied ${NFTABLES_PROFILE}_nftables.conf -> $NFTABLES_DST"
-            print_message "  Permissions: 755, Owner: root:root"
-        else
-            print_error "Config file not found: $NFTABLES_SRC"
-            print_message "Expected path in opt.7z archive: nftables/${NFTABLES_PROFILE}_nftables.conf"
+        # Verify opt.7z was extracted successfully
+        if [ "$OPT_EXTRACTED_OK" != true ]; then
+            print_error "opt.7z archive was not extracted successfully"
+            print_error "Cannot install nftables config — source files are missing"
             print_warning "Skipping config installation — using default nftables.conf"
-            # Don't set NFTABLES_OK=false: nftables service itself is fine
             INSTALL_NFTABLES_CONF="skipped"
+        else
+            NFTABLES_SRC="/opt/nftables/${NFTABLES_PROFILE}_nftables.conf"
+            NFTABLES_DST="/etc/nftables.conf"
+
+            if [ -f "$NFTABLES_SRC" ] && [ -s "$NFTABLES_SRC" ]; then
+                # Backup existing nftables.conf
+                if [ -f "$NFTABLES_DST" ]; then
+                    cp "$NFTABLES_DST" "${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
+                    print_message "Existing $NFTABLES_DST backed up"
+                fi
+
+                # Copy selected profile config as /etc/nftables.conf
+                cp "$NFTABLES_SRC" "$NFTABLES_DST"
+                chmod 755 "$NFTABLES_DST"
+                chown root:root "$NFTABLES_DST"
+
+                # Verify the copy was successful
+                if [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ] && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
+                    print_success "Installed ${NFTABLES_PROFILE}_nftables.conf -> $NFTABLES_DST"
+                    print_message "  Permissions: 755, Owner: root:root"
+                    print_message "  File size: $(wc -c < "$NFTABLES_DST") bytes"
+                else
+                    print_error "CRITICAL: Config file copy verification failed!"
+                    print_error "Source: $NFTABLES_SRC ($(wc -c < "$NFTABLES_SRC" 2>/dev/null || echo 0) bytes)"
+                    print_error "Destination: $NFTABLES_DST ($(wc -c < "$NFTABLES_DST" 2>/dev/null || echo 0) bytes)"
+                    # Force retry with install command
+                    print_message "Retrying with install command..."
+                    install -m 755 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST"
+                    if cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
+                        print_success "Retry successful: ${NFTABLES_PROFILE}_nftables.conf -> $NFTABLES_DST"
+                    else
+                        print_error "Config installation failed after retry"
+                        INSTALL_NFTABLES_CONF="skipped"
+                    fi
+                fi
+            else
+                print_error "Config file not found or empty: $NFTABLES_SRC"
+                print_message "Expected path in opt.7z archive: nftables/${NFTABLES_PROFILE}_nftables.conf"
+                # List what IS available for debugging
+                print_message "Available files in /opt/nftables/:"
+                ls -la /opt/nftables/ 2>/dev/null || print_error "  /opt/nftables/ directory does not exist"
+                print_warning "Skipping config installation — using default nftables.conf"
+                INSTALL_NFTABLES_CONF="skipped"
+            fi
         fi
     elif [ "$NFTABLES_OK" = true ]; then
         echo ""
@@ -3656,23 +3722,31 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         echo ""
         print_message "Step 6: Running logging setup (profile: ${NFTABLES_PROFILE})..."
 
-        LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_PROFILE}_logging.sh"
-
-        if [ -f "$LOGGING_SCRIPT" ]; then
-            # Make script executable
-            chmod +x "$LOGGING_SCRIPT"
-            print_message "Running: $LOGGING_SCRIPT"
-
-            # Execute logging setup script
-            if bash "$LOGGING_SCRIPT"; then
-                print_success "Logging setup completed (${NFTABLES_PROFILE}_logging.sh)"
-            else
-                print_warning "Logging setup script returned an error"
-                print_message "You can run it manually later: bash $LOGGING_SCRIPT"
-            fi
+        # Verify opt.7z was extracted
+        if [ "$OPT_EXTRACTED_OK" != true ]; then
+            print_warning "opt.7z archive was not extracted — skipping logging setup"
         else
-            print_warning "Logging script not found: $LOGGING_SCRIPT"
-            print_message "Expected path in opt.7z archive: nftables/logging/${NFTABLES_PROFILE}_logging.sh"
+            LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_PROFILE}_logging.sh"
+
+            if [ -f "$LOGGING_SCRIPT" ] && [ -s "$LOGGING_SCRIPT" ]; then
+                # Make script executable
+                chmod +x "$LOGGING_SCRIPT"
+                print_message "Running: $LOGGING_SCRIPT"
+
+                # Execute logging setup script
+                if bash "$LOGGING_SCRIPT"; then
+                    print_success "Logging setup completed (${NFTABLES_PROFILE}_logging.sh)"
+                else
+                    print_warning "Logging setup script returned an error (exit code: $?)"
+                    print_message "You can run it manually later: bash $LOGGING_SCRIPT"
+                fi
+            else
+                print_warning "Logging script not found or empty: $LOGGING_SCRIPT"
+                print_message "Expected path in opt.7z archive: nftables/logging/${NFTABLES_PROFILE}_logging.sh"
+                # List available logging scripts for debugging
+                print_message "Available logging scripts:"
+                ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
+            fi
         fi
     elif [ "$NFTABLES_OK" = true ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
         echo ""
