@@ -4048,17 +4048,10 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     fi
 
     # Mode 1 (basic): static parameters written directly to sysctl.conf
-    # Mode 2 (full): minimal params + bbr.sh handles adaptive RAM-based tuning
+    # Mode 2 (full): bbr.sh handles all sysctl tuning (no params written here)
     if [ "$SYSCTL_MODE" = "2" ]; then
-        # === Full mode: minimal sysctl params (BBR optimizer handles the rest) ===
-        print_message "Applying minimal sysctl params (full tuning via BBR optimizer)"
-        cat >> /etc/sysctl.conf.new << 'EOF'
-
-# Minimal sysctl — full tuning handled by Linux NetworkOptimizer (bbr.sh)
-net.ipv4.tcp_syncookies = 0
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-EOF
+        # === Full mode: bbr.sh manages all network/sysctl parameters ===
+        print_message "Skipping sysctl params — all tuning handled by Linux NetworkOptimizer (bbr.sh)"
     else
         # === Basic mode: full static parameters ===
         print_message "Applying basic sysctl configuration (static parameters)"
