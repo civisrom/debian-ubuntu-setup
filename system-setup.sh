@@ -991,10 +991,19 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "If unsure — choose Y (recommended for servers with Docker)"
         read -p "Enable IP forwarding? (Y/n): " ENABLE_IP_FORWARD
         ENABLE_IP_FORWARD=${ENABLE_IP_FORWARD:-y}
+
+        # Systemd service for sysctl enforcement
+        echo ""
+        print_message "Install systemd service for sysctl enforcement?"
+        print_message "Creates disable-ipv6.service that runs 'sysctl -p' after network is online"
+        print_message "Ensures sysctl settings are always applied on boot"
+        read -p "Install sysctl enforcement service? (Y/n): " INSTALL_SYSCTL_SERVICE
+        INSTALL_SYSCTL_SERVICE=${INSTALL_SYSCTL_SERVICE:-y}
     else
         SYSCTL_MODE=""
         RUN_BBR_OPTIMIZER="n"
         ENABLE_IP_FORWARD="n"
+        INSTALL_SYSCTL_SERVICE="n"
         BBR_FORCE_IPV4="n"
         BBR_FULL_UPDATE="n"
         BBR_FIX_HOSTS="n"
@@ -1238,6 +1247,7 @@ else
     CONFIGURE_SYSCTL="y"
     SYSCTL_MODE="1"
     ENABLE_IP_FORWARD="n"
+    INSTALL_SYSCTL_SERVICE="y"
     CONFIGURE_RESOLVED="n"
     RESOLVED_DNS=""
     RESOLVED_STUB_LISTENER_OFF=""
@@ -1359,6 +1369,7 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "  sysctl optimization: YES (basic — static parameters)"
     fi
     print_message "  IP forwarding: $([ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ] && echo "YES" || echo "NO")"
+    print_message "  sysctl enforcement service: $([ "$INSTALL_SYSCTL_SERVICE" = "y" ] || [ "$INSTALL_SYSCTL_SERVICE" = "Y" ] && echo "YES" || echo "NO")"
 else
     print_message "  sysctl optimization: NO"
 fi
@@ -4115,6 +4126,28 @@ EOF
     print_message "Applying sysctl settings..."
     sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
 
+    # Install systemd service for sysctl enforcement on boot
+    if [ "$INSTALL_SYSCTL_SERVICE" = "y" ] || [ "$INSTALL_SYSCTL_SERVICE" = "Y" ]; then
+        print_message "Installing sysctl enforcement service (disable-ipv6.service)..."
+        cat > /etc/systemd/system/disable-ipv6.service << 'EOF'
+[Unit]
+Description=Apply sysctl settings
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/sysctl -p
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now disable-ipv6.service
+        print_message "sysctl enforcement service installed and enabled"
+    fi
+
     # Minimal DNS recovery: ensure resolv.conf has IPv4 DNS after IPv6 disable
     # Skip if systemd-resolved will be configured next (avoid creating conflicting drop-ins)
     if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
@@ -4607,6 +4640,9 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "  IP forwarding: ENABLED"
     else
         print_message "  IP forwarding: DISABLED"
+    fi
+    if [ "$INSTALL_SYSCTL_SERVICE" = "y" ] || [ "$INSTALL_SYSCTL_SERVICE" = "Y" ]; then
+        print_message "  sysctl enforcement service: INSTALLED (disable-ipv6.service)"
     fi
 else
     print_message "- sysctl: SKIPPED"
