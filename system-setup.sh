@@ -918,11 +918,73 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Optimize system parameters (sysctl.conf)?"
-    print_message "Includes: IPv6 disable, TCP syncookies, system limits"
+    print_message "Includes: IPv6 disable, network tuning, BBR congestion control"
     read -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
     CONFIGURE_SYSCTL=${CONFIGURE_SYSCTL:-y}
 
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
+        echo ""
+        print_message "Choose sysctl configuration mode:"
+        print_message "  1) Basic — static parameters (IPv6 disable, BBR, TCP/UDP tuning, security)"
+        print_message "  2) Full  — run Linux NetworkOptimizer (bbr.sh) with adaptive RAM-based profiles"
+        read -p "Select mode [1/2] (default: 1): " SYSCTL_MODE
+        SYSCTL_MODE=${SYSCTL_MODE:-1}
+
+        # Validate input
+        if [ "$SYSCTL_MODE" != "1" ] && [ "$SYSCTL_MODE" != "2" ]; then
+            print_warning "Invalid choice '$SYSCTL_MODE', using default: 1 (basic)"
+            SYSCTL_MODE="1"
+        fi
+
+        # Set RUN_BBR_OPTIMIZER based on mode for backward compatibility
+        if [ "$SYSCTL_MODE" = "2" ]; then
+            RUN_BBR_OPTIMIZER="y"
+        else
+            RUN_BBR_OPTIMIZER="n"
+        fi
+
+        # BBR optimizer sub-options (only for full mode)
+        if [ "$SYSCTL_MODE" = "2" ]; then
+            echo ""
+            print_message "Linux NetworkOptimizer (bbr.sh) options:"
+            print_message "(Network tuning via sysctl is always applied by BBR with adaptive RAM profiles)"
+            echo ""
+
+            # Force IPv4 for APT
+            print_message "1. Force IPv4 for APT (recommended for IPv6 connectivity issues)"
+            read -p "   Enable force_ipv4_apt? (Y/n): " BBR_FORCE_IPV4
+            BBR_FORCE_IPV4=${BBR_FORCE_IPV4:-y}
+
+            # Full system update
+            print_message "2. Full system update and upgrade (apt update && upgrade)"
+            read -p "   Enable full_update_upgrade? (Y/n): " BBR_FULL_UPDATE
+            BBR_FULL_UPDATE=${BBR_FULL_UPDATE:-y}
+
+            # Fix /etc/hosts
+            print_message "3. Fix /etc/hosts file (add hostname loopback entry 127.0.1.1)"
+            read -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
+            BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
+
+            # Fix DNS (skip if systemd-resolved is configured separately)
+            if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
+                print_message "4. Fix DNS — SKIPPED (systemd-resolved is configured separately)"
+                BBR_FIX_DNS="n"
+            else
+                print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
+                read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
+                BBR_FIX_DNS=${BBR_FIX_DNS:-y}
+            fi
+
+            echo ""
+            print_message "BBR adaptive network tuning + selected options will be applied after main setup"
+        else
+            BBR_FORCE_IPV4="n"
+            BBR_FULL_UPDATE="n"
+            BBR_FIX_HOSTS="n"
+            BBR_FIX_DNS="n"
+        fi
+
+        # IP forwarding (for both modes)
         echo ""
         print_message "Enable IP forwarding (net.ipv4.ip_forward = 1)?"
         print_message "Required for: Docker networks, NAT, VPN, routing between interfaces"
@@ -930,7 +992,13 @@ if [ "$INTERACTIVE" = true ]; then
         read -p "Enable IP forwarding? (Y/n): " ENABLE_IP_FORWARD
         ENABLE_IP_FORWARD=${ENABLE_IP_FORWARD:-y}
     else
+        SYSCTL_MODE=""
+        RUN_BBR_OPTIMIZER="n"
         ENABLE_IP_FORWARD="n"
+        BBR_FORCE_IPV4="n"
+        BBR_FULL_UPDATE="n"
+        BBR_FIX_HOSTS="n"
+        BBR_FIX_DNS="n"
     fi
 
     # Ask about systemd-resolved configuration
@@ -1132,59 +1200,6 @@ if [ "$INTERACTIVE" = true ]; then
         fi
     fi
 
-    # Ask about BBR Network Optimizer
-    echo ""
-    print_header "═══════════════════════════════════════════════"
-    print_header "   Advanced Network Optimization (BBR)"
-    print_header "═══════════════════════════════════════════════"
-    echo ""
-    print_message "Do you want to run the BBR Network Optimizer script?"
-    print_message "This will apply TCP BBR congestion control and other network optimizations"
-    print_message "Note: This script will run AFTER all other installations complete"
-    read -p "Run BBR Network Optimizer? (y/N): " RUN_BBR_OPTIMIZER
-    RUN_BBR_OPTIMIZER=${RUN_BBR_OPTIMIZER:-n}
-    
-    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
-        echo ""
-        print_message "BBR Network Optimizer Options:"
-        print_message "The following functions can be enabled/disabled:"
-        print_message "(Network tuning via sysctl is always applied by BBR with adaptive RAM profiles)"
-        echo ""
-
-        # Force IPv4 for APT
-        print_message "1. Force IPv4 for APT (recommended for IPv6 connectivity issues)"
-        read -p "   Enable force_ipv4_apt? (Y/n): " BBR_FORCE_IPV4
-        BBR_FORCE_IPV4=${BBR_FORCE_IPV4:-y}
-
-        # Full system update
-        print_message "2. Full system update and upgrade (apt update && upgrade)"
-        read -p "   Enable full_update_upgrade? (Y/n): " BBR_FULL_UPDATE
-        BBR_FULL_UPDATE=${BBR_FULL_UPDATE:-y}
-
-        # Fix /etc/hosts
-        print_message "3. Fix /etc/hosts file (add hostname loopback entry 127.0.1.1)"
-        read -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
-        BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
-
-        # Fix DNS (skip if systemd-resolved is configured separately)
-        if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
-            print_message "4. Fix DNS — SKIPPED (systemd-resolved is configured separately)"
-            BBR_FIX_DNS="n"
-        else
-            print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
-            read -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
-            BBR_FIX_DNS=${BBR_FIX_DNS:-y}
-        fi
-
-        echo ""
-        print_message "BBR adaptive network tuning + selected options will be applied after main setup"
-    else
-        BBR_FORCE_IPV4="n"
-        BBR_FULL_UPDATE="n"
-        BBR_FIX_HOSTS="n"
-        BBR_FIX_DNS="n"
-    fi
-    
 else
     # Default settings for non-interactive mode
     SET_ROOT_PASSWORD="n"
@@ -1221,6 +1236,7 @@ else
     UFW_RULES_VERSION="6"
     UFW_CUSTOM_RULES_PASSWORD=""
     CONFIGURE_SYSCTL="y"
+    SYSCTL_MODE="1"
     ENABLE_IP_FORWARD="n"
     CONFIGURE_RESOLVED="n"
     RESOLVED_DNS=""
@@ -1337,13 +1353,12 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     fi
 fi
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
-        print_message "  sysctl optimization: YES (IPv6/security only — network tuning via BBR)"
+    if [ "$SYSCTL_MODE" = "2" ]; then
+        print_message "  sysctl optimization: YES (full — Linux NetworkOptimizer / bbr.sh)"
     else
-        print_message "  sysctl optimization: YES (full — IPv6/security + static network tuning)"
+        print_message "  sysctl optimization: YES (basic — static parameters)"
     fi
     print_message "  IP forwarding: $([ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ] && echo "YES" || echo "NO")"
-    print_message "  rp_filter (reverse path): YES (always enabled)"
 else
     print_message "  sysctl optimization: NO"
 fi
@@ -1391,8 +1406,8 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
 else
     print_message "  Swap Configuration: NO"
 fi
-if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
-    print_message "  BBR Network Optimizer: YES"
+if [ "$SYSCTL_MODE" = "2" ]; then
+    print_message "  Linux NetworkOptimizer (bbr.sh): YES"
     print_message "    - Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
     print_message "    - Full Update: $([ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ] && echo "YES" || echo "NO")"
     print_message "    - Fix /etc/hosts: $([ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ] && echo "YES" || echo "NO")"
@@ -1401,8 +1416,6 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     else
         print_message "    - Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
     fi
-else
-    print_message "  BBR Network Optimizer: NO"
 fi
 print_header "═══════════════════════════════════════════════"
 echo ""
@@ -4034,53 +4047,22 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         touch /etc/sysctl.conf.new
     fi
 
-    # Responsibility split:
-    # - IPv6 disable + security hardening + system limits: always written here
-    # - Network tuning (BBR, buffers, qdisc, TCP params): written here ONLY if
-    #   BBR optimizer is disabled; otherwise bbr.sh handles it with adaptive
-    #   RAM-based profiles (intelligent_settings) which is superior to static values
-
-    # === Part 1: IPv6 disable + security hardening (always) ===
-    cat >> /etc/sysctl.conf.new << 'EOF'
+    # Mode 1 (basic): static parameters written directly to sysctl.conf
+    # Mode 2 (full): bbr.sh handles all sysctl tuning (no params written here)
+    if [ "$SYSCTL_MODE" = "2" ]; then
+        # === Full mode: bbr.sh manages all network/sysctl parameters ===
+        print_message "Skipping sysctl params — all tuning handled by Linux NetworkOptimizer (bbr.sh)"
+    else
+        # === Basic mode: full static parameters ===
+        print_message "Applying basic sysctl configuration (static parameters)"
+        cat >> /etc/sysctl.conf.new << 'EOF'
 
 # IPv6 Disable
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 
-# Security Hardening
-net.ipv4.tcp_syncookies = 1
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
-
-# System Limits
-fs.inotify.max_user_instances = 8192
-net.ipv4.ip_local_port_range = 1024 45000
-EOF
-
-    # === Part 1.1: IP forwarding (optional, based on user choice) ===
-    if [ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ]; then
-        cat >> /etc/sysctl.conf.new << 'EOF'
-
-# IP Forwarding (Docker, NAT, VPN, routing)
-net.ipv4.ip_forward = 1
-EOF
-        print_message "IP forwarding enabled (net.ipv4.ip_forward = 1)"
-    else
-        print_message "IP forwarding not enabled (skipped by user)"
-    fi
-
-    # === Part 2: Network tuning (only if BBR optimizer is NOT enabled) ===
-    # When BBR optimizer is enabled, it applies intelligent_settings() which
-    # auto-detects RAM and applies optimal values (low/mid/high profiles)
-    # with adaptive qdisc (fq_codel/cake), buffer sizes, and VM tuning
-    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
-        print_message "Network tuning will be handled by BBR optimizer (adaptive profiles)"
-    else
-        print_message "Applying static network tuning (BBR optimizer not selected)"
-        cat >> /etc/sysctl.conf.new << 'EOF'
-
-# Network Tuning (static fallback — BBR optimizer not enabled)
+# Network Tuning (BBR + TCP/UDP optimization)
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 net.core.rmem_max = 67108864
@@ -4088,6 +4070,11 @@ net.core.wmem_max = 67108864
 net.core.wmem_default = 2097152
 net.core.netdev_max_backlog = 10240
 net.core.somaxconn = 8192
+
+# Security
+net.ipv4.tcp_syncookies = 1
+
+# TCP Optimization
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_keepalive_time = 1200
@@ -4102,11 +4089,27 @@ net.ipv4.tcp_rmem = 16384 262144 8388608
 net.ipv4.tcp_wmem = 32768 524288 16777216
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_slow_start_after_idle = 0
+
+# System Limits
+fs.inotify.max_user_instances = 8192
+net.ipv4.ip_local_port_range = 1024 45000
 EOF
     fi
 
+    # === IP forwarding (appended separately to not break existing entries) ===
+    if [ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ]; then
+        cat >> /etc/sysctl.conf.new << 'EOF'
+
+# IP Forwarding (Docker, NAT, VPN, routing)
+net.ipv4.ip_forward = 1
+EOF
+        print_message "IP forwarding enabled (net.ipv4.ip_forward = 1)"
+    else
+        print_message "IP forwarding not enabled (skipped by user)"
+    fi
+
     mv /etc/sysctl.conf.new /etc/sysctl.conf
-    print_message "sysctl.conf configured"
+    print_message "sysctl.conf configured (mode: $([ "$SYSCTL_MODE" = "2" ] && echo "full/BBR" || echo "basic/static"))"
 
     # Apply sysctl settings (|| true to prevent set -e exit on unsupported params)
     print_message "Applying sysctl settings..."
@@ -4595,17 +4598,16 @@ else
 fi
 
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-    if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
-        print_message "- sysctl.conf: IPv6 disable + security (network tuning via BBR)"
+    if [ "$SYSCTL_MODE" = "2" ]; then
+        print_message "- sysctl.conf: Full optimization (Linux NetworkOptimizer / bbr.sh)"
     else
-        print_message "- sysctl.conf: Full optimization (IPv6/security + static network tuning)"
+        print_message "- sysctl.conf: Basic optimization (static parameters)"
     fi
     if [ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ]; then
         print_message "  IP forwarding: ENABLED"
     else
         print_message "  IP forwarding: DISABLED"
     fi
-    print_message "  rp_filter (reverse path filtering): ENABLED"
 else
     print_message "- sysctl: SKIPPED"
 fi
@@ -4810,14 +4812,12 @@ else
     print_message "- Swap Configuration: Not configured"
 fi
 
-if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
-    print_message "- BBR Network Optimizer: Executed"
+if [ "$SYSCTL_MODE" = "2" ]; then
+    print_message "- Linux NetworkOptimizer (bbr.sh): Executed"
     print_message "  Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
     print_message "  Full Update: $([ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ] && echo "YES" || echo "NO")"
     print_message "  Fix /etc/hosts: $([ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ] && echo "YES" || echo "NO")"
     print_message "  Fix DNS: $([ "$BBR_FIX_DNS" = "y" ] || [ "$BBR_FIX_DNS" = "Y" ] && echo "YES" || echo "NO")"
-else
-    print_message "- BBR Network Optimizer: Not executed"
 fi
 
 print_message ""
