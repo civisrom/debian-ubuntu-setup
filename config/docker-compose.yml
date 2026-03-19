@@ -6,10 +6,18 @@ services:
     volumes:
       - ./data:/root
     network_mode: "host"
-
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - hbbr
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   hbbr:
     container_name: hbbr
@@ -18,4 +26,13 @@ services:
     volumes:
       - ./data:/root
     network_mode: "host"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
