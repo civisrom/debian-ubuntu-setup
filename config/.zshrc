@@ -74,7 +74,7 @@ ZSH_THEME="fletcherm"
 # Custom plugins may be added to $ZSH_CUSTOM/plugins/
 # Example format: plugins=(rails git textmate ruby lighthouse)
 # Add wisely, as too many plugins slow down shell startup.
-plugins=(git zsh-autosuggestions dirhistory history history-substring-search docker docker-compose zsh-syntax-highlighting)
+plugins=(git zsh-autosuggestions dirhistory history history-substring-search docker docker-compose zsh-syntax-highlighting sudo extract colored-man-pages)
 
 source $ZSH/oh-my-zsh.sh
 
@@ -155,98 +155,98 @@ export VISUAL=nano
 # colored-man-pages                 # цветные man-страницы для удобного чтения
 
 # --- Навигация и файлы -------------------------------------------------------
-# alias ..='cd ..'                  # быстрый подъём на уровень вверх
-# alias ...='cd ../..'              # подъём на два уровня вверх
-# alias ....='cd ../../..'          # подъём на три уровня вверх
-# alias mkdir='mkdir -pv'           # создавать вложенные директории + показывать
-# alias cp='cp -iv'                 # подтверждение перед перезаписью при копировании
-# alias mv='mv -iv'                 # подтверждение перед перезаписью при перемещении
-# alias rm='rm -iv'                 # подтверждение перед удалением каждого файла
+alias ..='cd ..'                  # быстрый подъём на уровень вверх
+alias ...='cd ../..'              # подъём на два уровня вверх
+alias ....='cd ../../..'          # подъём на три уровня вверх
+alias mkdir='mkdir -pv'           # создавать вложенные директории + показывать
+alias cp='cp -iv'                 # подтверждение перед перезаписью при копировании
+alias mv='mv -iv'                 # подтверждение перед перезаписью при перемещении
+alias rm='rm -iv'                 # подтверждение перед удалением каждого файла
 
 # --- Полезные функции --------------------------------------------------------
 # # Создать директорию и сразу перейти в неё: mkcd my-new-project
-# mkcd() { mkdir -p "$1" && cd "$1" }
+mkcd() { mkdir -p "$1" && cd "$1" }
 #
 # # Быстрый бэкап файла с датой: backup /etc/nftables.conf
 # backup() { cp "$1" "$1.backup.$(date +%Y%m%d-%H%M%S)~" }
 #
 # # Универсальная распаковка архивов: extract archive.tar.gz
-# extract() {
-#     if [[ -f "$1" ]]; then
-#         case "$1" in
-#             *.tar.bz2) tar xjf "$1"    ;;
-#             *.tar.gz)  tar xzf "$1"    ;;
-#             *.tar.xz)  tar xJf "$1"    ;;
-#             *.bz2)     bunzip2 "$1"    ;;
-#             *.gz)       gunzip "$1"     ;;
-#             *.tar)     tar xf "$1"     ;;
-#             *.tbz2)    tar xjf "$1"    ;;
-#             *.tgz)     tar xzf "$1"    ;;
-#             *.zip)     unzip "$1"      ;;
-#             *.7z)      7z x "$1"       ;;
-#             *.xz)      xz -d "$1"     ;;
-#             *)         echo "'$1' — неизвестный формат архива" ;;
-#         esac
-#     else
-#         echo "'$1' — файл не найден"
-#     fi
-# }
+extract() {
+    if [[ -f "$1" ]]; then
+        case "$1" in
+            *.tar.bz2) tar xjf "$1"    ;;
+            *.tar.gz)  tar xzf "$1"    ;;
+            *.tar.xz)  tar xJf "$1"    ;;
+            *.bz2)     bunzip2 "$1"    ;;
+            *.gz)       gunzip "$1"     ;;
+            *.tar)     tar xf "$1"     ;;
+            *.tbz2)    tar xjf "$1"    ;;
+            *.tgz)     tar xzf "$1"    ;;
+            *.zip)     unzip "$1"      ;;
+            *.7z)      7z x "$1"       ;;
+            *.xz)      xz -d "$1"     ;;
+            *)         echo "'$1' — неизвестный формат архива" ;;
+        esac
+    else
+        echo "'$1' — файл не найден"
+    fi
+}
 
 # --- Сеть и диагностика ------------------------------------------------------
-# alias ipa='ip a'                              # полный вывод всех интерфейсов (ip addr show)
-# alias ping='ping -c 5'                        # пинг 5 пакетов (не бесконечно)
-# alias myip='curl -s ifconfig.me'              # показать внешний IP-адрес
+alias ipa='ip a'                              # полный вывод всех интерфейсов (ip addr show)
+alias ping='ping -c 5'                        # пинг 5 пакетов (не бесконечно)
+alias myip='curl -s ifconfig.me'              # показать внешний IP-адрес
 # alias localip="ip -4 addr show | grep inet | grep -v '127.0.0.1' | awk '{print \$2}'"  # все локальные IPv4 адреса
-# alias ips="ip -br addr show"                  # краткий вывод всех интерфейсов и их IP
-# alias ip4="ip -4 -br addr show"               # только IPv4 адреса (кратко)
-# alias ip6="ip -6 -br addr show"               # только IPv6 адреса (кратко)
+alias ips="ip -br addr show"                  # краткий вывод всех интерфейсов и их IP
+alias ip4="ip -4 -br addr show"               # только IPv4 адреса (кратко)
+alias ip6="ip -6 -br addr show"               # только IPv6 адреса (кратко)
 # alias gateway="ip route | grep default"       # показать шлюз по умолчанию
-# alias routes="ip route show"                  # таблица маршрутизации
-# alias dns="cat /etc/resolv.conf"              # текущие DNS-серверы
-# alias listen='ss -tulnp | grep LISTEN'        # только слушающие порты (TCP + UDP)
-# alias tcp-listen='ss -tlnp'                   # только TCP слушающие порты с PID процесса
-# alias udp-listen='ss -ulnp'                   # только UDP слушающие порты с PID процесса
-# alias connections='ss -tunap'                 # все активные TCP/UDP соединения с PID
-# alias established='ss -tunap state established'  # только установленные соединения
-# alias tcp-stats='ss -s'                       # статистика сокетов (всего/TCP/UDP/RAW)
-# alias port-count='ss -tunap | awk "{print \$1}" | sort | uniq -c | sort -rn'  # кол-во соединений по типу
+alias routes="ip route show"                  # таблица маршрутизации
+alias dns="cat /etc/resolv.conf"              # текущие DNS-серверы
+alias listen='ss -tulnp | grep LISTEN'        # только слушающие порты (TCP + UDP)
+alias tcp-listen='ss -tlnp'                   # только TCP слушающие порты с PID процесса
+alias udp-listen='ss -ulnp'                   # только UDP слушающие порты с PID процесса
+alias connections='ss -tunap'                 # все активные TCP/UDP соединения с PID
+alias established='ss -tunap state established'  # только установленные соединения
+alias tcp-stats='ss -s'                       # статистика сокетов (всего/TCP/UDP/RAW)
+alias port-count='ss -tunap | awk "{print \$1}" | sort | uniq -c | sort -rn'  # кол-во соединений по типу
 # alias arp='ip neighbour show'                 # ARP-таблица (MAC-адреса соседей)
-# alias traffic='cat /proc/net/dev'             # статистика трафика по интерфейсам
+alias traffic='cat /proc/net/dev'             # статистика трафика по интерфейсам
 # alias mtu="ip link show | grep mtu"           # MTU всех интерфейсов
 
 # --- Systemd ------------------------------------------------------------------
 # alias sc='sudo systemctl'                     # короткий вызов systemctl
-# alias scs='sudo systemctl status'             # статус сервиса: scs nginx
-# alias scr='sudo systemctl restart'            # перезапуск сервиса: scr nginx
-# alias scstop='sudo systemctl stop'            # остановить сервис: scstop nginx
-# alias scstart='sudo systemctl start'          # запустить сервис: scstart nginx
-# alias sce='sudo systemctl enable'             # включить автозапуск: sce nginx
-# alias sced='sudo systemctl enable --now'      # включить автозапуск и сразу запустить
-# alias scd='sudo systemctl disable'            # отключить автозапуск: scd nginx
-# alias scdd='sudo systemctl disable --now'     # отключить автозапуск и сразу остановить
-# alias scmask='sudo systemctl mask'            # полностью заблокировать сервис (нельзя запустить)
-# alias scunmask='sudo systemctl unmask'        # разблокировать замаскированный сервис
+alias scs='sudo systemctl status'             # статус сервиса: scs nginx
+alias scr='sudo systemctl restart'            # перезапуск сервиса: scr nginx
+alias scstop='sudo systemctl stop'            # остановить сервис: scstop nginx
+alias scstart='sudo systemctl start'          # запустить сервис: scstart nginx
+alias sce='sudo systemctl enable'             # включить автозапуск: sce nginx
+alias sced='sudo systemctl enable --now'      # включить автозапуск и сразу запустить
+alias scd='sudo systemctl disable'            # отключить автозапуск: scd nginx
+alias scdd='sudo systemctl disable --now'     # отключить автозапуск и сразу остановить
+alias scmask='sudo systemctl mask'            # полностью заблокировать сервис (нельзя запустить)
+alias scunmask='sudo systemctl unmask'        # разблокировать замаскированный сервис
 # alias screload='sudo systemctl daemon-reload' # перечитать все unit-файлы после изменений
-# alias scl='sudo systemctl list-units --type=service --state=running'   # запущенные сервисы
-# alias scf='systemctl --failed'                # все упавшие юниты (сервисы, таймеры и т.д.)
-# alias scfailed='systemctl --failed --type=service'  # только упавшие сервисы
+alias scl='sudo systemctl list-units --type=service --state=running'   # запущенные сервисы
+alias scf='systemctl --failed'                # все упавшие юниты (сервисы, таймеры и т.д.)
+alias scfailed='systemctl --failed --type=service'  # только упавшие сервисы
 # alias sctimers='systemctl list-timers --all'  # все таймеры (аналог cron в systemd)
-# alias scenabled='systemctl list-unit-files --state=enabled'   # сервисы с автозапуском
+alias scenabled='systemctl list-unit-files --state=enabled'   # сервисы с автозапуском
 # alias scdisabled='systemctl list-unit-files --state=disabled' # сервисы без автозапуска
 # alias sccat='systemctl cat'                   # показать содержимое unit-файла: sccat nginx
 # alias scedit='sudo systemctl edit'            # редактировать override для сервиса: scedit nginx
 # alias scdeps='systemctl list-dependencies'    # дерево зависимостей: scdeps nginx
 # alias scboot='systemd-analyze blame'          # время загрузки каждого сервиса (от долгого к быстрому)
-# alias scboottime='systemd-analyze time'       # общее время загрузки системы
-# alias jlog='sudo journalctl -xe'              # последние логи с контекстом и пояснениями
-# alias jfu='sudo journalctl -fu'               # follow лог сервиса: jfu nginx
-# alias jboot='sudo journalctl -b'              # логи с момента последней загрузки
-# alias jprev='sudo journalctl -b -1'           # логи предыдущей загрузки (до ребута)
-# alias jyesterday='sudo journalctl --since yesterday'  # логи за вчера
-# alias jerr='sudo journalctl -p err -b'        # только ошибки с последней загрузки
-# alias jwarn='sudo journalctl -p warning -b'   # предупреждения и ошибки с последней загрузки
-# alias jdisk='sudo journalctl --disk-usage'    # сколько места занимают логи journald
-# alias jclean='sudo journalctl --vacuum-time=7d'  # удалить логи старше 7 дней
+alias scboottime='systemd-analyze time'       # общее время загрузки системы
+alias jlog='sudo journalctl -xe'              # последние логи с контекстом и пояснениями
+alias jfu='sudo journalctl -fu'               # follow лог сервиса: jfu nginx
+alias jboot='sudo journalctl -b'              # логи с момента последней загрузки
+alias jprev='sudo journalctl -b -1'           # логи предыдущей загрузки (до ребута)
+alias jyesterday='sudo journalctl --since yesterday'  # логи за вчера
+alias jerr='sudo journalctl -p err -b'        # только ошибки с последней загрузки
+alias jwarn='sudo journalctl -p warning -b'   # предупреждения и ошибки с последней загрузки
+alias jdisk='sudo journalctl --disk-usage'    # сколько места занимают логи journald
+alias jclean='sudo journalctl --vacuum-time=7d'  # удалить логи старше 7 дней
 
 # --- Docker -------------------------------------------------------------------
 # alias dps='docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'  # компактный список контейнеров
@@ -278,7 +278,7 @@ export VISUAL=nano
 # alias ch755='chmod 755'                       # rwxr-xr-x  владелец всё, остальные читают/выполняют (скрипты)
 # alias ch700='chmod 700'                       # rwx------  только владелец всё (приватные скрипты)
 # alias ch400='chmod 400'                       # r--------  только владелец читает (SSH ключи, сертификаты)
-# alias chx='chmod +x'                          # добавить право на выполнение: chx script.sh
+alias chx='chmod +x'                          # добавить право на выполнение: chx script.sh
 #
 # # Директория — установить права только на саму папку:
 # alias chd755='chmod 755'                      # rwxr-xr-x  стандартные права на директорию
@@ -306,7 +306,7 @@ export VISUAL=nano
 # alias chownroot='sudo chown -R root:root'          # передать root: chownroot /etc/myapp
 
 # --- Создание директорий и структур ------------------------------------------
-# alias mkdir='mkdir -pv'                       # всегда создавать вложенные + показывать
+alias mkdir='mkdir -pv'                       # всегда создавать вложенные + показывать
 #
 # # Создать директорию и перейти в неё: mkcd my-project
 # # mkcd() { mkdir -p "$1" && cd "$1" }        # (уже есть выше в "Полезные функции")
@@ -342,10 +342,10 @@ export VISUAL=nano
 # alias ren='mv -iv'                            # переименование с подтверждением
 #
 # # Переместить в директорию (создать если не существует): mvto /path file1 file2
-# mvto() { mkdir -p "$1" && shift && mv -iv "$@" "$1" }
+mvto() { mkdir -p "$1" && shift && mv -iv "$@" "$1" }
 #
 # # Копировать в директорию (создать если не существует): cpto /path file1 file2
-# cpto() { mkdir -p "$1" && shift && cp -iv "$@" "$1" }
+cpto() { mkdir -p "$1" && shift && cp -iv "$@" "$1" }
 #
 # # Синхронизация директорий (лучше чем cp для больших объёмов):
 # alias rsync-copy='rsync -avh --progress'      # копировать с прогрессом: rsync-copy src/ dst/
@@ -353,14 +353,14 @@ export VISUAL=nano
 # alias rsync-mirror='rsync -avh --delete'       # зеркалирование (удалит лишнее в dst)
 
 # --- Поиск файлов и содержимого -----------------------------------------------
-# alias ff='find . -type f -name'               # найти файл по имени: ff "*.conf"
-# alias fd='find . -type d -name'               # найти директорию по имени: fd "logs"
-# alias fsize='find . -type f -size'            # найти по размеру: fsize +100M
+alias ff='find . -type f -name'               # найти файл по имени: ff "*.conf"
+alias fd='find . -type d -name'               # найти директорию по имени: fd "logs"
+alias fsize='find . -type f -size'            # найти по размеру: fsize +100M
 # alias fbig='find . -type f -exec ls -lS {} + | sort -k5 -rn | head -20'  # 20 самых больших файлов
 # alias fempty='find . -type f -empty'          # пустые файлы
 # alias dempty='find . -type d -empty'          # пустые директории
-# alias fmod='find . -type f -mtime'            # найти по дате изменения: fmod -1 (за сутки)
-# alias fgrep='grep -rnI --color=auto'          # рекурсивный поиск текста: fgrep "TODO" .
+alias fmod='find . -type f -mtime'            # найти по дате изменения: fmod -1 (за сутки)
+alias fgrep='grep -rnI --color=auto'          # рекурсивный поиск текста: fgrep "TODO" .
 
 # --- Информация о системе ----------------------------------------------------
 # alias top10cpu='ps aux --sort=-%cpu | head -11'   # ТОП-10 процессов по CPU
@@ -376,10 +376,10 @@ export VISUAL=nano
 # alias wholistens='sudo lsof -i -P -n | grep LISTEN'  # какие процессы слушают порты
 
 # --- Безопасность / nftables (дополнение) ------------------------------------
-# alias nft-monitor='sudo nft monitor'                          # мониторинг изменений правил в реальном времени
-# alias nft-handles='sudo nft list ruleset -a'                  # правила с хендлами (для удаления конкретного правила)
+alias nft-monitor='sudo nft monitor'                          # мониторинг изменений правил в реальном времени
+alias nft-handles='sudo nft list ruleset -a'                  # правила с хендлами (для удаления конкретного правила)
 # alias nft-json='sudo nft -j list ruleset | python3 -m json.tool'  # правила в формате JSON (удобно для парсинга)
-# alias nft-counters='sudo nft list ruleset | grep -E "counter|chain|table"'  # счётчики пакетов по правилам
+alias nft-counters='sudo nft list ruleset | grep -E "counter|chain|table"'  # счётчики пакетов по правилам
 # alias fail2ban-status='sudo fail2ban-client status'           # общий статус fail2ban
 # alias fail2ban-ssh='sudo fail2ban-client status sshd'         # заблокированные IP для SSH
 # alias banned='sudo fail2ban-client banned'                    # все заблокированные IP во всех jail
