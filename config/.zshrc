@@ -218,14 +218,35 @@ export VISUAL=nano
 # alias sc='sudo systemctl'                     # короткий вызов systemctl
 # alias scs='sudo systemctl status'             # статус сервиса: scs nginx
 # alias scr='sudo systemctl restart'            # перезапуск сервиса: scr nginx
+# alias scstop='sudo systemctl stop'            # остановить сервис: scstop nginx
+# alias scstart='sudo systemctl start'          # запустить сервис: scstart nginx
 # alias sce='sudo systemctl enable'             # включить автозапуск: sce nginx
+# alias sced='sudo systemctl enable --now'      # включить автозапуск и сразу запустить
 # alias scd='sudo systemctl disable'            # отключить автозапуск: scd nginx
-# alias scl='sudo systemctl list-units --type=service --state=running'  # список запущенных сервисов
-# alias scf='sudo systemctl list-units --type=service --state=failed'   # список упавших сервисов
+# alias scdd='sudo systemctl disable --now'     # отключить автозапуск и сразу остановить
+# alias scmask='sudo systemctl mask'            # полностью заблокировать сервис (нельзя запустить)
+# alias scunmask='sudo systemctl unmask'        # разблокировать замаскированный сервис
+# alias screload='sudo systemctl daemon-reload' # перечитать все unit-файлы после изменений
+# alias scl='sudo systemctl list-units --type=service --state=running'   # запущенные сервисы
+# alias scf='systemctl --failed'                # все упавшие юниты (сервисы, таймеры и т.д.)
+# alias scfailed='systemctl --failed --type=service'  # только упавшие сервисы
+# alias sctimers='systemctl list-timers --all'  # все таймеры (аналог cron в systemd)
+# alias scenabled='systemctl list-unit-files --state=enabled'   # сервисы с автозапуском
+# alias scdisabled='systemctl list-unit-files --state=disabled' # сервисы без автозапуска
+# alias sccat='systemctl cat'                   # показать содержимое unit-файла: sccat nginx
+# alias scedit='sudo systemctl edit'            # редактировать override для сервиса: scedit nginx
+# alias scdeps='systemctl list-dependencies'    # дерево зависимостей: scdeps nginx
+# alias scboot='systemd-analyze blame'          # время загрузки каждого сервиса (от долгого к быстрому)
+# alias scboottime='systemd-analyze time'       # общее время загрузки системы
 # alias jlog='sudo journalctl -xe'              # последние логи с контекстом и пояснениями
 # alias jfu='sudo journalctl -fu'               # follow лог сервиса: jfu nginx
 # alias jboot='sudo journalctl -b'              # логи с момента последней загрузки
+# alias jprev='sudo journalctl -b -1'           # логи предыдущей загрузки (до ребута)
 # alias jyesterday='sudo journalctl --since yesterday'  # логи за вчера
+# alias jerr='sudo journalctl -p err -b'        # только ошибки с последней загрузки
+# alias jwarn='sudo journalctl -p warning -b'   # предупреждения и ошибки с последней загрузки
+# alias jdisk='sudo journalctl --disk-usage'    # сколько места занимают логи journald
+# alias jclean='sudo journalctl --vacuum-time=7d'  # удалить логи старше 7 дней
 
 # --- Docker -------------------------------------------------------------------
 # alias dps='docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'  # компактный список контейнеров
@@ -250,6 +271,110 @@ export VISUAL=nano
 # # Список Docker-сетей с подсетями: docker-subnets
 # alias docker-subnets='docker network ls -q | xargs -I{} docker network inspect {} --format "{{.Name}}: {{range .IPAM.Config}}{{.Subnet}}{{end}}"'
 
+# --- Права доступа (chmod/chown) ---------------------------------------------
+# # Файлы — установить права на один файл:
+# alias ch644='chmod 644'                       # rw-r--r--  владелец читает/пишет, остальные только читают
+# alias ch600='chmod 600'                       # rw-------  только владелец читает/пишет (приватные файлы, ключи)
+# alias ch755='chmod 755'                       # rwxr-xr-x  владелец всё, остальные читают/выполняют (скрипты)
+# alias ch700='chmod 700'                       # rwx------  только владелец всё (приватные скрипты)
+# alias ch400='chmod 400'                       # r--------  только владелец читает (SSH ключи, сертификаты)
+# alias chx='chmod +x'                          # добавить право на выполнение: chx script.sh
+#
+# # Директория — установить права только на саму папку:
+# alias chd755='chmod 755'                      # rwxr-xr-x  стандартные права на директорию
+# alias chd700='chmod 700'                      # rwx------  приватная директория (только владелец)
+# alias chd750='chmod 750'                      # rwxr-x---  владелец всё, группа читает, остальные нет
+#
+# # Рекурсивно — папка со ВСЕМ содержимым (файлы + подпапки):
+# alias chr755='chmod -R 755'                   # rwxr-xr-x  рекурсивно на всё содержимое
+# alias chr700='chmod -R 700'                   # rwx------  рекурсивно приватно
+# alias chr644='chmod -R 644'                   # rw-r--r--  рекурсивно только чтение для остальных
+#
+# # Раздельно — разные права для папок и файлов внутри дерева:
+# # chmod-dirs 755 /path  — установить 755 только на ВСЕ подпапки (файлы не трогать)
+# chmod-dirs() { find "$2" -type d -exec chmod "$1" {} + }
+# # chmod-files 644 /path — установить 644 только на ВСЕ файлы (папки не трогать)
+# chmod-files() { find "$2" -type f -exec chmod "$1" {} + }
+# # chmod-web /var/www    — типичные права для веб-сервера (755 папки, 644 файлы)
+# chmod-web() { find "$1" -type d -exec chmod 755 {} + && find "$1" -type f -exec chmod 644 {} + }
+# # chmod-private /path   — приватные права (700 папки, 600 файлы)
+# chmod-private() { find "$1" -type d -exec chmod 700 {} + && find "$1" -type f -exec chmod 600 {} + }
+#
+# # Смена владельца:
+# alias chownme='sudo chown -R $(whoami):$(whoami)'  # сделать себя владельцем: chownme /path
+# alias chownwww='sudo chown -R www-data:www-data'   # передать веб-серверу: chownwww /var/www
+# alias chownroot='sudo chown -R root:root'          # передать root: chownroot /etc/myapp
+
+# --- Создание директорий и структур ------------------------------------------
+# alias mkdir='mkdir -pv'                       # всегда создавать вложенные + показывать
+#
+# # Создать директорию и перейти в неё: mkcd my-project
+# # mkcd() { mkdir -p "$1" && cd "$1" }        # (уже есть выше в "Полезные функции")
+#
+# # Создать вложенную структуру каталогов одной командой:
+# # mktree project/{src,docs,tests,config}
+# alias mktree='mkdir -pv'                      # то же что mkdir -pv, для наглядности
+#
+# # Создать структуру веб-проекта: mkweb mysite
+# mkweb() { mkdir -pv "$1"/{css,js,img,fonts} && touch "$1"/index.html }
+#
+# # Создать структуру Go-проекта: mkgo myapp
+# mkgo() { mkdir -pv "$1"/{cmd/"$1",internal,pkg,api,configs,scripts,test} }
+#
+# # Создать временную директорию и перейти в неё: mktmp
+# alias mktmp='cd $(mktemp -d)'
+
+# --- Копирование, перемещение и переименование --------------------------------
+# # Копировать файл с новым именем: cpn file.conf file.conf.new
+# alias cpn='cp -iv'                            # копия с подтверждением (интерактивно)
+#
+# # Копировать директорию целиком: cpdir /src /dst
+# alias cpdir='cp -riv'                         # рекурсивное копирование с подтверждением
+#
+# # Копировать файл с сохранением прав и времени (для бэкапов):
+# alias cpp='cp -av'                            # archive mode: права, владелец, симлинки
+#
+# # Массовое переименование — переименовать расширение файлов:
+# # rename-ext txt md       — переименовать все *.txt в *.md в текущей папке
+# rename-ext() { for f in *."$1"; do mv -v "$f" "${f%.$1}.$2"; done }
+#
+# # Переименовать файл/папку (по сути mv, но с подтверждением):
+# alias ren='mv -iv'                            # переименование с подтверждением
+#
+# # Переместить в директорию (создать если не существует): mvto /path file1 file2
+# mvto() { mkdir -p "$1" && shift && mv -iv "$@" "$1" }
+#
+# # Копировать в директорию (создать если не существует): cpto /path file1 file2
+# cpto() { mkdir -p "$1" && shift && cp -iv "$@" "$1" }
+#
+# # Синхронизация директорий (лучше чем cp для больших объёмов):
+# alias rsync-copy='rsync -avh --progress'      # копировать с прогрессом: rsync-copy src/ dst/
+# alias rsync-move='rsync -avh --progress --remove-source-files'  # переместить с прогрессом
+# alias rsync-mirror='rsync -avh --delete'       # зеркалирование (удалит лишнее в dst)
+
+# --- Поиск файлов и содержимого -----------------------------------------------
+# alias ff='find . -type f -name'               # найти файл по имени: ff "*.conf"
+# alias fd='find . -type d -name'               # найти директорию по имени: fd "logs"
+# alias fsize='find . -type f -size'            # найти по размеру: fsize +100M
+# alias fbig='find . -type f -exec ls -lS {} + | sort -k5 -rn | head -20'  # 20 самых больших файлов
+# alias fempty='find . -type f -empty'          # пустые файлы
+# alias dempty='find . -type d -empty'          # пустые директории
+# alias fmod='find . -type f -mtime'            # найти по дате изменения: fmod -1 (за сутки)
+# alias fgrep='grep -rnI --color=auto'          # рекурсивный поиск текста: fgrep "TODO" .
+
+# --- Информация о системе ----------------------------------------------------
+# alias top10cpu='ps aux --sort=-%cpu | head -11'   # ТОП-10 процессов по CPU
+# alias top10mem='ps aux --sort=-%mem | head -11'   # ТОП-10 процессов по RAM
+# alias psg='ps aux | grep -v grep | grep -i'      # найти процесс: psg nginx
+# alias duh='du -h --max-depth=1 | sort -hr'       # размер подпапок (сортировка по убыванию)
+# alias duf='du -sh *'                              # размер каждого элемента в текущей папке
+# alias diskfree='df -h | grep -v tmpfs | grep -v loop'  # диски без tmpfs и loop
+# alias uptime='uptime -p'                          # аптайм в человекочитаемом формате
+# alias loadavg='cat /proc/loadavg'                 # средняя загрузка системы
+# alias meminfo='cat /proc/meminfo | head -5'       # основная информация о RAM
+# alias cpuinfo='lscpu | grep -E "Model name|CPU\(s\)|Thread|Core"'  # основная информация о CPU
+# alias wholistens='sudo lsof -i -P -n | grep LISTEN'  # какие процессы слушают порты
+
 # --- Безопасность / nftables (дополнение) ------------------------------------
 # alias nft-monitor='sudo nft monitor'                          # мониторинг изменений правил в реальном времени
 # alias nft-handles='sudo nft list ruleset -a'                  # правила с хендлами (для удаления конкретного правила)
@@ -258,6 +383,23 @@ export VISUAL=nano
 # alias fail2ban-status='sudo fail2ban-client status'           # общий статус fail2ban
 # alias fail2ban-ssh='sudo fail2ban-client status sshd'         # заблокированные IP для SSH
 # alias banned='sudo fail2ban-client banned'                    # все заблокированные IP во всех jail
+
+# --- Автодополнение алиасов в zsh ---------------------------------------------
+# zsh-autosuggestions (уже установлен в plugins) автоматически подсказывает
+# продолжение команд на основе истории — включая все ваши алиасы.
+# Просто начните вводить алиас и нажмите → (стрелку вправо) для подстановки.
+#
+# Для дополнительного автодополнения алиасов можно включить:
+# setopt COMPLETE_ALIASES               # Tab-дополнение учитывает алиасы
+#
+# Чтобы видеть все доступные алиасы начинающиеся с определённых букв:
+# alias | grep '^nft'                   # показать все nft-* алиасы
+# alias | grep '^sc'                    # показать все sc* алиасы (systemd)
+# alias | grep '^ch'                    # показать все ch* алиасы (chmod)
+# alias | grep '^d'                     # показать все d* алиасы (docker)
+#
+# # Функция для поиска алиасов: aliases nft  — покажет все алиасы содержащие "nft"
+# aliases() { alias | grep -i "$1" }
 
 # ============================================================================
 
