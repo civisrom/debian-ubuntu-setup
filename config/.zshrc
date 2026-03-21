@@ -128,3 +128,13 @@ export PATH=$PATH:$GOPATH/bin
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 export EDITOR=nano
 export VISUAL=nano
+
+# nftables aliases
+alias nft-list='sudo nft list ruleset'                                          # показать все текущие правила
+alias nft-check='sudo nft -c -f /etc/nftables.conf'                             # проверить синтаксис конфига без применения
+alias nft-apply='sudo nft -f /etc/nftables.conf'                                # применить правила из конфига
+alias nft-flush='sudo nft flush ruleset'                                        # очистить все правила (осторожно!)
+alias nft-save='sudo sh -c "nft list ruleset > /etc/nftables.conf"'             # сохранить текущие правила в конфиг
+alias nft-reload='sudo systemctl restart nftables'                              # перезапустить сервис nftables
+alias nft-status='sudo systemctl status nftables'                               # статус сервиса nftables
+alias nft-test='sudo nft -c -f /etc/nftables.conf && echo "✓ Синтаксис OK" || echo "✗ Ошибка в конфиге"'  # тест с выводом результата
