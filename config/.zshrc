@@ -138,6 +138,128 @@ export PATH=$PATH:$GOPATH/bin
 export EDITOR=nano
 export VISUAL=nano
 
+# ============================================================================
+# ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ (раскомментируйте нужное)
+# ============================================================================
+
+# --- Настройки Zsh -----------------------------------------------------------
+# setopt NO_BEEP                    # отключить звуковые сигналы терминала
+# setopt GLOB_DOTS                  # включать dotfiles (.*) в glob-паттерны
+# setopt EXTENDED_GLOB              # расширенные glob-паттерны (^, ~, #)
+# WORDCHARS=''                      # Ctrl+W удаляет до /, а не весь путь целиком
+
+# --- Дополнительные плагины Oh My Zsh ----------------------------------------
+# Добавьте в массив plugins=(...) выше:
+# sudo                              # двойное нажатие Esc — добавить sudo к команде
+# extract                           # универсальная распаковка: extract archive.tar.gz
+# colored-man-pages                 # цветные man-страницы для удобного чтения
+
+# --- Навигация и файлы -------------------------------------------------------
+# alias ..='cd ..'                  # быстрый подъём на уровень вверх
+# alias ...='cd ../..'              # подъём на два уровня вверх
+# alias ....='cd ../../..'          # подъём на три уровня вверх
+# alias mkdir='mkdir -pv'           # создавать вложенные директории + показывать
+# alias cp='cp -iv'                 # подтверждение перед перезаписью при копировании
+# alias mv='mv -iv'                 # подтверждение перед перезаписью при перемещении
+# alias rm='rm -iv'                 # подтверждение перед удалением каждого файла
+
+# --- Полезные функции --------------------------------------------------------
+# # Создать директорию и сразу перейти в неё: mkcd my-new-project
+# mkcd() { mkdir -p "$1" && cd "$1" }
+#
+# # Быстрый бэкап файла с датой: backup /etc/nftables.conf
+# backup() { cp "$1" "$1.backup.$(date +%Y%m%d-%H%M%S)~" }
+#
+# # Универсальная распаковка архивов: extract archive.tar.gz
+# extract() {
+#     if [[ -f "$1" ]]; then
+#         case "$1" in
+#             *.tar.bz2) tar xjf "$1"    ;;
+#             *.tar.gz)  tar xzf "$1"    ;;
+#             *.tar.xz)  tar xJf "$1"    ;;
+#             *.bz2)     bunzip2 "$1"    ;;
+#             *.gz)       gunzip "$1"     ;;
+#             *.tar)     tar xf "$1"     ;;
+#             *.tbz2)    tar xjf "$1"    ;;
+#             *.tgz)     tar xzf "$1"    ;;
+#             *.zip)     unzip "$1"      ;;
+#             *.7z)      7z x "$1"       ;;
+#             *.xz)      xz -d "$1"     ;;
+#             *)         echo "'$1' — неизвестный формат архива" ;;
+#         esac
+#     else
+#         echo "'$1' — файл не найден"
+#     fi
+# }
+
+# --- Сеть и диагностика ------------------------------------------------------
+# alias ping='ping -c 5'                        # пинг 5 пакетов (не бесконечно)
+# alias myip='curl -s ifconfig.me'              # показать внешний IP-адрес
+# alias localip="ip -4 addr show | grep inet | grep -v '127.0.0.1' | awk '{print \$2}'"  # все локальные IPv4 адреса
+# alias ips="ip -br addr show"                  # краткий вывод всех интерфейсов и их IP
+# alias ip4="ip -4 -br addr show"               # только IPv4 адреса (кратко)
+# alias ip6="ip -6 -br addr show"               # только IPv6 адреса (кратко)
+# alias gateway="ip route | grep default"       # показать шлюз по умолчанию
+# alias routes="ip route show"                  # таблица маршрутизации
+# alias dns="cat /etc/resolv.conf"              # текущие DNS-серверы
+# alias listen='ss -tulnp | grep LISTEN'        # только слушающие порты (TCP + UDP)
+# alias tcp-listen='ss -tlnp'                   # только TCP слушающие порты с PID процесса
+# alias udp-listen='ss -ulnp'                   # только UDP слушающие порты с PID процесса
+# alias connections='ss -tunap'                 # все активные TCP/UDP соединения с PID
+# alias established='ss -tunap state established'  # только установленные соединения
+# alias tcp-stats='ss -s'                       # статистика сокетов (всего/TCP/UDP/RAW)
+# alias port-count='ss -tunap | awk "{print \$1}" | sort | uniq -c | sort -rn'  # кол-во соединений по типу
+# alias arp='ip neighbour show'                 # ARP-таблица (MAC-адреса соседей)
+# alias traffic='cat /proc/net/dev'             # статистика трафика по интерфейсам
+# alias mtu="ip link show | grep mtu"           # MTU всех интерфейсов
+
+# --- Systemd ------------------------------------------------------------------
+# alias sc='sudo systemctl'                     # короткий вызов systemctl
+# alias scs='sudo systemctl status'             # статус сервиса: scs nginx
+# alias scr='sudo systemctl restart'            # перезапуск сервиса: scr nginx
+# alias sce='sudo systemctl enable'             # включить автозапуск: sce nginx
+# alias scd='sudo systemctl disable'            # отключить автозапуск: scd nginx
+# alias scl='sudo systemctl list-units --type=service --state=running'  # список запущенных сервисов
+# alias scf='sudo systemctl list-units --type=service --state=failed'   # список упавших сервисов
+# alias jlog='sudo journalctl -xe'              # последние логи с контекстом и пояснениями
+# alias jfu='sudo journalctl -fu'               # follow лог сервиса: jfu nginx
+# alias jboot='sudo journalctl -b'              # логи с момента последней загрузки
+# alias jyesterday='sudo journalctl --since yesterday'  # логи за вчера
+
+# --- Docker -------------------------------------------------------------------
+# alias dps='docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'  # компактный список контейнеров
+# alias dpsa='docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"'  # все контейнеры (вкл. остановленные)
+# alias dlogs='docker logs -f --tail 100'       # последние 100 строк лога + follow: dlogs container
+# alias dstats='docker stats --no-stream'       # ресурсы контейнеров (CPU/RAM/NET) однократно
+# alias dprune='docker system prune -af'        # удалить всё неиспользуемое (образы, контейнеры, сети)
+# alias dvols='docker volume ls'                # список Docker-томов
+# alias dimages='docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"'  # список образов
+# alias dstop='docker stop $(docker ps -q)'     # остановить все запущенные контейнеры
+# alias drestart='docker restart $(docker ps -q)'  # перезапустить все контейнеры
+#
+# # IP-адреса всех запущенных контейнеров (имя + IP): docker-ips
+# alias docker-ips='docker inspect $(docker ps -q) --format "{{.Name}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" | sort'
+#
+# # Подробная информация о сетях контейнера: docker-nets container_name
+# docker-nets() { docker inspect "$1" --format '{{range $net, $conf := .NetworkSettings.Networks}}{{$net}}: {{$conf.IPAddress}}{{"\n"}}{{end}}' }
+#
+# # Войти в контейнер через bash: dexec container_name
+# alias dexec='docker exec -it'
+#
+# # Список Docker-сетей с подсетями: docker-subnets
+# alias docker-subnets='docker network ls -q | xargs -I{} docker network inspect {} --format "{{.Name}}: {{range .IPAM.Config}}{{.Subnet}}{{end}}"'
+
+# --- Безопасность / nftables (дополнение) ------------------------------------
+# alias nft-monitor='sudo nft monitor'                          # мониторинг изменений правил в реальном времени
+# alias nft-handles='sudo nft list ruleset -a'                  # правила с хендлами (для удаления конкретного правила)
+# alias nft-json='sudo nft -j list ruleset | python3 -m json.tool'  # правила в формате JSON (удобно для парсинга)
+# alias nft-counters='sudo nft list ruleset | grep -E "counter|chain|table"'  # счётчики пакетов по правилам
+# alias fail2ban-status='sudo fail2ban-client status'           # общий статус fail2ban
+# alias fail2ban-ssh='sudo fail2ban-client status sshd'         # заблокированные IP для SSH
+# alias banned='sudo fail2ban-client banned'                    # все заблокированные IP во всех jail
+
+# ============================================================================
+
 # System aliases
 alias ll='ls -lah'
 alias ports='ss -tulnp'
