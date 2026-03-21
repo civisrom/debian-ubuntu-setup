@@ -107,8 +107,9 @@ source $ZSH/oh-my-zsh.sh
 # alias zshconfig="mate ~/.zshrc"
 # alias ohmyzsh="mate ~/.oh-my-zsh"
 
+# History
 HISTFILE=~/.zsh_history
-HISTSIZE=999999999
+HISTSIZE=100000
 SAVEHIST=$HISTSIZE
 setopt HIST_EXPIRE_DUPS_FIRST
 setopt HIST_IGNORE_DUPS
@@ -116,18 +117,32 @@ setopt HIST_IGNORE_ALL_DUPS
 setopt HIST_IGNORE_SPACE
 setopt HIST_FIND_NO_DUPS
 setopt HIST_SAVE_NO_DUPS
+setopt SHARE_HISTORY
+setopt INC_APPEND_HISTORY
+
+# Shell options
+setopt AUTO_CD
+setopt CORRECT
+
+# Syntax highlighting
 ZSH_HIGHLIGHT_HIGHLIGHTERS=(main brackets pattern cursor root)
 bindkey "$terminfo[kcuu1]" history-substring-search-up
 bindkey "$terminfo[kcud1]" history-substring-search-down
+
+# Environment
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-export PATH=$PATH:/usr/local/bin
 export PATH=$PATH:/usr/local/go/bin
-#alias saveip="sudo bash -c 'iptables-save > /etc/iptables/rules.v4 && ip6tables-save > /etc/iptables/rules.v6 && ipset save > /etc/ipset/ipset.rules'"
 export GOPATH=$HOME/goproject
+export GOBIN=$GOPATH/bin
 export PATH=$PATH:$GOPATH/bin
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 export EDITOR=nano
 export VISUAL=nano
+
+# System aliases
+alias ll='ls -lah'
+alias ports='ss -tulnp'
+alias mem='free -h'
+alias df='df -h'
 
 # nftables aliases
 alias nft-list='sudo nft list ruleset'                                          # показать все текущие правила
