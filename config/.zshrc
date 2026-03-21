@@ -193,6 +193,7 @@ export VISUAL=nano
 # }
 
 # --- Сеть и диагностика ------------------------------------------------------
+# alias ipa='ip a'                              # полный вывод всех интерфейсов (ip addr show)
 # alias ping='ping -c 5'                        # пинг 5 пакетов (не бесконечно)
 # alias myip='curl -s ifconfig.me'              # показать внешний IP-адрес
 # alias localip="ip -4 addr show | grep inet | grep -v '127.0.0.1' | awk '{print \$2}'"  # все локальные IPv4 адреса
