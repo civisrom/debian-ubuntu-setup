@@ -390,16 +390,36 @@ alias nft-counters='sudo nft list ruleset | grep -E "counter|chain|table"'  # с
 # Просто начните вводить алиас и нажмите → (стрелку вправо) для подстановки.
 #
 # Для дополнительного автодополнения алиасов можно включить:
-setopt COMPLETE_ALIASES               # Tab-дополнение учитывает алиасы
+# setopt COMPLETE_ALIASES               # Tab-дополнение учитывает алиасы
 #
 # Чтобы видеть все доступные алиасы начинающиеся с определённых букв:
-alias | grep '^nft'                   # показать все nft-* алиасы
-alias | grep '^sc'                    # показать все sc* алиасы (systemd)
-alias | grep '^ch'                    # показать все ch* алиасы (chmod)
-alias | grep '^d'                     # показать все d* алиасы (docker)
+# alias | grep '^nft'                   # показать все nft-* алиасы (nftables)
+# alias | grep '^fail2ban'              # показать все fail2ban-* алиасы
+# alias | grep '^sc'                    # показать все sc* алиасы (systemctl/systemd)
+# alias | grep '^j'                     # показать все j* алиасы (journalctl)
+# alias | grep '^d'                     # показать все d* алиасы (docker)
+# alias | grep '^docker'                # показать все docker-* алиасы (docker сети/IP)
+# alias | grep '^rsync'                 # показать все rsync-* алиасы (синхронизация)
+# alias | grep '^ip'                    # показать все ip* алиасы (сеть/IP)
+# alias | grep '^tcp\|^udp'             # показать все tcp*/udp* алиасы (порты)
+# alias | grep '^ch'                    # показать все ch* алиасы (chmod/chown)
+# alias | grep '^chr'                   # показать все chr* алиасы (рекурсивный chmod)
+# alias | grep '^chown'                 # показать все chown* алиасы (смена владельца)
+# alias | grep '^chmod'                 # показать все chmod-* алиасы (функции chmod)
+# alias | grep '^mk'                   # показать все mk* алиасы (создание директорий)
+# alias | grep '^cp'                    # показать все cp* алиасы (копирование)
+# alias | grep '^mv\|^ren'             # показать все mv*/ren* алиасы (перемещение)
+# alias | grep '^ff\|^fd\|^f'          # показать все f* алиасы (поиск файлов)
+# alias | grep '^top10\|^psg'          # показать все top10*/psg* алиасы (процессы)
+# alias | grep '^du\|^disk'            # показать все du*/disk* алиасы (диски)
+# alias | grep '^mem\|^cpu\|^load'     # показать все mem*/cpu*/load* алиасы (система)
+# alias | grep '^ping\|^myip\|^local'  # показать все ping*/myip*/local* алиасы (сеть)
+# alias | grep '^listen\|^conn\|^est'  # показать все listen*/conn*/est* алиасы (соединения)
+# alias | grep '^gate\|^route\|^dns'   # показать все gateway/routes/dns алиасы (маршруты)
+# alias | grep '^ll\|^ports\|^mem\|^df' # показать все системные алиасы (активные)
 #
 # # Функция для поиска алиасов: aliases nft  — покажет все алиасы содержащие "nft"
-aliases() { alias | grep -i "$1" }
+# aliases() { alias | grep -i "$1" }
 
 # ============================================================================
 
