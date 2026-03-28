@@ -4172,6 +4172,12 @@ net.ipv4.tcp_slow_start_after_idle = 0
 # System Limits
 fs.inotify.max_user_instances = 8192
 net.ipv4.ip_local_port_range = 1024 45000
+
+# Netfilter
+net.netfilter.nf_conntrack_max = 131072
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_established = 86400
+net.netfilter.nf_conntrack_tcp_loose = 0
 EOF
     fi
 
