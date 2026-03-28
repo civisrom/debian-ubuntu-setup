@@ -685,10 +685,12 @@ if [ "$INTERACTIVE" = true ]; then
 
     if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
         echo ""
-        print_message "Disable Docker iptables management?"
-        print_message "  Creates /etc/docker/daemon.json with {\"iptables\": false}"
+        print_message "Disable Docker iptables/ip6tables management?"
+        print_message "  Creates /etc/docker/daemon.json with:"
+        print_message "    {\"iptables\": false, \"ip6tables\": false, \"userland-proxy\": false}"
         print_message "  Recommended when using nftables or external firewall"
         print_message "  Docker will NOT create any iptables/nat rules"
+        print_message "  userland-proxy=false uses iptables hairpin NAT (faster)"
         read -p "Disable Docker iptables? (y/N): " DOCKER_DISABLE_IPTABLES
         DOCKER_DISABLE_IPTABLES=${DOCKER_DISABLE_IPTABLES:-n}
     else
@@ -909,6 +911,20 @@ if [ "$INTERACTIVE" = true ]; then
         INSTALL_NFTABLES_CONF="n"
         NFTABLES_PROFILE=""
         INSTALL_NFTABLES_LOGGING="n"
+    fi
+
+    # Ask about nft-docker-watch (nftables + Docker integration)
+    if ([ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]) && \
+       ([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]); then
+        echo ""
+        print_message "Install nft-docker-watch service?"
+        print_message "  Applies nftables rules after Docker starts and on every Docker restart"
+        print_message "  Creates systemd service + drop-in trigger for docker.service"
+        print_message "  Includes: validation, backup, rollback, verification"
+        read -p "Install nft-docker-watch? (Y/n): " INSTALL_NFT_DOCKER_WATCH
+        INSTALL_NFT_DOCKER_WATCH=${INSTALL_NFT_DOCKER_WATCH:-y}
+    else
+        INSTALL_NFT_DOCKER_WATCH="n"
     fi
 
     # Ask about sysctl configuration
@@ -1332,7 +1348,7 @@ fi
 print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ] && echo "YES (Path: $VENV_PATH)" || echo "NO")"
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
-    print_message "    - Docker iptables disable: $([ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ] && echo "YES (daemon.json)" || echo "NO")"
+    print_message "    - Docker iptables/ip6tables disable: $([ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ] && echo "YES (daemon.json: iptables+ip6tables+userland-proxy=false)" || echo "NO")"
 fi
 print_message "  ufw-docker: $([ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  Go language: $([ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ] && echo "YES (latest version)" || echo "NO")"
@@ -1346,6 +1362,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     else
         print_message "    - Config from opt.7z: NO (default config)"
     fi
+    print_message "    - nft-docker-watch: $([ "$INSTALL_NFT_DOCKER_WATCH" = "y" ] || [ "$INSTALL_NFT_DOCKER_WATCH" = "Y" ] && echo "YES (systemd service)" || echo "NO")"
 fi
 print_message "  UFW Firewall: $([ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
@@ -2525,6 +2542,8 @@ try:
 except:
     config = {}
 config['iptables'] = False
+config['ip6tables'] = False
+config['userland-proxy'] = False
 with open('$DAEMON_JSON', 'w') as f:
     json.dump(config, f, indent=2)
     f.write('\n')
@@ -2535,7 +2554,9 @@ with open('$DAEMON_JSON', 'w') as f:
                         # Fallback: overwrite
                         cat > "$DAEMON_JSON" << 'DEOF'
 {
-  "iptables": false
+  "iptables": false,
+  "ip6tables": false,
+  "userland-proxy": false
 }
 DEOF
                         print_message "daemon.json overwritten (merge failed)"
@@ -2544,7 +2565,9 @@ DEOF
                     # No python3 — overwrite
                     cat > "$DAEMON_JSON" << 'DEOF'
 {
-  "iptables": false
+  "iptables": false,
+  "ip6tables": false,
+  "userland-proxy": false
 }
 DEOF
                     print_message "daemon.json overwritten"
@@ -2553,7 +2576,9 @@ DEOF
                 # No existing daemon.json — create new
                 cat > "$DAEMON_JSON" << 'DEOF'
 {
-  "iptables": false
+  "iptables": false,
+  "ip6tables": false,
+  "userland-proxy": false
 }
 DEOF
                 print_message "daemon.json created"
@@ -3866,6 +3891,49 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 else
     if [ "$CONFIGURE_UFW" != "y" ] && [ "$CONFIGURE_UFW" != "Y" ]; then
         print_message "Skipping nftables (not requested)"
+    fi
+fi
+
+# ============================================
+# INSTALL NFT-DOCKER-WATCH SERVICE
+# ============================================
+
+if [ "$INSTALL_NFT_DOCKER_WATCH" = "y" ] || [ "$INSTALL_NFT_DOCKER_WATCH" = "Y" ]; then
+    echo ""
+    print_header "═══════════════════════════════════════════════════"
+    print_header "   Installing nft-docker-watch service"
+    print_header "═══════════════════════════════════════════════════"
+    echo ""
+
+    # Determine script location (bundled or current directory)
+    NFT_WATCH_SCRIPT=""
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "${SCRIPT_DIR}/install-nft-docker-watch.sh" ]; then
+        NFT_WATCH_SCRIPT="${SCRIPT_DIR}/install-nft-docker-watch.sh"
+    elif [ -f "/opt/install-nft-docker-watch.sh" ]; then
+        NFT_WATCH_SCRIPT="/opt/install-nft-docker-watch.sh"
+    fi
+
+    if [ -n "$NFT_WATCH_SCRIPT" ]; then
+        print_message "Using script: $NFT_WATCH_SCRIPT"
+        chmod +x "$NFT_WATCH_SCRIPT"
+        if bash "$NFT_WATCH_SCRIPT" install; then
+            print_success "nft-docker-watch service installed"
+        else
+            print_warning "nft-docker-watch installation failed — check errors above"
+            print_message "You can install manually: sudo $NFT_WATCH_SCRIPT install"
+        fi
+    else
+        print_error "install-nft-docker-watch.sh not found"
+        print_message "Expected locations:"
+        print_message "  ${SCRIPT_DIR}/install-nft-docker-watch.sh"
+        print_message "  /opt/install-nft-docker-watch.sh"
+    fi
+    echo ""
+else
+    if ([ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]) && \
+       ([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]); then
+        print_message "Skipping nft-docker-watch (not requested)"
     fi
 fi
 
