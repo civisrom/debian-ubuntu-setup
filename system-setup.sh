@@ -3905,29 +3905,190 @@ if [ "$INSTALL_NFT_DOCKER_WATCH" = "y" ] || [ "$INSTALL_NFT_DOCKER_WATCH" = "Y" 
     print_header "═══════════════════════════════════════════════════"
     echo ""
 
-    # Determine script location (bundled or current directory)
-    NFT_WATCH_SCRIPT=""
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [ -f "${SCRIPT_DIR}/install-nft-docker-watch.sh" ]; then
-        NFT_WATCH_SCRIPT="${SCRIPT_DIR}/install-nft-docker-watch.sh"
-    elif [ -f "/opt/install-nft-docker-watch.sh" ]; then
-        NFT_WATCH_SCRIPT="/opt/install-nft-docker-watch.sh"
+    NFT_CONF_PATH="/etc/nftables.conf"
+    NFT_APPLY_SCRIPT="/usr/local/sbin/nft-apply.sh"
+    NFT_BACKUP_DIR="/var/backups/nftables"
+    NFT_SERVICE_NAME="nftables-after-docker.service"
+    NFT_SERVICE_PATH="/etc/systemd/system/${NFT_SERVICE_NAME}"
+    NFT_DROPIN_DIR="/etc/systemd/system/docker.service.d"
+    NFT_DROPIN_PATH="${NFT_DROPIN_DIR}/nftables-reload.conf"
+
+    # Check dependencies
+    NFT_WATCH_OK=true
+    for cmd in nft systemctl docker; do
+        if ! command -v "$cmd" &>/dev/null; then
+            print_error "nft-docker-watch: command '$cmd' not found"
+            NFT_WATCH_OK=false
+        fi
+    done
+
+    if [ ! -f "$NFT_CONF_PATH" ]; then
+        print_warning "nft-docker-watch: $NFT_CONF_PATH not found (will be created by nftables setup)"
     fi
 
-    if [ -n "$NFT_WATCH_SCRIPT" ]; then
-        print_message "Using script: $NFT_WATCH_SCRIPT"
-        chmod +x "$NFT_WATCH_SCRIPT"
-        if bash "$NFT_WATCH_SCRIPT" install; then
-            print_success "nft-docker-watch service installed"
-        else
-            print_warning "nft-docker-watch installation failed — check errors above"
-            print_message "You can install manually: sudo $NFT_WATCH_SCRIPT install"
+    if [ "$NFT_WATCH_OK" = true ]; then
+        # Stop existing service if present
+        if systemctl is-active --quiet "$NFT_SERVICE_NAME" 2>/dev/null; then
+            systemctl stop "$NFT_SERVICE_NAME" 2>/dev/null || true
+            print_message "Existing nft-docker-watch service stopped"
         fi
+        if systemctl is-enabled --quiet "$NFT_SERVICE_NAME" 2>/dev/null; then
+            systemctl disable "$NFT_SERVICE_NAME" 2>/dev/null || true
+        fi
+
+        # Create backup directory
+        mkdir -p "$NFT_BACKUP_DIR"
+
+        # Create nft-apply.sh script
+        print_message "Creating apply script: $NFT_APPLY_SCRIPT"
+        cat <<'NFTAPPLYSCRIPT' > "$NFT_APPLY_SCRIPT"
+#!/bin/bash
+# nft-apply.sh — валидация, бэкап, применение nftables-правил
+# Вызывается из systemd (nftables-after-docker.service)
+
+set -euo pipefail
+
+NFT_CONF="/etc/nftables.conf"
+NFT_BACKUP_DIR="/var/backups/nftables"
+DOCKER_WAIT_TIMEOUT=60
+DOCKER_SETTLE_DELAY=2
+LOG_TAG="nft-apply"
+
+log() { echo "$1" | systemd-cat -t "$LOG_TAG" -p "${2:-info}"; echo "$1"; }
+
+# Шаг 1: Ожидание готовности Docker
+log "Ожидание готовности Docker (таймаут: ${DOCKER_WAIT_TIMEOUT}с)..."
+
+waited=0
+while ! docker info &>/dev/null; do
+    if [[ $waited -ge $DOCKER_WAIT_TIMEOUT ]]; then
+        log "WARN: Docker не ответил за ${DOCKER_WAIT_TIMEOUT}с, применяю правила без ожидания" "warning"
+        break
+    fi
+    sleep 1
+    ((waited++))
+done
+
+if [[ $waited -lt $DOCKER_WAIT_TIMEOUT ]]; then
+    log "Docker готов (${waited}с). Пауза ${DOCKER_SETTLE_DELAY}с для инициализации сетей..."
+    sleep "$DOCKER_SETTLE_DELAY"
+fi
+
+# Шаг 2: Валидация синтаксиса
+log "Валидация: nft -c -f $NFT_CONF"
+if ! nft_err=$(nft -c -f "$NFT_CONF" 2>&1); then
+    log "ОШИБКА валидации nftables! Правила НЕ применены." "err"
+    log "Вывод nft: $nft_err" "err"
+    exit 1
+fi
+log "Валидация пройдена"
+
+# Шаг 3: Бэкап текущего ruleset
+mkdir -p "$NFT_BACKUP_DIR"
+
+backup_file="${NFT_BACKUP_DIR}/ruleset-$(date +%Y%m%d-%H%M%S).nft"
+if nft list ruleset > "$backup_file" 2>/dev/null; then
+    log "Бэкап: $backup_file"
+    # Ротация: оставляем последние 10 бэкапов
+    # shellcheck disable=SC2012
+    ls -1t "${NFT_BACKUP_DIR}"/ruleset-*.nft 2>/dev/null | tail -n +11 | xargs -r rm -f
+else
+    log "Бэкап не удался (возможно, ruleset пуст)" "warning"
+fi
+
+# Шаг 4: Применение
+log "Применение: nft -f $NFT_CONF"
+if ! nft_err=$(nft -f "$NFT_CONF" 2>&1); then
+    log "ОШИБКА применения nftables!" "err"
+    log "Вывод nft: $nft_err" "err"
+
+    # Попытка отката из бэкапа
+    if [[ -f "$backup_file" ]] && [[ -s "$backup_file" ]]; then
+        log "Откат из бэкапа: $backup_file" "warning"
+        if nft -f "$backup_file" 2>/dev/null; then
+            log "Откат успешен" "warning"
+        else
+            log "Откат НЕ удался! Ruleset может быть в неконсистентном состоянии." "crit"
+        fi
+    fi
+    exit 1
+fi
+
+# Шаг 5: Верификация
+verify_ok=true
+for tbl in "table ip filter" "table ip dockernat" "table ip6 filter"; do
+    if ! nft list ruleset 2>/dev/null | grep -q "$tbl"; then
+        log "WARN: таблица '$tbl' не найдена после применения!" "warning"
+        verify_ok=false
+    fi
+done
+
+if $verify_ok; then
+    log "Верификация: все таблицы на месте"
+else
+    log "Верификация: некоторые таблицы отсутствуют (см. выше)" "warning"
+fi
+
+log "nftables правила успешно применены"
+NFTAPPLYSCRIPT
+        chmod 755 "$NFT_APPLY_SCRIPT"
+
+        # Create systemd service unit
+        print_message "Creating systemd unit: $NFT_SERVICE_PATH"
+        cat <<NFTSVCEOF > "$NFT_SERVICE_PATH"
+[Unit]
+Description=Apply nftables rules after Docker
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${NFT_APPLY_SCRIPT}
+ExecReload=${NFT_APPLY_SCRIPT}
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+NFTSVCEOF
+
+        # Create docker.service drop-in
+        print_message "Creating drop-in for docker.service: $NFT_DROPIN_PATH"
+        mkdir -p "$NFT_DROPIN_DIR"
+        cat <<NFTDROPEOF > "$NFT_DROPIN_PATH"
+[Service]
+ExecStartPost=/bin/systemctl restart --no-block ${NFT_SERVICE_NAME}
+NFTDROPEOF
+
+        # Reload systemd, enable and start service
+        print_message "Reloading systemd configuration"
+        systemctl daemon-reload
+
+        print_message "Enabling nft-docker-watch service"
+        systemctl enable "$NFT_SERVICE_NAME"
+
+        print_message "Starting nft-docker-watch service"
+        if systemctl start "$NFT_SERVICE_NAME" 2>/dev/null; then
+            print_success "nft-docker-watch service started"
+        else
+            print_warning "Service did not start — check: journalctl -u $NFT_SERVICE_NAME"
+        fi
+
+        echo ""
+        systemctl status "$NFT_SERVICE_NAME" --no-pager 2>/dev/null || true
+
+        echo ""
+        print_success "nft-docker-watch installation completed"
+        print_message "  Service:  $NFT_SERVICE_PATH"
+        print_message "  Script:   $NFT_APPLY_SCRIPT"
+        print_message "  Drop-in:  $NFT_DROPIN_PATH"
+        print_message "  Backups:  $NFT_BACKUP_DIR"
+        print_message ""
+        print_message "  Logs:     journalctl -u $NFT_SERVICE_NAME"
+        print_message "  Restart:  systemctl restart $NFT_SERVICE_NAME"
+        print_message "  nftables rules will be auto-restored on every Docker (re)start"
     else
-        print_error "install-nft-docker-watch.sh not found"
-        print_message "Expected locations:"
-        print_message "  ${SCRIPT_DIR}/install-nft-docker-watch.sh"
-        print_message "  /opt/install-nft-docker-watch.sh"
+        print_error "nft-docker-watch installation skipped due to missing dependencies"
     fi
     echo ""
 else
