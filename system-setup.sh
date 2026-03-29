@@ -914,68 +914,64 @@ if [ "$INTERACTIVE" = true ]; then
             CUSTOM_PORTS=""
         fi
 
-        # Ask about nftables config profile from opt.7z
+        # Ask about nftables config profile
         # Profiles are loaded from config/nftables-profiles.conf (or embedded fallback)
-        if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
-            echo ""
-            print_message "Install nftables configuration from opt.7z archive?"
-            print_message "  Available profiles:"
-            # Generate menu dynamically from NFT_PROFILE_DESCRIPTIONS array
-            _prev_group=""
-            for _i in $(seq 1 "$NFT_PROFILES_COUNT"); do
-                # Insert group headers between basic (1-3) and v2 (4+) profiles
-                if [ "$_i" -le 3 ] && [ "$_prev_group" != "basic" ]; then
-                    print_message "    ── Basic profiles ──"
-                    _prev_group="basic"
-                elif [ "$_i" -eq 4 ] && [ "$_prev_group" != "v2" ]; then
-                    print_message ""
-                    print_message "    ── v2 profiles (advanced) ──"
-                    _prev_group="v2"
-                fi
-                print_message "    ${_i}) ${NFT_PROFILE_DESCRIPTIONS[$_i]}"
-            done
-            unset _i _prev_group
-            echo ""
-            read -p "Install nftables config from archive? (y/N): " INSTALL_NFTABLES_CONF
-            INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
+        # Config files are installed from opt.7z archive at execution time
+        echo ""
+        print_message "Install nftables configuration profile?"
+        if [ "$EXTRACT_OPT_ARCHIVE" != "y" ] && [ "$EXTRACT_OPT_ARCHIVE" != "Y" ]; then
+            print_warning "opt.7z extraction not selected — config files must already exist in /opt/nftables/"
+        fi
+        print_message "  Available profiles:"
+        # Generate menu dynamically from NFT_PROFILE_DESCRIPTIONS array
+        _prev_group=""
+        for _i in $(seq 1 "$NFT_PROFILES_COUNT"); do
+            # Insert group headers between basic (1-3) and v2 (4+) profiles
+            if [ "$_i" -le 3 ] && [ "$_prev_group" != "basic" ]; then
+                print_message "    ── Basic profiles ──"
+                _prev_group="basic"
+            elif [ "$_i" -eq 4 ] && [ "$_prev_group" != "v2" ]; then
+                print_message ""
+                print_message "    ── v2 profiles (advanced) ──"
+                _prev_group="v2"
+            fi
+            print_message "    ${_i}) ${NFT_PROFILE_DESCRIPTIONS[$_i]}"
+        done
+        unset _i _prev_group
+        echo ""
+        read -p "Install nftables config profile? (y/N): " INSTALL_NFTABLES_CONF
+        INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
 
-            if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
-                read -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
-                NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-$NFT_DEFAULT_PROFILE}
+        if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
+            read -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
+            NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-$NFT_DEFAULT_PROFILE}
 
-                # Validate selection, fall back to default if invalid
-                if [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
-                    print_warning "Invalid selection: $NFTABLES_PROFILE_NUM, using default (${NFT_DEFAULT_PROFILE})"
-                    NFTABLES_PROFILE_NUM=$NFT_DEFAULT_PROFILE
-                fi
+            # Validate selection, fall back to default if invalid
+            if [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
+                print_warning "Invalid selection: $NFTABLES_PROFILE_NUM, using default (${NFT_DEFAULT_PROFILE})"
+                NFTABLES_PROFILE_NUM=$NFT_DEFAULT_PROFILE
+            fi
 
-                # Set variables from profile arrays
-                NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
-                NFTABLES_CONF_FILE="${NFT_PROFILE_CONFIGS[$NFTABLES_PROFILE_NUM]}"
-                NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]}"
-                print_message "Selected: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
+            # Set variables from profile arrays
+            NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
+            NFTABLES_CONF_FILE="${NFT_PROFILE_CONFIGS[$NFTABLES_PROFILE_NUM]}"
+            NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]}"
+            print_message "Selected: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
 
-                # Ask about logging script (only if profile has one)
-                if [ -n "$NFTABLES_LOG_SCRIPT" ]; then
-                    echo ""
-                    print_message "Install nftables logging script for '${NFTABLES_PROFILE}' profile?"
-                    print_message "  Script: ${NFTABLES_LOG_SCRIPT}"
-                    print_message "  Configures rsyslog/journald rules for nftables log messages"
-                    read -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
-                    INSTALL_NFTABLES_LOGGING=${INSTALL_NFTABLES_LOGGING:-y}
-                else
-                    INSTALL_NFTABLES_LOGGING="n"
-                fi
+            # Ask about logging script (only if profile has one)
+            if [ -n "$NFTABLES_LOG_SCRIPT" ]; then
+                echo ""
+                print_message "Install nftables logging script for '${NFTABLES_PROFILE}' profile?"
+                print_message "  Script: ${NFTABLES_LOG_SCRIPT}"
+                print_message "  Configures rsyslog/journald rules for nftables log messages"
+                read -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
+                INSTALL_NFTABLES_LOGGING=${INSTALL_NFTABLES_LOGGING:-y}
             else
-                NFTABLES_PROFILE=""
                 INSTALL_NFTABLES_LOGGING="n"
             fi
         else
-            INSTALL_NFTABLES_CONF="n"
             NFTABLES_PROFILE=""
             INSTALL_NFTABLES_LOGGING="n"
-            print_message "nftables config from opt.7z not available (opt.7z extraction not selected)"
-            print_message "Default nftables configuration will be used"
         fi
     else
         INSTALL_NFTABLES_CONF="n"
@@ -3779,15 +3775,24 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         fi
     fi
 
-    # --- Step 5: Install nftables config from opt.7z archive ---
+    # --- Step 5: Install nftables config ---
     if [ "$NFTABLES_OK" = true ] && { [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; }; then
         echo ""
         print_message "Step 5: Installing nftables config (profile: ${NFTABLES_PROFILE}, file: ${NFTABLES_CONF_FILE})..."
 
-        # Verify opt.7z was extracted successfully
-        if [ "$OPT_EXTRACTED_OK" != true ]; then
-            print_error "opt.7z archive was not extracted successfully"
-            print_error "Cannot install nftables config — source files are missing"
+        NFTABLES_SRC="/opt/nftables/${NFTABLES_CONF_FILE}"
+
+        # Check if config file exists (from opt.7z extraction or pre-installed)
+        if [ ! -f "$NFTABLES_SRC" ] || [ ! -s "$NFTABLES_SRC" ]; then
+            # Config not found — check if opt.7z was supposed to provide it
+            if [ "$OPT_EXTRACTED_OK" = true ]; then
+                print_error "Config file not found after opt.7z extraction: $NFTABLES_SRC"
+            else
+                print_error "Config file not found: $NFTABLES_SRC"
+                print_message "  opt.7z was not extracted — file must already exist in /opt/nftables/"
+            fi
+            print_message "Available files in /opt/nftables/:"
+            ls -la /opt/nftables/ 2>/dev/null || print_error "  /opt/nftables/ directory does not exist"
             print_warning "Skipping config installation — using default nftables.conf"
             INSTALL_NFTABLES_CONF="skipped"
         else
@@ -3825,14 +3830,6 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                         INSTALL_NFTABLES_CONF="skipped"
                     fi
                 fi
-            else
-                print_error "Config file not found or empty: $NFTABLES_SRC"
-                print_message "Expected path in opt.7z archive: nftables/${NFTABLES_CONF_FILE}"
-                # List what IS available for debugging
-                print_message "Available files in /opt/nftables/:"
-                ls -la /opt/nftables/ 2>/dev/null || print_error "  /opt/nftables/ directory does not exist"
-                print_warning "Skipping config installation — using default nftables.conf"
-                INSTALL_NFTABLES_CONF="skipped"
             fi
         fi
     elif [ "$NFTABLES_OK" = true ]; then
@@ -3845,31 +3842,25 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         echo ""
         print_message "Step 6: Running logging setup (profile: ${NFTABLES_PROFILE}, script: ${NFTABLES_LOG_SCRIPT})..."
 
-        # Verify opt.7z was extracted
-        if [ "$OPT_EXTRACTED_OK" != true ]; then
-            print_warning "opt.7z archive was not extracted — skipping logging setup"
-        else
-            LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_LOG_SCRIPT}"
+        LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_LOG_SCRIPT}"
 
-            if [ -f "$LOGGING_SCRIPT" ] && [ -s "$LOGGING_SCRIPT" ]; then
-                # Make script executable
-                chmod +x "$LOGGING_SCRIPT"
-                print_message "Running: $LOGGING_SCRIPT"
+        if [ -f "$LOGGING_SCRIPT" ] && [ -s "$LOGGING_SCRIPT" ]; then
+            # Make script executable
+            chmod +x "$LOGGING_SCRIPT"
+            print_message "Running: $LOGGING_SCRIPT"
 
-                # Execute logging setup script
-                if bash "$LOGGING_SCRIPT"; then
-                    print_success "Logging setup completed (${NFTABLES_LOG_SCRIPT})"
-                else
-                    print_warning "Logging setup script returned an error (exit code: $?)"
-                    print_message "You can run it manually later: bash $LOGGING_SCRIPT"
-                fi
+            # Execute logging setup script
+            if bash "$LOGGING_SCRIPT"; then
+                print_success "Logging setup completed (${NFTABLES_LOG_SCRIPT})"
             else
-                print_warning "Logging script not found or empty: $LOGGING_SCRIPT"
-                print_message "Expected path in opt.7z archive: nftables/logging/${NFTABLES_LOG_SCRIPT}"
-                # List available logging scripts for debugging
-                print_message "Available logging scripts:"
-                ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
+                print_warning "Logging setup script returned an error (exit code: $?)"
+                print_message "You can run it manually later: bash $LOGGING_SCRIPT"
             fi
+        else
+            print_warning "Logging script not found: $LOGGING_SCRIPT"
+            print_message "  File must exist in /opt/nftables/logging/ (from opt.7z or pre-installed)"
+            print_message "Available logging scripts:"
+            ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
         fi
     elif [ "$NFTABLES_OK" = true ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
         echo ""

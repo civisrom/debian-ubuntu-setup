@@ -9,14 +9,21 @@ set -e
 
 SCRIPT_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh.sha256"
-TEMP_SCRIPT="/tmp/system-setup-$$.sh"
-TEMP_CHECKSUM="/tmp/system-setup-$$.sha256"
+PROFILES_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/config/nftables-profiles.conf"
+TEMP_DIR="/tmp/system-setup-$$"
+TEMP_SCRIPT="${TEMP_DIR}/system-setup.sh"
+TEMP_CHECKSUM="${TEMP_DIR}/system-setup.sha256"
+TEMP_PROFILES_DIR="${TEMP_DIR}/config"
+TEMP_PROFILES="${TEMP_PROFILES_DIR}/nftables-profiles.conf"
 
 # Cleanup temporary files on exit (normal, error, or interrupt)
 cleanup() {
-    rm -f "$TEMP_SCRIPT" "$TEMP_CHECKSUM"
+    rm -rf "$TEMP_DIR"
 }
 trap cleanup EXIT
+
+# Create temp directory
+mkdir -p "$TEMP_PROFILES_DIR"
 
 # Colors
 RED='\033[0;31m'
@@ -84,6 +91,15 @@ if wget -q "$CHECKSUM_URL" -O "$TEMP_CHECKSUM" 2>/dev/null; then
 else
     print_warning "Checksum file not available, skipping integrity check"
     print_warning "This is less secure. Consider adding a checksum file to the repository."
+fi
+
+# Download nftables profiles config (optional — script has embedded fallback)
+print_message "Downloading nftables profiles config..."
+if wget -q "$PROFILES_URL" -O "$TEMP_PROFILES" 2>/dev/null; then
+    print_message "Profiles config downloaded"
+else
+    print_warning "Profiles config not available (embedded defaults will be used)"
+    rm -f "$TEMP_PROFILES"
 fi
 
 # Make executable
