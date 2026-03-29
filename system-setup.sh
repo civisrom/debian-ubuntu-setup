@@ -149,6 +149,62 @@ else
     print_warning "Running in non-interactive mode with default settings"
 fi
 
+# ─── Load nftables profiles configuration ─────────────────────────────────
+# Try external config first (repo checkout), fall back to embedded defaults.
+# To modify profiles, edit config/nftables-profiles.conf
+_NFT_PROFILES_LOADED=false
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _SCRIPT_DIR=""
+
+if [ -n "$_SCRIPT_DIR" ] && [ -f "${_SCRIPT_DIR}/config/nftables-profiles.conf" ]; then
+    . "${_SCRIPT_DIR}/config/nftables-profiles.conf"
+    _NFT_PROFILES_LOADED=true
+fi
+
+# Embedded fallback — used when script is downloaded standalone (via install.sh)
+if [ "$_NFT_PROFILES_LOADED" != true ]; then
+    NFT_PROFILES_COUNT=9
+    NFT_DEFAULT_PROFILE=2
+
+    # ── Basic profiles ──
+    NFT_PROFILE_NAMES=( [1]="relay" [2]="docker" [3]="native" )
+    NFT_PROFILE_DESCRIPTIONS=(
+        [1]="relay  — for relay/proxy servers"
+        [2]="docker — for servers with Docker (default)"
+        [3]="native — for standard servers without Docker"
+    )
+    NFT_PROFILE_CONFIGS=( [1]="relay_nftables.conf" [2]="docker_nftables.conf" [3]="native_nftables.conf" )
+    NFT_PROFILE_LOGSCRIPTS=( [1]="relay_logging.sh" [2]="docker_logging.sh" [3]="native_logging.sh" )
+
+    # ── v2 profiles (advanced) ──
+    NFT_PROFILE_NAMES+=( [4]="relay-wg-autossh-v2" [5]="relay-wg-autossh-v2-ge2" [6]="relay-wg-autossh-v2-ge2-eth0" )
+    NFT_PROFILE_NAMES+=( [7]="ge-docker-v2" [8]="ge-docker-v2-eth0" [9]="nl-nginx-wg-easy" )
+    NFT_PROFILE_DESCRIPTIONS+=(
+        [4]="relay-wg-autossh-v2          — relay + WireGuard + autossh"
+        [5]="relay-wg-autossh-v2-ge2      — relay + WG + autossh + ge2 iface"
+        [6]="relay-wg-autossh-v2-ge2-eth0 — relay + WG + autossh + ge2 + eth0"
+        [7]="ge-docker-v2                 — GE Docker host"
+        [8]="ge-docker-v2-eth0            — GE Docker host + eth0"
+        [9]="nl-nginx-wg-easy             — NL nginx host + wg-easy"
+    )
+    NFT_PROFILE_CONFIGS+=(
+        [4]="relay_host_nftables_wg_autossh_v2.conf"
+        [5]="relay_host_nftables_wg_autossh_v2_ge2.conf"
+        [6]="relay_host_nftables_wg_autossh_v2_ge2_eth0.conf"
+        [7]="ge_docker_host_nftables_v2.conf"
+        [8]="ge_docker_host_nftables_v2_eth0.conf"
+        [9]="nl_nginx_host_nftables_v2_wg-easy.conf"
+    )
+    NFT_PROFILE_LOGSCRIPTS+=(
+        [4]="relay_host_nftables_wg_autossh_v2.sh"
+        [5]="relay_host_nftables_wg_autossh_v2_ge2.sh"
+        [6]="relay_host_nftables_wg_autossh_v2_ge2_eth0.sh"
+        [7]="ge_docker_host_nftables_v2.sh"
+        [8]="ge_docker_host_nftables_v2_eth0.sh"
+        [9]="nl_nginx_host_nftables_v2_wg-easy.sh"
+    )
+fi
+unset _NFT_PROFILES_LOADED _SCRIPT_DIR
+
 # Print banner
 echo ""
 print_header "╔═══════════════════════════════════════════════╗"
@@ -859,86 +915,45 @@ if [ "$INTERACTIVE" = true ]; then
         fi
 
         # Ask about nftables config profile from opt.7z
+        # Profiles are loaded from config/nftables-profiles.conf (or embedded fallback)
         if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
             echo ""
             print_message "Install nftables configuration from opt.7z archive?"
             print_message "  Available profiles:"
-            print_message "    ── Basic profiles ──"
-            print_message "    1) relay  — for relay/proxy servers (relay_nftables.conf)"
-            print_message "    2) docker — for servers with Docker (docker_nftables.conf)"
-            print_message "    3) native — for standard servers without Docker (native_nftables.conf)"
-            print_message ""
-            print_message "    ── v2 profiles (advanced) ──"
-            print_message "    4) relay-wg-autossh     — relay + WireGuard + autossh (relay_host_nftables_wg_autossh_v2.conf)"
-            print_message "    5) relay-wg-autossh-ge2 — relay + WG + autossh + ge2 iface (relay_host_nftables_wg_autossh_v2_ge2.conf)"
-            print_message "    6) relay-wg-autossh-ge2-eth0 — relay + WG + autossh + ge2 + eth0 (relay_host_nftables_wg_autossh_v2_ge2_eth0.conf)"
-            print_message "    7) ge-docker-v2         — GE Docker host (ge_docker_host_nftables_v2.conf)"
-            print_message "    8) ge-docker-v2-eth0    — GE Docker host + eth0 (ge_docker_host_nftables_v2_eth0.conf)"
-            print_message "    9) nl-nginx-wg-easy     — NL nginx host + wg-easy (nl_nginx_host_nftables_v2_wg-easy.conf)"
+            # Generate menu dynamically from NFT_PROFILE_DESCRIPTIONS array
+            _prev_group=""
+            for _i in $(seq 1 "$NFT_PROFILES_COUNT"); do
+                # Insert group headers between basic (1-3) and v2 (4+) profiles
+                if [ "$_i" -le 3 ] && [ "$_prev_group" != "basic" ]; then
+                    print_message "    ── Basic profiles ──"
+                    _prev_group="basic"
+                elif [ "$_i" -eq 4 ] && [ "$_prev_group" != "v2" ]; then
+                    print_message ""
+                    print_message "    ── v2 profiles (advanced) ──"
+                    _prev_group="v2"
+                fi
+                print_message "    ${_i}) ${NFT_PROFILE_DESCRIPTIONS[$_i]}"
+            done
+            unset _i _prev_group
             echo ""
             read -p "Install nftables config from archive? (y/N): " INSTALL_NFTABLES_CONF
             INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
 
             if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
-                read -p "Select profile [1-9] (default: 2): " NFTABLES_PROFILE_NUM
-                NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-2}
+                read -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
+                NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-$NFT_DEFAULT_PROFILE}
 
-                case $NFTABLES_PROFILE_NUM in
-                    1)
-                        NFTABLES_PROFILE="relay"
-                        NFTABLES_CONF_FILE="relay_nftables.conf"
-                        NFTABLES_LOG_SCRIPT="relay_logging.sh"
-                        print_message "Selected: relay (relay_nftables.conf)"
-                        ;;
-                    3)
-                        NFTABLES_PROFILE="native"
-                        NFTABLES_CONF_FILE="native_nftables.conf"
-                        NFTABLES_LOG_SCRIPT="native_logging.sh"
-                        print_message "Selected: native (native_nftables.conf)"
-                        ;;
-                    4)
-                        NFTABLES_PROFILE="relay-wg-autossh-v2"
-                        NFTABLES_CONF_FILE="relay_host_nftables_wg_autossh_v2.conf"
-                        NFTABLES_LOG_SCRIPT="relay_host_nftables_wg_autossh_v2.sh"
-                        print_message "Selected: relay-wg-autossh-v2 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    5)
-                        NFTABLES_PROFILE="relay-wg-autossh-v2-ge2"
-                        NFTABLES_CONF_FILE="relay_host_nftables_wg_autossh_v2_ge2.conf"
-                        NFTABLES_LOG_SCRIPT="relay_host_nftables_wg_autossh_v2_ge2.sh"
-                        print_message "Selected: relay-wg-autossh-v2-ge2 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    6)
-                        NFTABLES_PROFILE="relay-wg-autossh-v2-ge2-eth0"
-                        NFTABLES_CONF_FILE="relay_host_nftables_wg_autossh_v2_ge2_eth0.conf"
-                        NFTABLES_LOG_SCRIPT="relay_host_nftables_wg_autossh_v2_ge2_eth0.sh"
-                        print_message "Selected: relay-wg-autossh-v2-ge2-eth0 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    7)
-                        NFTABLES_PROFILE="ge-docker-v2"
-                        NFTABLES_CONF_FILE="ge_docker_host_nftables_v2.conf"
-                        NFTABLES_LOG_SCRIPT="ge_docker_host_nftables_v2.sh"
-                        print_message "Selected: ge-docker-v2 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    8)
-                        NFTABLES_PROFILE="ge-docker-v2-eth0"
-                        NFTABLES_CONF_FILE="ge_docker_host_nftables_v2_eth0.conf"
-                        NFTABLES_LOG_SCRIPT="ge_docker_host_nftables_v2_eth0.sh"
-                        print_message "Selected: ge-docker-v2-eth0 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    9)
-                        NFTABLES_PROFILE="nl-nginx-wg-easy"
-                        NFTABLES_CONF_FILE="nl_nginx_host_nftables_v2_wg-easy.conf"
-                        NFTABLES_LOG_SCRIPT="nl_nginx_host_nftables_v2_wg-easy.sh"
-                        print_message "Selected: nl-nginx-wg-easy ($NFTABLES_CONF_FILE)"
-                        ;;
-                    *)
-                        NFTABLES_PROFILE="docker"
-                        NFTABLES_CONF_FILE="docker_nftables.conf"
-                        NFTABLES_LOG_SCRIPT="docker_logging.sh"
-                        print_message "Selected: docker (docker_nftables.conf)"
-                        ;;
-                esac
+                # Validate selection, fall back to default if invalid
+                if [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
+                    print_warning "Invalid selection: $NFTABLES_PROFILE_NUM, using default (${NFT_DEFAULT_PROFILE})"
+                    NFTABLES_PROFILE_NUM=$NFT_DEFAULT_PROFILE
+                fi
+
+                # Set variables from profile arrays
+                NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
+                NFTABLES_CONF_FILE="${NFT_PROFILE_CONFIGS[$NFTABLES_PROFILE_NUM]}"
+                NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]}"
+                print_message "Selected: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
 
                 # Ask about logging script (only if profile has one)
                 if [ -n "$NFTABLES_LOG_SCRIPT" ]; then
@@ -5017,10 +5032,10 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         print_message "- nftables: ENABLED (service not active — check configuration)"
     fi
     if [ ! -z "$NFTABLES_PROFILE" ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
-        print_message "  Profile: ${NFTABLES_PROFILE} (${NFTABLES_PROFILE}_nftables.conf)"
+        print_message "  Profile: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
     fi
     if [ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ]; then
-        print_message "  Logging: ${NFTABLES_PROFILE}_logging.sh executed"
+        print_message "  Logging: ${NFTABLES_LOG_SCRIPT} executed"
     fi
     if dpkg -l ufw 2>/dev/null | grep -q "^ii"; then
         if systemctl is-masked --quiet ufw 2>/dev/null; then
