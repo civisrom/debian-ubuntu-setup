@@ -911,9 +911,8 @@ if [ "$INTERACTIVE" = true ]; then
                     6)
                         NFTABLES_PROFILE="relay-wg-autossh-v2-ge2-eth0"
                         NFTABLES_CONF_FILE="relay_host_nftables_wg_autossh_v2_ge2_eth0.conf"
-                        NFTABLES_LOG_SCRIPT=""
+                        NFTABLES_LOG_SCRIPT="relay_host_nftables_wg_autossh_v2_ge2_eth0.sh"
                         print_message "Selected: relay-wg-autossh-v2-ge2-eth0 ($NFTABLES_CONF_FILE)"
-                        print_message "  Note: no dedicated logging script for this profile"
                         ;;
                     7)
                         NFTABLES_PROFILE="ge-docker-v2"
