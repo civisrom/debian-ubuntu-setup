@@ -130,7 +130,8 @@ bindkey "$terminfo[kcuu1]" history-substring-search-up
 bindkey "$terminfo[kcud1]" history-substring-search-down
 
 # Environment
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+#export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+export PATH=$PATH:/usr/sbin
 export PATH=$PATH:/usr/local/go/bin
 export GOPATH=$HOME/goproject
 export GOBIN=$GOPATH/bin
