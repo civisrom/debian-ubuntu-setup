@@ -439,3 +439,22 @@ alias nft-save='sudo sh -c "nft list ruleset > /etc/nftables.conf"'             
 alias nft-reload='sudo systemctl restart nftables'                              # перезапустить сервис nftables
 alias nft-status='sudo systemctl status nftables'                               # статус сервиса nftables
 alias nft-test='sudo nft -c -f /etc/nftables.conf && echo "✓ Синтаксис OK" || echo "✗ Ошибка в конфиге"'  # тест с выводом результата
+
+# --- claude-chat-to-md -------------------------------------------------------
+_ccmd='/root/skripts/bin/python3 -m claude_chat_to_md'
+
+alias chat-list="$_ccmd --list"                                          # список всех сессий
+alias chat-latest="$_ccmd --latest --no-tool-results -o ~/chat-latest.md && echo 'Saved: ~/chat-latest.md'"  # сохранить последнюю
+alias chat-all="$_ccmd --all --no-tool-results --output-dir ~/chats/ && echo 'Saved to: ~/chats/'"           # экспортировать все
+
+# Сохранить сессию по номеру: chat-save 1 my-session
+chat-save() {
+    local idx="${1:?Usage: chat-save <index> [filename]}"
+    local name="${2:-chat-$(date +%Y%m%d-%H%M%S)}"
+    /root/skripts/bin/python3 -m claude_chat_to_md "$idx" --no-tool-results -o ~/"${name}.md" && echo "Saved: ~/${name}.md"
+}
+unset _ccmd
+
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
