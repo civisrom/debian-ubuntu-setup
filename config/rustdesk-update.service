@@ -1,0 +1,34 @@
+[Unit]
+Description=RustDesk Docker Compose Auto-Update
+Documentation=https://github.com/civisrom/debian-ubuntu-setup
+Requires=docker.service
+After=docker.service network-online.target rustdesk-compose.service
+Wants=network-online.target
+ConditionPathExists=/opt/rustdesk/docker-compose.yml
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/rustdesk
+# Wait for Docker to be fully ready (same pattern as rustdesk-compose.service)
+ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do docker info >/dev/null 2>&1 && break || sleep 3; done'
+# Validate docker-compose.yml before touching anything
+ExecStartPre=/usr/bin/docker compose config -q
+# Pull the latest images from the registry
+ExecStart=/usr/bin/docker compose pull
+# Recreate containers only for images that actually changed (no-op otherwise)
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+# Clean up dangling images left over from the previous version
+ExecStart=/usr/bin/docker image prune -f
+# Timeouts (pull over slow links can take a while)
+TimeoutStartSec=900
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rustdesk-update
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

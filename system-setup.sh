@@ -341,6 +341,19 @@ if [ "$INTERACTIVE" = true ]; then
     read -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
     INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
 
+    # Ask about weekly auto-update timer (only when RustDesk is being installed)
+    if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+        echo ""
+        print_message "Install weekly auto-update for RustDesk containers?"
+        print_message "  - Creates rustdesk-update.service + rustdesk-update.timer"
+        print_message "  - Runs every Sunday at 04:00 (with ±1h random delay)"
+        print_message "  - docker compose pull → up -d → image prune -f"
+        read -p "Install weekly auto-update timer? (Y/n): " INSTALL_RUSTDESK_UPDATE
+        INSTALL_RUSTDESK_UPDATE=${INSTALL_RUSTDESK_UPDATE:-y}
+    else
+        INSTALL_RUSTDESK_UPDATE="n"
+    fi
+
     echo ""
 
     # Ask about extracting opt.7z archive
@@ -1354,6 +1367,7 @@ else
     INSTALL_IPSET="n"
     INSTALL_RCLONE="n"
     INSTALL_RUSTDESK="n"
+    INSTALL_RUSTDESK_UPDATE="n"
     CONFIGURE_SWAP="n"
     SWAP_MODE="1"
     SWAP_INTERACTIVE=false
@@ -1391,6 +1405,9 @@ print_header "══════════════════════
 print_message "Configuration Summary:"
 print_message "  OS: $OS $VERSION ($VERSION_CODENAME)"
 print_message "  RustDesk Server: $([ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ] && echo "YES (Docker)" || echo "NO")"
+if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+    print_message "    - Weekly auto-update: $([ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ] && echo "YES (rustdesk-update.timer)" || echo "NO")"
+fi
 print_message "  Root password: $([ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  New user: $([ ! -z "$NEW_USERNAME" ] && echo "YES ($NEW_USERNAME)" || echo "NO")"
 if [ ! -z "$NEW_USERNAME" ]; then
@@ -1749,11 +1766,66 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         print_message "RustDesk containers will start automatically after Docker installation"
     fi
 
+    # --- Weekly auto-update timer (optional) ---
+    if [ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ]; then
+        echo ""
+        print_message "Installing RustDesk weekly auto-update timer..."
+
+        RUSTDESK_UPDATE_SERVICE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/rustdesk-update.service"
+        RUSTDESK_UPDATE_TIMER_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/rustdesk-update.timer"
+        RUSTDESK_UPDATE_SERVICE_PATH="/etc/systemd/system/rustdesk-update.service"
+        RUSTDESK_UPDATE_TIMER_PATH="/etc/systemd/system/rustdesk-update.timer"
+
+        RUSTDESK_UPDATE_OK=true
+
+        if curl -fsSL "$RUSTDESK_UPDATE_SERVICE_URL" -o "$RUSTDESK_UPDATE_SERVICE_PATH"; then
+            print_message "rustdesk-update.service downloaded"
+        else
+            print_warning "Failed to download rustdesk-update.service"
+            RUSTDESK_UPDATE_OK=false
+        fi
+
+        if [ "$RUSTDESK_UPDATE_OK" = true ]; then
+            if curl -fsSL "$RUSTDESK_UPDATE_TIMER_URL" -o "$RUSTDESK_UPDATE_TIMER_PATH"; then
+                print_message "rustdesk-update.timer downloaded"
+            else
+                print_warning "Failed to download rustdesk-update.timer"
+                RUSTDESK_UPDATE_OK=false
+            fi
+        fi
+
+        if [ "$RUSTDESK_UPDATE_OK" = true ]; then
+            chmod 644 "$RUSTDESK_UPDATE_SERVICE_PATH" "$RUSTDESK_UPDATE_TIMER_PATH"
+
+            # Reload systemd to pick up new unit files
+            systemctl daemon-reload
+
+            # Enable and start the timer (not the service — the timer triggers it)
+            if systemctl enable rustdesk-update.timer 2>/dev/null && \
+               systemctl start rustdesk-update.timer 2>/dev/null; then
+                print_success "rustdesk-update.timer enabled and started"
+                NEXT_RUN=$(systemctl list-timers rustdesk-update.timer --no-pager 2>/dev/null | awk 'NR==2 {print $1, $2}')
+                [ -n "$NEXT_RUN" ] && print_message "  Next run: $NEXT_RUN"
+                print_message "  Schedule:  Sunday 04:00 (±1h random delay)"
+                print_message "  Manual run: systemctl start rustdesk-update.service"
+                print_message "  Logs:      journalctl -u rustdesk-update.service"
+                print_message "  Status:    systemctl list-timers rustdesk-update.timer"
+            else
+                print_warning "Failed to enable/start rustdesk-update.timer"
+            fi
+        else
+            print_warning "Auto-update timer installation skipped due to download errors"
+        fi
+    fi
+
     echo ""
     print_success "RustDesk installation completed"
     print_message "  Directory: $RUSTDESK_DIR"
     print_message "  Service:   rustdesk-compose.service"
     print_message "  Manage:    systemctl {start|stop|restart|status} rustdesk-compose.service"
+    if [ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ]; then
+        print_message "  Auto-update: rustdesk-update.timer (weekly, Sun 04:00)"
+    fi
     echo ""
 else
     print_message "Skipping RustDesk installation (not requested)"
@@ -4878,6 +4950,9 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
             print_message "  Status: Running"
         else
             print_message "  Status: Enabled (will start with Docker)"
+        fi
+        if systemctl is-enabled --quiet rustdesk-update.timer 2>/dev/null; then
+            print_message "  Auto-update: rustdesk-update.timer (weekly, Sun 04:00)"
         fi
     else
         print_message "- RustDesk Server: Installation attempted but service not enabled"

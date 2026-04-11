@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekly RustDesk Docker Compose Auto-Update
+Documentation=https://github.com/civisrom/debian-ubuntu-setup
+Requires=rustdesk-update.service
+
+[Timer]
+# Fire every Sunday at 04:00 local time
+OnCalendar=Sun *-*-* 04:00:00
+# Run on next boot if the machine was off during the scheduled time
+Persistent=true
+# Spread load across up to 1 hour to avoid registry/network spikes
+RandomizedDelaySec=1h
+# Accuracy window — systemd can coalesce timer wake-ups within this
+AccuracySec=5min
+Unit=rustdesk-update.service
+
+[Install]
+WantedBy=timers.target
