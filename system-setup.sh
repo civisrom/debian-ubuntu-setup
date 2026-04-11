@@ -931,7 +931,7 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "    ── Basic profiles ──"
                 _prev_group="basic"
             elif [ "$_i" -eq 4 ] && [ "$_prev_group" != "v2" ]; then
-                print_message ""
+                echo ""
                 print_message "    ── v2 profiles (advanced) ──"
                 _prev_group="v2"
             fi
@@ -946,16 +946,21 @@ if [ "$INTERACTIVE" = true ]; then
             read -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
             NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-$NFT_DEFAULT_PROFILE}
 
-            # Validate selection, fall back to default if invalid
-            if [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
-                print_warning "Invalid selection: $NFTABLES_PROFILE_NUM, using default (${NFT_DEFAULT_PROFILE})"
+            # Validate selection: must be numeric AND within defined profile range.
+            # Non-numeric input would be evaluated as bash arithmetic when used as an
+            # array subscript, which can produce noisy errors under `set -e`.
+            if ! [[ "$NFTABLES_PROFILE_NUM" =~ ^[0-9]+$ ]] \
+               || [ "$NFTABLES_PROFILE_NUM" -lt 1 ] \
+               || [ "$NFTABLES_PROFILE_NUM" -gt "$NFT_PROFILES_COUNT" ] \
+               || [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
+                print_warning "Invalid selection: '${NFTABLES_PROFILE_NUM}', using default (${NFT_DEFAULT_PROFILE})"
                 NFTABLES_PROFILE_NUM=$NFT_DEFAULT_PROFILE
             fi
 
             # Set variables from profile arrays
             NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
             NFTABLES_CONF_FILE="${NFT_PROFILE_CONFIGS[$NFTABLES_PROFILE_NUM]}"
-            NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]}"
+            NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]:-}"
             print_message "Selected: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
 
             # Ask about logging script (only if profile has one)
@@ -3781,6 +3786,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         print_message "Step 5: Installing nftables config (profile: ${NFTABLES_PROFILE}, file: ${NFTABLES_CONF_FILE})..."
 
         NFTABLES_SRC="/opt/nftables/${NFTABLES_CONF_FILE}"
+        NFTABLES_DST="/etc/nftables.conf"
 
         # Check if config file exists (from opt.7z extraction or pre-installed)
         if [ ! -f "$NFTABLES_SRC" ] || [ ! -s "$NFTABLES_SRC" ]; then
@@ -3796,39 +3802,33 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             print_warning "Skipping config installation — using default nftables.conf"
             INSTALL_NFTABLES_CONF="skipped"
         else
-            NFTABLES_SRC="/opt/nftables/${NFTABLES_CONF_FILE}"
-            NFTABLES_DST="/etc/nftables.conf"
+            # Backup existing nftables.conf
+            if [ -f "$NFTABLES_DST" ]; then
+                cp "$NFTABLES_DST" "${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
+                print_message "Existing $NFTABLES_DST backed up"
+            fi
 
-            if [ -f "$NFTABLES_SRC" ] && [ -s "$NFTABLES_SRC" ]; then
-                # Backup existing nftables.conf
-                if [ -f "$NFTABLES_DST" ]; then
-                    cp "$NFTABLES_DST" "${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
-                    print_message "Existing $NFTABLES_DST backed up"
-                fi
+            # Copy selected profile config as /etc/nftables.conf
+            cp "$NFTABLES_SRC" "$NFTABLES_DST"
+            chmod 755 "$NFTABLES_DST"
+            chown root:root "$NFTABLES_DST"
 
-                # Copy selected profile config as /etc/nftables.conf
-                cp "$NFTABLES_SRC" "$NFTABLES_DST"
-                chmod 755 "$NFTABLES_DST"
-                chown root:root "$NFTABLES_DST"
-
-                # Verify the copy was successful
-                if [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ] && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
-                    print_success "Installed ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
-                    print_message "  Permissions: 755, Owner: root:root"
-                    print_message "  File size: $(wc -c < "$NFTABLES_DST") bytes"
+            # Verify the copy was successful
+            if [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ] && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
+                print_success "Installed ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
+                print_message "  Permissions: 755, Owner: root:root"
+                print_message "  File size: $(wc -c < "$NFTABLES_DST") bytes"
+            else
+                print_error "CRITICAL: Config file copy verification failed!"
+                print_error "Source: $NFTABLES_SRC ($(wc -c < "$NFTABLES_SRC" 2>/dev/null || echo 0) bytes)"
+                print_error "Destination: $NFTABLES_DST ($(wc -c < "$NFTABLES_DST" 2>/dev/null || echo 0) bytes)"
+                # Force retry with install command
+                print_message "Retrying with install command..."
+                if install -m 755 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST" && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
+                    print_success "Retry successful: ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
                 else
-                    print_error "CRITICAL: Config file copy verification failed!"
-                    print_error "Source: $NFTABLES_SRC ($(wc -c < "$NFTABLES_SRC" 2>/dev/null || echo 0) bytes)"
-                    print_error "Destination: $NFTABLES_DST ($(wc -c < "$NFTABLES_DST" 2>/dev/null || echo 0) bytes)"
-                    # Force retry with install command
-                    print_message "Retrying with install command..."
-                    install -m 755 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST"
-                    if cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
-                        print_success "Retry successful: ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
-                    else
-                        print_error "Config installation failed after retry"
-                        INSTALL_NFTABLES_CONF="skipped"
-                    fi
+                    print_error "Config installation failed after retry"
+                    INSTALL_NFTABLES_CONF="skipped"
                 fi
             fi
         fi
@@ -3895,9 +3895,16 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                     echo ""
                     print_message "Current nftables ruleset:"
                     nft list ruleset 2>/dev/null | head -40
-                    RULES_COUNT=$(nft list ruleset 2>/dev/null | grep -c "rule" || echo "0")
+                    # Count tables and chains as a meaningful indicator.
+                    # Previous approach `grep -c "rule"` was unreliable: nft output has
+                    # no "rule" keyword, and `|| echo 0` concatenated a second "0" when
+                    # grep exited non-zero on zero matches.
+                    TABLES_COUNT=$(nft list tables 2>/dev/null | wc -l)
+                    CHAINS_COUNT=$(nft list ruleset 2>/dev/null | grep -cE '^[[:space:]]*chain[[:space:]]' || true)
+                    TABLES_COUNT=${TABLES_COUNT:-0}
+                    CHAINS_COUNT=${CHAINS_COUNT:-0}
                     echo ""
-                    print_message "Total rules loaded: $RULES_COUNT"
+                    print_message "Loaded: ${TABLES_COUNT} table(s), ${CHAINS_COUNT} chain(s)"
                 else
                     print_error "Failed to apply nftables configuration"
                     if [ -f /tmp/nft_apply_err ] && [ -s /tmp/nft_apply_err ]; then
