@@ -446,19 +446,110 @@ alias nft-status='sudo systemctl status nftables'                               
 alias nft-test='sudo nft -c -f /etc/nftables.conf && echo "✓ Синтаксис OK" || echo "✗ Ошибка в конфиге"'  # тест с выводом результата
 
 # --- claude-chat-to-md -------------------------------------------------------
-_ccmd='/root/skripts/bin/python3 -m claude_chat_to_md'
+# Конвертер сессий Claude Code (~/.claude/projects/*.jsonl) в Markdown.
+# https://github.com/civisrom/claude-chat-to-md
+#
+# Быстрые команды:
+#   chat                   — прямой вызов утилиты с произвольными аргументами
+#   chat-list              — список всех сессий (#, дата, ID, заголовок, проект)
+#   chat-latest            — сохранить последнюю сессию в ~/chat-latest.md
+#   chat-latest-full       — то же, но со всеми tool-results
+#   chat-all               — экспортировать все сессии в ~/chats/
+#   chat-all-full          — то же, со всеми tool-results, в ~/chats-full/
+#   chat-save <N>          — сохранить сессию по номеру/UUID в ~/chat-<date>.md
+#   chat-save-full <N>     — то же, со всеми tool-results
+#   chat-view <N>          — посмотреть сессию в less
+#   chat-edit <N>          — открыть сессию в $EDITOR (временный файл)
+#   chat-project <name>    — список сессий проекта (фильтр по пути)
+#   chat-project-latest <name>  — сохранить последнюю сессию проекта
+#   chat-find <text>       — поиск сессии по подстроке в заголовке
+#   chat-fzf               — интерактивный выбор через fzf (если установлен)
+#   chat-update            — обновить установленный скрипт с GitHub
+#   chat-clean             — оставить только 20 последних .md в ~/chats/
 
-alias chat-list="$_ccmd --list"                                          # список всех сессий
-alias chat-latest="$_ccmd --latest --no-tool-results -o ~/chat-latest.md && echo 'Saved: ~/chat-latest.md'"  # сохранить последнюю
-alias chat-all="$_ccmd --all --no-tool-results --output-dir ~/chats/ && echo 'Saved to: ~/chats/'"           # экспортировать все
+# Внутренний хелпер: полный путь к установленной утилите.
+_claude_chat() { /root/skripts/bin/python3 -m claude_chat_to_md "$@" }
 
-# Сохранить сессию по номеру: chat-save 1 my-session
+# Прямой вызов с произвольными аргументами: chat --help / chat <uuid>
+alias chat='_claude_chat'
+
+# Листинг
+alias chat-list='_claude_chat --list'
+
+# Быстрые экспорты (--no-tool-results для компактного вывода)
+alias chat-latest='_claude_chat --latest --no-tool-results -o ~/chat-latest.md && echo "Saved: ~/chat-latest.md"'
+alias chat-latest-full='_claude_chat --latest -o ~/chat-latest-full.md && echo "Saved: ~/chat-latest-full.md"'
+alias chat-all='_claude_chat --all --no-tool-results --output-dir ~/chats/ && echo "Saved to: ~/chats/"'
+alias chat-all-full='_claude_chat --all --output-dir ~/chats-full/ && echo "Saved to: ~/chats-full/"'
+
+# Сохранить одну сессию (без tool-results): chat-save <idx|uuid> [filename]
 chat-save() {
-    local idx="${1:?Usage: chat-save <index> [filename]}"
+    local q="${1:?Usage: chat-save <index|uuid> [filename]}"
     local name="${2:-chat-$(date +%Y%m%d-%H%M%S)}"
-    /root/skripts/bin/python3 -m claude_chat_to_md "$idx" --no-tool-results -o ~/"${name}.md" && echo "Saved: ~/${name}.md"
+    _claude_chat "$q" --no-tool-results -o ~/"${name}.md" \
+        && echo "Saved: ~/${name}.md"
 }
-unset _ccmd
+
+# Сохранить одну сессию со всеми tool-results: chat-save-full <idx|uuid> [filename]
+chat-save-full() {
+    local q="${1:?Usage: chat-save-full <index|uuid> [filename]}"
+    local name="${2:-chat-full-$(date +%Y%m%d-%H%M%S)}"
+    _claude_chat "$q" -o ~/"${name}.md" \
+        && echo "Saved: ~/${name}.md"
+}
+
+# Посмотреть сессию в less: chat-view <idx|uuid>
+chat-view() {
+    local q="${1:?Usage: chat-view <index|uuid>}"
+    _claude_chat "$q" --no-tool-results | less -R
+}
+
+# Открыть сессию в $EDITOR через временный файл: chat-edit <idx|uuid>
+chat-edit() {
+    local q="${1:?Usage: chat-edit <index|uuid>}"
+    local tmp
+    tmp="$(mktemp --suffix=.md)" || return 1
+    _claude_chat "$q" --no-tool-results -o "$tmp" && "${EDITOR:-nano}" "$tmp"
+    rm -f "$tmp"
+}
+
+# Фильтр по проекту (подстрока в пути): chat-project myapp
+chat-project() {
+    local proj="${1:?Usage: chat-project <project-substring>}"
+    _claude_chat --list --project "$proj"
+}
+
+# Сохранить последнюю сессию проекта: chat-project-latest myapp [filename]
+chat-project-latest() {
+    local proj="${1:?Usage: chat-project-latest <project> [filename]}"
+    local name="${2:-chat-${proj}-$(date +%Y%m%d-%H%M%S)}"
+    _claude_chat --latest --project "$proj" --no-tool-results -o ~/"${name}.md" \
+        && echo "Saved: ~/${name}.md"
+}
+
+# Поиск сессии по заголовку: chat-find "audit"
+chat-find() {
+    local q="${1:?Usage: chat-find <substring>}"
+    _claude_chat --list | grep -i --color=auto -- "$q"
+}
+
+# Интерактивный выбор сессии через fzf: chat-fzf
+chat-fzf() {
+    command -v fzf >/dev/null || { echo "fzf не установлен"; return 1; }
+    local idx
+    idx=$(_claude_chat --list | tail -n +3 | fzf --height=60% --reverse --prompt='session> ' | awk '{print $1}')
+    [[ -n "$idx" ]] && _claude_chat "$idx" --no-tool-results | less -R
+}
+
+# Обновить установленный скрипт до последней версии с GitHub
+alias chat-update='/root/skripts/bin/pip install --upgrade git+https://github.com/civisrom/claude-chat-to-md.git'
+
+# Очистить старые экспорты: оставить 20 последних .md в ~/chats/ (или в указанной директории)
+chat-clean() {
+    local dir="${1:-$HOME/chats}"
+    [[ -d "$dir" ]] || { echo "Нет директории: $dir"; return 1; }
+    ls -t "$dir"/*.md 2>/dev/null | tail -n +21 | xargs -r rm -v
+}
 
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
