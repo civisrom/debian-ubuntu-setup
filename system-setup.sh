@@ -149,6 +149,62 @@ else
     print_warning "Running in non-interactive mode with default settings"
 fi
 
+# ─── Load nftables profiles configuration ─────────────────────────────────
+# Try external config first (repo checkout), fall back to embedded defaults.
+# To modify profiles, edit config/nftables-profiles.conf
+_NFT_PROFILES_LOADED=false
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _SCRIPT_DIR=""
+
+if [ -n "$_SCRIPT_DIR" ] && [ -f "${_SCRIPT_DIR}/config/nftables-profiles.conf" ]; then
+    . "${_SCRIPT_DIR}/config/nftables-profiles.conf"
+    _NFT_PROFILES_LOADED=true
+fi
+
+# Embedded fallback — used when script is downloaded standalone (via install.sh)
+if [ "$_NFT_PROFILES_LOADED" != true ]; then
+    NFT_PROFILES_COUNT=9
+    NFT_DEFAULT_PROFILE=2
+
+    # ── Basic profiles ──
+    NFT_PROFILE_NAMES=( [1]="relay" [2]="docker" [3]="native" )
+    NFT_PROFILE_DESCRIPTIONS=(
+        [1]="relay  — for relay/proxy servers"
+        [2]="docker — for servers with Docker (default)"
+        [3]="native — for standard servers without Docker"
+    )
+    NFT_PROFILE_CONFIGS=( [1]="relay_nftables.conf" [2]="docker_nftables.conf" [3]="native_nftables.conf" )
+    NFT_PROFILE_LOGSCRIPTS=( [1]="relay_logging.sh" [2]="docker_logging.sh" [3]="native_logging.sh" )
+
+    # ── v2 profiles (advanced) ──
+    NFT_PROFILE_NAMES+=( [4]="relay-wg-autossh-v2" [5]="relay-wg-autossh-v2-ge2" [6]="relay-wg-autossh-v2-ge2-eth0" )
+    NFT_PROFILE_NAMES+=( [7]="ge-docker-v2" [8]="ge-docker-v2-eth0" [9]="nl-nginx-wg-easy" )
+    NFT_PROFILE_DESCRIPTIONS+=(
+        [4]="relay-wg-autossh-v2          — relay + WireGuard + autossh"
+        [5]="relay-wg-autossh-v2-ge2      — relay + WG + autossh + ge2 iface"
+        [6]="relay-wg-autossh-v2-ge2-eth0 — relay + WG + autossh + ge2 + eth0"
+        [7]="ge-docker-v2                 — GE Docker host"
+        [8]="ge-docker-v2-eth0            — GE Docker host + eth0"
+        [9]="nl-nginx-wg-easy             — NL nginx host + wg-easy"
+    )
+    NFT_PROFILE_CONFIGS+=(
+        [4]="relay_host_nftables_wg_autossh_v2.conf"
+        [5]="relay_host_nftables_wg_autossh_v2_ge2.conf"
+        [6]="relay_host_nftables_wg_autossh_v2_ge2_eth0.conf"
+        [7]="ge_docker_host_nftables_v2.conf"
+        [8]="ge_docker_host_nftables_v2_eth0.conf"
+        [9]="nl_nginx_host_nftables_v2_wg-easy.conf"
+    )
+    NFT_PROFILE_LOGSCRIPTS+=(
+        [4]="relay_host_nftables_wg_autossh_v2.sh"
+        [5]="relay_host_nftables_wg_autossh_v2_ge2.sh"
+        [6]="relay_host_nftables_wg_autossh_v2_ge2_eth0.sh"
+        [7]="ge_docker_host_nftables_v2.sh"
+        [8]="ge_docker_host_nftables_v2_eth0.sh"
+        [9]="nl_nginx_host_nftables_v2_wg-easy.sh"
+    )
+fi
+unset _NFT_PROFILES_LOADED _SCRIPT_DIR
+
 # Print banner
 echo ""
 print_header "╔═══════════════════════════════════════════════╗"
@@ -858,109 +914,64 @@ if [ "$INTERACTIVE" = true ]; then
             CUSTOM_PORTS=""
         fi
 
-        # Ask about nftables config profile from opt.7z
-        if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
-            echo ""
-            print_message "Install nftables configuration from opt.7z archive?"
-            print_message "  Available profiles:"
-            print_message "    ── Basic profiles ──"
-            print_message "    1) relay  — for relay/proxy servers (relay_nftables.conf)"
-            print_message "    2) docker — for servers with Docker (docker_nftables.conf)"
-            print_message "    3) native — for standard servers without Docker (native_nftables.conf)"
-            print_message ""
-            print_message "    ── v2 profiles (advanced) ──"
-            print_message "    4) relay-wg-autossh     — relay + WireGuard + autossh (relay_host_nftables_wg_autossh_v2.conf)"
-            print_message "    5) relay-wg-autossh-ge2 — relay + WG + autossh + ge2 iface (relay_host_nftables_wg_autossh_v2_ge2.conf)"
-            print_message "    6) relay-wg-autossh-ge2-eth0 — relay + WG + autossh + ge2 + eth0 (relay_host_nftables_wg_autossh_v2_ge2_eth0.conf)"
-            print_message "    7) ge-docker-v2         — GE Docker host (ge_docker_host_nftables_v2.conf)"
-            print_message "    8) ge-docker-v2-eth0    — GE Docker host + eth0 (ge_docker_host_nftables_v2_eth0.conf)"
-            print_message "    9) nl-nginx-wg-easy     — NL nginx host + wg-easy (nl_nginx_host_nftables_v2_wg-easy.conf)"
-            echo ""
-            read -p "Install nftables config from archive? (y/N): " INSTALL_NFTABLES_CONF
-            INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
+        # Ask about nftables config profile
+        # Profiles are loaded from config/nftables-profiles.conf (or embedded fallback)
+        # Config files are installed from opt.7z archive at execution time
+        echo ""
+        print_message "Install nftables configuration profile?"
+        if [ "$EXTRACT_OPT_ARCHIVE" != "y" ] && [ "$EXTRACT_OPT_ARCHIVE" != "Y" ]; then
+            print_warning "opt.7z extraction not selected — config files must already exist in /opt/nftables/"
+        fi
+        print_message "  Available profiles:"
+        # Generate menu dynamically from NFT_PROFILE_DESCRIPTIONS array
+        _prev_group=""
+        for _i in $(seq 1 "$NFT_PROFILES_COUNT"); do
+            # Insert group headers between basic (1-3) and v2 (4+) profiles
+            if [ "$_i" -le 3 ] && [ "$_prev_group" != "basic" ]; then
+                print_message "    ── Basic profiles ──"
+                _prev_group="basic"
+            elif [ "$_i" -eq 4 ] && [ "$_prev_group" != "v2" ]; then
+                print_message ""
+                print_message "    ── v2 profiles (advanced) ──"
+                _prev_group="v2"
+            fi
+            print_message "    ${_i}) ${NFT_PROFILE_DESCRIPTIONS[$_i]}"
+        done
+        unset _i _prev_group
+        echo ""
+        read -p "Install nftables config profile? (y/N): " INSTALL_NFTABLES_CONF
+        INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
 
-            if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
-                read -p "Select profile [1-9] (default: 2): " NFTABLES_PROFILE_NUM
-                NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-2}
+        if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
+            read -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
+            NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-$NFT_DEFAULT_PROFILE}
 
-                case $NFTABLES_PROFILE_NUM in
-                    1)
-                        NFTABLES_PROFILE="relay"
-                        NFTABLES_CONF_FILE="relay_nftables.conf"
-                        NFTABLES_LOG_SCRIPT="relay_logging.sh"
-                        print_message "Selected: relay (relay_nftables.conf)"
-                        ;;
-                    3)
-                        NFTABLES_PROFILE="native"
-                        NFTABLES_CONF_FILE="native_nftables.conf"
-                        NFTABLES_LOG_SCRIPT="native_logging.sh"
-                        print_message "Selected: native (native_nftables.conf)"
-                        ;;
-                    4)
-                        NFTABLES_PROFILE="relay-wg-autossh-v2"
-                        NFTABLES_CONF_FILE="relay_host_nftables_wg_autossh_v2.conf"
-                        NFTABLES_LOG_SCRIPT="relay_host_nftables_wg_autossh_v2.sh"
-                        print_message "Selected: relay-wg-autossh-v2 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    5)
-                        NFTABLES_PROFILE="relay-wg-autossh-v2-ge2"
-                        NFTABLES_CONF_FILE="relay_host_nftables_wg_autossh_v2_ge2.conf"
-                        NFTABLES_LOG_SCRIPT="relay_host_nftables_wg_autossh_v2_ge2.sh"
-                        print_message "Selected: relay-wg-autossh-v2-ge2 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    6)
-                        NFTABLES_PROFILE="relay-wg-autossh-v2-ge2-eth0"
-                        NFTABLES_CONF_FILE="relay_host_nftables_wg_autossh_v2_ge2_eth0.conf"
-                        NFTABLES_LOG_SCRIPT="relay_host_nftables_wg_autossh_v2_ge2_eth0.sh"
-                        print_message "Selected: relay-wg-autossh-v2-ge2-eth0 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    7)
-                        NFTABLES_PROFILE="ge-docker-v2"
-                        NFTABLES_CONF_FILE="ge_docker_host_nftables_v2.conf"
-                        NFTABLES_LOG_SCRIPT="ge_docker_host_nftables_v2.sh"
-                        print_message "Selected: ge-docker-v2 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    8)
-                        NFTABLES_PROFILE="ge-docker-v2-eth0"
-                        NFTABLES_CONF_FILE="ge_docker_host_nftables_v2_eth0.conf"
-                        NFTABLES_LOG_SCRIPT="ge_docker_host_nftables_v2_eth0.sh"
-                        print_message "Selected: ge-docker-v2-eth0 ($NFTABLES_CONF_FILE)"
-                        ;;
-                    9)
-                        NFTABLES_PROFILE="nl-nginx-wg-easy"
-                        NFTABLES_CONF_FILE="nl_nginx_host_nftables_v2_wg-easy.conf"
-                        NFTABLES_LOG_SCRIPT="nl_nginx_host_nftables_v2_wg-easy.sh"
-                        print_message "Selected: nl-nginx-wg-easy ($NFTABLES_CONF_FILE)"
-                        ;;
-                    *)
-                        NFTABLES_PROFILE="docker"
-                        NFTABLES_CONF_FILE="docker_nftables.conf"
-                        NFTABLES_LOG_SCRIPT="docker_logging.sh"
-                        print_message "Selected: docker (docker_nftables.conf)"
-                        ;;
-                esac
+            # Validate selection, fall back to default if invalid
+            if [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
+                print_warning "Invalid selection: $NFTABLES_PROFILE_NUM, using default (${NFT_DEFAULT_PROFILE})"
+                NFTABLES_PROFILE_NUM=$NFT_DEFAULT_PROFILE
+            fi
 
-                # Ask about logging script (only if profile has one)
-                if [ -n "$NFTABLES_LOG_SCRIPT" ]; then
-                    echo ""
-                    print_message "Install nftables logging script for '${NFTABLES_PROFILE}' profile?"
-                    print_message "  Script: ${NFTABLES_LOG_SCRIPT}"
-                    print_message "  Configures rsyslog/journald rules for nftables log messages"
-                    read -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
-                    INSTALL_NFTABLES_LOGGING=${INSTALL_NFTABLES_LOGGING:-y}
-                else
-                    INSTALL_NFTABLES_LOGGING="n"
-                fi
+            # Set variables from profile arrays
+            NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
+            NFTABLES_CONF_FILE="${NFT_PROFILE_CONFIGS[$NFTABLES_PROFILE_NUM]}"
+            NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]}"
+            print_message "Selected: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
+
+            # Ask about logging script (only if profile has one)
+            if [ -n "$NFTABLES_LOG_SCRIPT" ]; then
+                echo ""
+                print_message "Install nftables logging script for '${NFTABLES_PROFILE}' profile?"
+                print_message "  Script: ${NFTABLES_LOG_SCRIPT}"
+                print_message "  Configures rsyslog/journald rules for nftables log messages"
+                read -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
+                INSTALL_NFTABLES_LOGGING=${INSTALL_NFTABLES_LOGGING:-y}
             else
-                NFTABLES_PROFILE=""
                 INSTALL_NFTABLES_LOGGING="n"
             fi
         else
-            INSTALL_NFTABLES_CONF="n"
             NFTABLES_PROFILE=""
             INSTALL_NFTABLES_LOGGING="n"
-            print_message "nftables config from opt.7z not available (opt.7z extraction not selected)"
-            print_message "Default nftables configuration will be used"
         fi
     else
         INSTALL_NFTABLES_CONF="n"
@@ -3764,15 +3775,24 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         fi
     fi
 
-    # --- Step 5: Install nftables config from opt.7z archive ---
+    # --- Step 5: Install nftables config ---
     if [ "$NFTABLES_OK" = true ] && { [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; }; then
         echo ""
         print_message "Step 5: Installing nftables config (profile: ${NFTABLES_PROFILE}, file: ${NFTABLES_CONF_FILE})..."
 
-        # Verify opt.7z was extracted successfully
-        if [ "$OPT_EXTRACTED_OK" != true ]; then
-            print_error "opt.7z archive was not extracted successfully"
-            print_error "Cannot install nftables config — source files are missing"
+        NFTABLES_SRC="/opt/nftables/${NFTABLES_CONF_FILE}"
+
+        # Check if config file exists (from opt.7z extraction or pre-installed)
+        if [ ! -f "$NFTABLES_SRC" ] || [ ! -s "$NFTABLES_SRC" ]; then
+            # Config not found — check if opt.7z was supposed to provide it
+            if [ "$OPT_EXTRACTED_OK" = true ]; then
+                print_error "Config file not found after opt.7z extraction: $NFTABLES_SRC"
+            else
+                print_error "Config file not found: $NFTABLES_SRC"
+                print_message "  opt.7z was not extracted — file must already exist in /opt/nftables/"
+            fi
+            print_message "Available files in /opt/nftables/:"
+            ls -la /opt/nftables/ 2>/dev/null || print_error "  /opt/nftables/ directory does not exist"
             print_warning "Skipping config installation — using default nftables.conf"
             INSTALL_NFTABLES_CONF="skipped"
         else
@@ -3810,14 +3830,6 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                         INSTALL_NFTABLES_CONF="skipped"
                     fi
                 fi
-            else
-                print_error "Config file not found or empty: $NFTABLES_SRC"
-                print_message "Expected path in opt.7z archive: nftables/${NFTABLES_CONF_FILE}"
-                # List what IS available for debugging
-                print_message "Available files in /opt/nftables/:"
-                ls -la /opt/nftables/ 2>/dev/null || print_error "  /opt/nftables/ directory does not exist"
-                print_warning "Skipping config installation — using default nftables.conf"
-                INSTALL_NFTABLES_CONF="skipped"
             fi
         fi
     elif [ "$NFTABLES_OK" = true ]; then
@@ -3830,31 +3842,25 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         echo ""
         print_message "Step 6: Running logging setup (profile: ${NFTABLES_PROFILE}, script: ${NFTABLES_LOG_SCRIPT})..."
 
-        # Verify opt.7z was extracted
-        if [ "$OPT_EXTRACTED_OK" != true ]; then
-            print_warning "opt.7z archive was not extracted — skipping logging setup"
-        else
-            LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_LOG_SCRIPT}"
+        LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_LOG_SCRIPT}"
 
-            if [ -f "$LOGGING_SCRIPT" ] && [ -s "$LOGGING_SCRIPT" ]; then
-                # Make script executable
-                chmod +x "$LOGGING_SCRIPT"
-                print_message "Running: $LOGGING_SCRIPT"
+        if [ -f "$LOGGING_SCRIPT" ] && [ -s "$LOGGING_SCRIPT" ]; then
+            # Make script executable
+            chmod +x "$LOGGING_SCRIPT"
+            print_message "Running: $LOGGING_SCRIPT"
 
-                # Execute logging setup script
-                if bash "$LOGGING_SCRIPT"; then
-                    print_success "Logging setup completed (${NFTABLES_LOG_SCRIPT})"
-                else
-                    print_warning "Logging setup script returned an error (exit code: $?)"
-                    print_message "You can run it manually later: bash $LOGGING_SCRIPT"
-                fi
+            # Execute logging setup script
+            if bash "$LOGGING_SCRIPT"; then
+                print_success "Logging setup completed (${NFTABLES_LOG_SCRIPT})"
             else
-                print_warning "Logging script not found or empty: $LOGGING_SCRIPT"
-                print_message "Expected path in opt.7z archive: nftables/logging/${NFTABLES_LOG_SCRIPT}"
-                # List available logging scripts for debugging
-                print_message "Available logging scripts:"
-                ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
+                print_warning "Logging setup script returned an error (exit code: $?)"
+                print_message "You can run it manually later: bash $LOGGING_SCRIPT"
             fi
+        else
+            print_warning "Logging script not found: $LOGGING_SCRIPT"
+            print_message "  File must exist in /opt/nftables/logging/ (from opt.7z or pre-installed)"
+            print_message "Available logging scripts:"
+            ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
         fi
     elif [ "$NFTABLES_OK" = true ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
         echo ""
@@ -5017,10 +5023,10 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         print_message "- nftables: ENABLED (service not active — check configuration)"
     fi
     if [ ! -z "$NFTABLES_PROFILE" ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
-        print_message "  Profile: ${NFTABLES_PROFILE} (${NFTABLES_PROFILE}_nftables.conf)"
+        print_message "  Profile: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
     fi
     if [ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ]; then
-        print_message "  Logging: ${NFTABLES_PROFILE}_logging.sh executed"
+        print_message "  Logging: ${NFTABLES_LOG_SCRIPT} executed"
     fi
     if dpkg -l ufw 2>/dev/null | grep -q "^ii"; then
         if systemctl is-masked --quiet ufw 2>/dev/null; then
