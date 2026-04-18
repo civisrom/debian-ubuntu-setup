@@ -1168,23 +1168,6 @@ if [ "$INTERACTIVE" = true ]; then
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
     fi
     
-    # Ask about Tataranovich repository (only for Debian 12, independent from repository configuration)
-    if [ "$OS" = "debian" ] && [ "$VERSION" = "12" ]; then
-        echo ""
-        print_message "Do you want to add Tataranovich repository (custom mc build)?"
-        print_message "This will install Midnight Commander from tataranovich.com"
-        print_message "Repository: https://www.tataranovich.com/debian/"
-        read -p "Add Tataranovich repository? (y/N): " ADD_TATARANOVICH_REPO
-        ADD_TATARANOVICH_REPO=${ADD_TATARANOVICH_REPO:-n}
-    else
-        # Disable Tataranovich for Debian 13+
-        ADD_TATARANOVICH_REPO="n"
-        if [ "$OS" = "debian" ] && [ "$VERSION" != "12" ]; then
-            echo ""
-            print_message "Note: Tataranovich repository is not available for Debian 13+"
-        fi
-    fi
-    
     # Ask about Ubuntu PPA repositories (only for Ubuntu)
     if [ "$OS" = "ubuntu" ]; then
         echo ""
@@ -1222,19 +1205,11 @@ if [ "$INTERACTIVE" = true ]; then
             ADD_PPA_TOOLCHAIN=${ADD_PPA_TOOLCHAIN:-n}
         fi
         
-        # Ask about Tataranovich repository for Ubuntu
-        echo ""
-        print_message "Do you want to add Tataranovich repository for Ubuntu (custom mc build)?"
-        print_message "This will install Midnight Commander from tataranovich.com"
-        print_message "Repository: https://www.tataranovich.com/ubuntu/"
-        read -p "Add Tataranovich repository for Ubuntu? (y/N): " ADD_TATARANOVICH_UBUNTU
-        ADD_TATARANOVICH_UBUNTU=${ADD_TATARANOVICH_UBUNTU:-n}
     else
         ADD_UBUNTU_PPAS="n"
         ADD_PPA_NGINX="n"
         ADD_PPA_GIT="n"
         ADD_PPA_TOOLCHAIN="n"
-        ADD_TATARANOVICH_UBUNTU="n"
     fi
     
     # Ask about disabling IPv6 in /etc/network/interfaces
@@ -1356,8 +1331,6 @@ else
     INSTALL_MOTD="n"
     CUSTOM_PORTS=""
     INSTALL_UFW_DOCKER="n"
-    ADD_TATARANOVICH_REPO="n"
-    ADD_TATARANOVICH_UBUNTU="n"
     ADD_UBUNTU_PPAS="n"
     ADD_PPA_NGINX="n"
     ADD_PPA_GIT="n"
@@ -1492,12 +1465,6 @@ if [ "$OS" = "debian" ]; then
     print_message "  IPv6 disable via GRUB: $([ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ] && echo "YES (kernel level)" || echo "NO")"
 fi
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
-if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
-    print_message "  Tataranovich repository (Debian): YES"
-fi
-if [ "$OS" = "ubuntu" ] && { [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; }; then
-    print_message "  Tataranovich repository (Ubuntu): YES"
-fi
 if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; }; then
     print_message "  Ubuntu PPA repositories:"
     if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
@@ -2117,138 +2084,13 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
 fi
 
 # ============================================
-# CONFIGURE TATARANOVICH REPOSITORY (UBUNTU)
+# INSTALL MIDNIGHT COMMANDER
 # ============================================
 
-if [ "$OS" = "ubuntu" ] && { [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; }; then
-    print_message "Configuring Tataranovich repository for Ubuntu..."
-    
-    # Install required packages if not already installed
-    print_message "Installing prerequisites for Tataranovich repository..."
-    apt-get install -y curl gnupg software-properties-common
-    
-    # Download GPG key
-    print_message "Downloading Tataranovich GPG key..."
-    if curl -fsSL https://www.tataranovich.com/ubuntu/gpg -o /etc/apt/trusted.gpg.d/tataranovich-ubuntu.gpg; then
-        print_message "GPG key downloaded successfully"
-        chmod 644 /etc/apt/trusted.gpg.d/tataranovich-ubuntu.gpg
-    else
-        print_error "Failed to download Tataranovich GPG key"
-        print_warning "Skipping Tataranovich repository configuration"
-        ADD_TATARANOVICH_UBUNTU="n"
-    fi
-    
-    if [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; then
-        # Add repository
-        print_message "Adding Tataranovich repository..."
-        
-        # Use detected codename for repository
-        TATARANOVICH_UBUNTU_CODENAME=${VERSION_CODENAME:-noble}
-        
-        # Backup existing file if present
-        if [ -f /etc/apt/sources.list.d/tataranovich-ubuntu.list ]; then
-            cp /etc/apt/sources.list.d/tataranovich-ubuntu.list /etc/apt/sources.list.d/tataranovich-ubuntu.list.backup.$(date +%Y%m%d-%H%M%S)~
-        fi
-        
-        echo "deb http://www.tataranovich.com/ubuntu ${TATARANOVICH_UBUNTU_CODENAME} main" | tee /etc/apt/sources.list.d/tataranovich-ubuntu.list > /dev/null
-        print_message "Tataranovich repository added: /etc/apt/sources.list.d/tataranovich-ubuntu.list"
-        
-        # Update package lists
-        print_message "Updating package lists with Tataranovich repository..."
-        if apt-get update; then
-            print_success "Package lists updated successfully"
-            
-            # Install mc from Tataranovich repository
-            print_message "Installing Midnight Commander from Tataranovich repository..."
-            if apt-get install -y mc; then
-                print_success "Midnight Commander installed successfully from Tataranovich repository"
-                
-                # Verify installation
-                MC_VERSION=$(mc --version 2>&1 | head -1)
-                print_message "Installed: $MC_VERSION"
-            else
-                print_warning "Failed to install mc from Tataranovich repository"
-                print_message "Installing mc from standard repositories..."
-                apt-get install -y mc || print_warning "Failed to install mc"
-            fi
-        else
-            print_warning "Failed to update package lists with Tataranovich repository"
-            print_message "Installing mc from standard repositories..."
-            apt-get install -y mc || print_warning "Failed to install mc"
-        fi
-    fi
+if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    print_message "Installing Midnight Commander from standard repositories..."
+    apt-get install -y mc || print_warning "Failed to install mc"
     echo ""
-fi
-
-# ============================================
-# CONFIGURE TATARANOVICH REPOSITORY (DEBIAN 12 ONLY)
-# ============================================
-
-if [ "$OS" = "debian" ] && { [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; }; then
-    print_message "Configuring Tataranovich repository for Debian 12..."
-    
-    # Install required packages if not already installed
-    print_message "Installing prerequisites for Tataranovich repository..."
-    apt-get install -y curl gnupg
-    
-    # Download GPG key
-    print_message "Downloading Tataranovich GPG key..."
-    if curl -fsSL https://www.tataranovich.com/debian/gpg -o /etc/apt/trusted.gpg.d/tataranovich.gpg; then
-        print_message "GPG key downloaded successfully"
-        chmod 644 /etc/apt/trusted.gpg.d/tataranovich.gpg
-    else
-        print_error "Failed to download Tataranovich GPG key"
-        print_warning "Skipping Tataranovich repository configuration"
-        ADD_TATARANOVICH_REPO="n"
-    fi
-    
-    if [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; then
-        # Add repository
-        print_message "Adding Tataranovich repository..."
-        
-        # Use detected codename for repository
-        TATARANOVICH_CODENAME=${VERSION_CODENAME:-bookworm}
-        
-        # Backup existing file if present
-        if [ -f /etc/apt/sources.list.d/tataranovich.list ]; then
-            cp /etc/apt/sources.list.d/tataranovich.list /etc/apt/sources.list.d/tataranovich.list.backup.$(date +%Y%m%d-%H%M%S)~
-        fi
-        
-        echo "deb http://www.tataranovich.com/debian ${TATARANOVICH_CODENAME} main" | tee /etc/apt/sources.list.d/tataranovich.list > /dev/null
-        print_message "Tataranovich repository added: /etc/apt/sources.list.d/tataranovich.list"
-        
-        # Update package lists
-        print_message "Updating package lists with Tataranovich repository..."
-        if apt-get update; then
-            print_success "Package lists updated successfully"
-            
-            # Install mc from Tataranovich repository
-            print_message "Installing Midnight Commander from Tataranovich repository..."
-            if apt-get install -y mc; then
-                print_success "Midnight Commander installed successfully from Tataranovich repository"
-                
-                # Verify installation
-                MC_VERSION=$(mc --version 2>&1 | head -1)
-                print_message "Installed: $MC_VERSION"
-            else
-                print_warning "Failed to install mc from Tataranovich repository"
-                print_message "Installing mc from standard repositories..."
-                apt-get install -y mc || print_warning "Failed to install mc"
-            fi
-        else
-            print_warning "Failed to update package lists with Tataranovich repository"
-            print_message "Installing mc from standard repositories..."
-            apt-get install -y mc || print_warning "Failed to install mc"
-        fi
-    fi
-    echo ""
-else
-    # Install mc from standard repositories if Tataranovich is not used
-    if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
-        print_message "Installing Midnight Commander from standard repositories..."
-        apt-get install -y mc || print_warning "Failed to install mc"
-        echo ""
-    fi
 fi
 
 # ============================================
@@ -4253,6 +4095,23 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
     print_header "═══════════════════════════════════════════════════"
     echo ""
 
+    # Ensure zram kernel module is available (missing on some VPS with minimal kernel)
+    if ! find /lib/modules/$(uname -r) -name '*zram*' 2>/dev/null | grep -q .; then
+        KERNEL_HAS_ZRAM=$(grep -c "^CONFIG_ZRAM=m" /boot/config-$(uname -r) 2>/dev/null || echo 0)
+        if [ "$KERNEL_HAS_ZRAM" -gt 0 ]; then
+            print_warning "zram module not found — CONFIG_ZRAM=m detected, installing linux-modules-extra..."
+            apt-get install -y "linux-modules-extra-$(uname -r)" 2>&1 | tail -3 || \
+                print_warning "Failed to install linux-modules-extra, zram may not work"
+        fi
+    fi
+    # Load zram module now if available (avoids reboot requirement)
+    if find /lib/modules/$(uname -r) -name '*zram*' 2>/dev/null | grep -q .; then
+        modprobe zram 2>/dev/null || true
+        print_message "zram module loaded successfully"
+    else
+        print_warning "zram module unavailable — zramswap will be skipped by swap-setup.sh"
+    fi
+
     SWAP_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/swapfile-script/main/swap-setup.sh"
     SWAP_SCRIPT_PATH="/tmp/swap-setup.sh"
     SWAP_INSTALL_PATH="/usr/local/sbin/swap-setup.sh"
@@ -5054,14 +4913,8 @@ fi
 if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
     if [ "$OS" = "debian" ]; then
         print_message "- Debian repositories configured"
-        if [ "$ADD_TATARANOVICH_REPO" = "y" ] || [ "$ADD_TATARANOVICH_REPO" = "Y" ]; then
-            print_message "- Tataranovich repository (Debian): ADDED (custom mc)"
-        fi
     else
         print_message "- Ubuntu repositories configured (main, restricted, universe, multiverse)"
-        if [ "$ADD_TATARANOVICH_UBUNTU" = "y" ] || [ "$ADD_TATARANOVICH_UBUNTU" = "Y" ]; then
-            print_message "- Tataranovich repository (Ubuntu): ADDED (custom mc)"
-        fi
         if [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; then
             print_message "- Ubuntu PPA repositories:"
             if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
