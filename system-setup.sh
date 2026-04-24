@@ -1174,15 +1174,19 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Do you want to add additional PPA repositories for Ubuntu?"
         print_message "Available PPAs:"
         print_message "  1. ppa:ondrej/nginx - Latest Nginx builds"
-        print_message "  2. ppa:git-core/ppa - Latest Git version"
-        print_message "  3. ppa:ubuntu-toolchain-r/test - Latest GCC toolchain"
+        print_message "  2. ppa:ondrej/php - Latest PHP builds"
+        print_message "  3. ppa:git-core/ppa - Latest Git version"
+        print_message "  4. ppa:ubuntu-toolchain-r/test - Latest GCC toolchain"
         read -p "Add PPA repositories? (y/N): " ADD_UBUNTU_PPAS
         ADD_UBUNTU_PPAS=${ADD_UBUNTU_PPAS:-n}
         
         # Initialize PPA selection flags
         ADD_PPA_NGINX="n"
+        ADD_PPA_PHP="n"
         ADD_PPA_GIT="n"
         ADD_PPA_TOOLCHAIN="n"
+        INSTALL_PHP_CLI="n"
+        INSTALL_PHP_EXTENSIONS="n"
         
         if [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; then
             echo ""
@@ -1194,13 +1198,28 @@ if [ "$INTERACTIVE" = true ]; then
             read -p "   Add Ondrej Nginx PPA? (y/N): " ADD_PPA_NGINX
             ADD_PPA_NGINX=${ADD_PPA_NGINX:-n}
             
+            # Ondrej PHP PPA
+            print_message "2. ppa:ondrej/php - Latest PHP builds"
+            read -p "   Add Ondrej PHP PPA? (y/N): " ADD_PPA_PHP
+            ADD_PPA_PHP=${ADD_PPA_PHP:-n}
+
+            if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
+                read -p "   Install PHP CLI (php-cli)? (y/N): " INSTALL_PHP_CLI
+                INSTALL_PHP_CLI=${INSTALL_PHP_CLI:-n}
+
+                if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
+                    read -p "   Install PHP 8.4 extensions (mbstring, xml, curl, mysql)? (y/N): " INSTALL_PHP_EXTENSIONS
+                    INSTALL_PHP_EXTENSIONS=${INSTALL_PHP_EXTENSIONS:-n}
+                fi
+            fi
+
             # Git Core PPA
-            print_message "2. ppa:git-core/ppa - Latest stable Git releases"
+            print_message "3. ppa:git-core/ppa - Latest stable Git releases"
             read -p "   Add Git Core PPA? (y/N): " ADD_PPA_GIT
             ADD_PPA_GIT=${ADD_PPA_GIT:-n}
             
             # Ubuntu Toolchain PPA
-            print_message "3. ppa:ubuntu-toolchain-r/test - Latest GCC, G++, and toolchain"
+            print_message "4. ppa:ubuntu-toolchain-r/test - Latest GCC, G++, and toolchain"
             read -p "   Add Ubuntu Toolchain PPA? (y/N): " ADD_PPA_TOOLCHAIN
             ADD_PPA_TOOLCHAIN=${ADD_PPA_TOOLCHAIN:-n}
         fi
@@ -1208,8 +1227,11 @@ if [ "$INTERACTIVE" = true ]; then
     else
         ADD_UBUNTU_PPAS="n"
         ADD_PPA_NGINX="n"
+        ADD_PPA_PHP="n"
         ADD_PPA_GIT="n"
         ADD_PPA_TOOLCHAIN="n"
+        INSTALL_PHP_CLI="n"
+        INSTALL_PHP_EXTENSIONS="n"
     fi
     
     # Ask about disabling IPv6 in /etc/network/interfaces
@@ -1333,8 +1355,11 @@ else
     INSTALL_UFW_DOCKER="n"
     ADD_UBUNTU_PPAS="n"
     ADD_PPA_NGINX="n"
+    ADD_PPA_PHP="n"
     ADD_PPA_GIT="n"
     ADD_PPA_TOOLCHAIN="n"
+    INSTALL_PHP_CLI="n"
+    INSTALL_PHP_EXTENSIONS="n"
     COMMENT_IPV6_INTERFACES="n"
     INSTALL_GO="n"
     INSTALL_IPSET="n"
@@ -1469,6 +1494,13 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
     print_message "  Ubuntu PPA repositories:"
     if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
         print_message "    - Ondrej Nginx: YES"
+    fi
+    if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
+        print_message "    - Ondrej PHP: YES"
+        print_message "      - php-cli: $([ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ] && echo "YES" || echo "NO")"
+        if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
+            print_message "      - PHP 8.4 extensions: $([ "$INSTALL_PHP_EXTENSIONS" = "y" ] || [ "$INSTALL_PHP_EXTENSIONS" = "Y" ] && echo "YES" || echo "NO")"
+        fi
     fi
     if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
         print_message "    - Git Core: YES"
@@ -2029,6 +2061,21 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         fi
         echo ""
     fi
+
+    # Add Ondrej PHP PPA
+    if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
+        print_message "Adding ppa:ondrej/php..."
+        print_warning "Press ENTER when prompted to confirm the PPA addition"
+        echo ""
+
+        # Use -y flag to auto-accept
+        if add-apt-repository -y ppa:ondrej/php 2>&1; then
+            print_success "Ondrej PHP PPA added successfully"
+        else
+            print_warning "Failed to add Ondrej PHP PPA, continuing..."
+        fi
+        echo ""
+    fi
     
     # Add Git Core PPA
     if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
@@ -2070,6 +2117,9 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
             print_message "  ✓ ppa:ondrej/nginx"
         fi
+        if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
+            print_message "  ✓ ppa:ondrej/php"
+        fi
         if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
             print_message "  ✓ ppa:git-core/ppa"
         fi
@@ -2081,6 +2131,24 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
     fi
     
     echo ""
+fi
+
+# ============================================
+# INSTALL PHP PACKAGES
+# ============================================
+
+if [ "$OS" = "ubuntu" ] && { [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; }; then
+    if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
+        print_message "Installing PHP CLI..."
+        apt-get install -y php-cli || print_warning "Failed to install php-cli"
+        echo ""
+
+        if [ "$INSTALL_PHP_EXTENSIONS" = "y" ] || [ "$INSTALL_PHP_EXTENSIONS" = "Y" ]; then
+            print_message "Installing PHP 8.4 extensions..."
+            apt-get install -y php8.4-mbstring php8.4-xml php8.4-curl php8.4-mysql || print_warning "Failed to install PHP 8.4 extensions"
+            echo ""
+        fi
+    fi
 fi
 
 # ============================================
@@ -4919,6 +4987,15 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
             print_message "- Ubuntu PPA repositories:"
             if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
                 print_message "  ✓ ppa:ondrej/nginx (Latest Nginx)"
+            fi
+            if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
+                print_message "  ✓ ppa:ondrej/php (Latest PHP)"
+                if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
+                    print_message "    - php-cli installed"
+                    if [ "$INSTALL_PHP_EXTENSIONS" = "y" ] || [ "$INSTALL_PHP_EXTENSIONS" = "Y" ]; then
+                        print_message "    - PHP 8.4 extensions installed"
+                    fi
+                fi
             fi
             if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
                 print_message "  ✓ ppa:git-core/ppa (Latest Git)"
