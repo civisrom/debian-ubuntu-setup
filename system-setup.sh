@@ -1574,6 +1574,7 @@ COMMON_PACKAGES=(
     wget
     #iptables
     #ufw
+    shellcheck
     nano
     apt-utils
     curl
