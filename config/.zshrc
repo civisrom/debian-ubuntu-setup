@@ -520,6 +520,96 @@ alias nft-reload='sudo systemctl restart nftables'                              
 alias nft-status='sudo systemctl status nftables'                               # статус сервиса nftables
 alias nft-test='sudo nft -c -f /etc/nftables.conf && echo "✓ Синтаксис OK" || echo "✗ Ошибка в конфиге"'  # тест с выводом результата
 
+# --- GitHub API tokens -------------------------------------------------------
+# Локальный файл с токенами не хранится в git. Создай его так:
+#   mkdir -p ~/.config
+#   chmod 700 ~/.config
+#   nano ~/.config/github-tokens.env
+#   chmod 600 ~/.config/github-tokens.env
+#
+# Содержимое ~/.config/github-tokens.env:
+#   export GITHUB_TOKEN_CIVISROM='ghp_...'
+#   export GITHUB_TOKEN_SYNTAKT='ghp_...'
+#
+# Для создания публичных user repositories classic PAT должен иметь public_repo.
+# Для private repositories нужен repo. Для /user/orgs classic PAT должен иметь
+# read:org или user. Fine-grained tokens могут возвращать пустой список orgs.
+[[ -f "$HOME/.config/github-tokens.env" ]] && source "$HOME/.config/github-tokens.env"
+
+_github_api() {
+    local token="${1:-}"
+    shift
+    [[ -n "$token" ]] || { echo "GitHub token is not set"; return 1; }
+    curl -sS \
+        -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "$@"
+}
+
+_github_repo_body() {
+    python3 - "$@" <<'PY'
+import json
+import sys
+
+name = sys.argv[1]
+description = sys.argv[2] if len(sys.argv) > 2 else ""
+private = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
+print(json.dumps({"name": name, "description": description, "private": private}))
+PY
+}
+
+gh-api-civisrom() { _github_api "${GITHUB_TOKEN_CIVISROM:-}" "$@"; }
+gh-api-syntakt() { _github_api "${GITHUB_TOKEN_SYNTAKT:-}" "$@"; }
+
+gh-user-civisrom() { gh-api-civisrom https://api.github.com/user; }
+gh-user-syntakt() { gh-api-syntakt https://api.github.com/user; }
+
+gh-orgs-civisrom() { gh-api-civisrom https://api.github.com/user/orgs; }
+gh-orgs-syntakt() { gh-api-syntakt https://api.github.com/user/orgs; }
+
+gh-repo-civisrom() {
+    local repo="${1:?Usage: gh-repo-civisrom <repo>}"
+    gh-api-civisrom "https://api.github.com/repos/civisrom/${repo}"
+}
+
+gh-repo-syntakt() {
+    local repo="${1:?Usage: gh-repo-syntakt <repo>}"
+    gh-api-syntakt "https://api.github.com/repos/syntakt/${repo}"
+}
+
+gh-create-repo-civisrom() {
+    local repo="${1:?Usage: gh-create-repo-civisrom <repo> [description] [private:true|false]}"
+    local description="${2:-}"
+    local private="${3:-false}"
+    local body
+    body="$(_github_repo_body "$repo" "$description" "$private")" || return 1
+    gh-api-civisrom -X POST https://api.github.com/user/repos -d "$body"
+}
+
+gh-create-repo-syntakt() {
+    local repo="${1:?Usage: gh-create-repo-syntakt <repo> [description] [private:true|false]}"
+    local description="${2:-}"
+    local private="${3:-false}"
+    local body
+    body="$(_github_repo_body "$repo" "$description" "$private")" || return 1
+    gh-api-syntakt -X POST https://api.github.com/user/repos -d "$body"
+}
+
+gh-remote-civisrom() {
+    local repo="${1:?Usage: gh-remote-civisrom <repo> [remote]}"
+    local remote="${2:-origin}"
+    git remote remove "$remote" 2>/dev/null
+    git remote add "$remote" "git@civisrom:civisrom/${repo}.git"
+}
+
+gh-remote-syntakt() {
+    local repo="${1:?Usage: gh-remote-syntakt <repo> [remote]}"
+    local remote="${2:-origin}"
+    git remote remove "$remote" 2>/dev/null
+    git remote add "$remote" "git@syntakt:syntakt/${repo}.git"
+}
+
 # --- claude-chat-to-md -------------------------------------------------------
 # Конвертер сессий Claude Code (~/.claude/projects/*.jsonl) в Markdown.
 # https://github.com/civisrom/claude-chat-to-md
