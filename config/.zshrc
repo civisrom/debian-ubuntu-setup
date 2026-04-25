@@ -625,6 +625,112 @@ chat-clean() {
     ls -t "$dir"/*.md 2>/dev/null | tail -n +21 | xargs -r rm -v
 }
 
+# --- codex-chat-to-md --------------------------------------------------------
+# Конвертер сессий Codex CLI (~/.codex/sessions/**/*.jsonl) в Markdown.
+# https://github.com/civisrom/codex-chat-to-md
+#
+# Быстрые команды:
+#   cchat                   — прямой вызов утилиты с произвольными аргументами
+#   cchat-list              — список всех сессий (#, дата, ID, заголовок, проект)
+#   cchat-latest            — сохранить последнюю сессию в ~/codex-chat-latest.md
+#   cchat-latest-full       — то же, но со всеми tool-results
+#   cchat-all               — экспортировать все сессии в ~/codex-chats/
+#   cchat-all-full          — то же, со всеми tool-results, в ~/codex-chats-full/
+#   cchat-save <N>          — сохранить сессию по номеру/UUID/заголовку
+#   cchat-save-full <N>     — то же, со всеми tool-results
+#   cchat-view <N>          — посмотреть сессию в less
+#   cchat-edit <N>          — открыть сессию в $EDITOR (временный файл)
+#   cchat-project <name>    — список сессий проекта (фильтр по пути)
+#   cchat-project-latest <name>  — сохранить последнюю сессию проекта
+#   cchat-find <text>       — поиск сессии по подстроке в заголовке
+#   cchat-fzf               — интерактивный выбор через fzf (если установлен)
+#   cchat-update            — обновить установленный скрипт с GitHub
+#   cchat-clean             — оставить только 20 последних .md в ~/codex-chats/
+
+# Внутренний хелпер: полный путь к установленной утилите.
+_codex_chat() { /root/skripts/bin/python3 -m codex_chat_to_md "$@" }
+
+# Прямой вызов с произвольными аргументами: cchat --help / cchat <uuid>
+alias cchat='_codex_chat'
+
+# Листинг
+alias cchat-list='_codex_chat --list'
+
+# Быстрые экспорты (--no-tool-results для компактного вывода)
+alias cchat-latest='_codex_chat --latest --no-tool-results -o ~/codex-chat-latest.md && echo "Saved: ~/codex-chat-latest.md"'
+alias cchat-latest-full='_codex_chat --latest -o ~/codex-chat-latest-full.md && echo "Saved: ~/codex-chat-latest-full.md"'
+alias cchat-all='_codex_chat --all --no-tool-results --output-dir ~/codex-chats/ && echo "Saved to: ~/codex-chats/"'
+alias cchat-all-full='_codex_chat --all --output-dir ~/codex-chats-full/ && echo "Saved to: ~/codex-chats-full/"'
+
+# Сохранить одну сессию (без tool-results): cchat-save <idx|uuid|title> [filename]
+cchat-save() {
+    local q="${1:?Usage: cchat-save <index|uuid|title> [filename]}"
+    local name="${2:-codex-chat-$(date +%Y%m%d-%H%M%S)}"
+    _codex_chat "$q" --no-tool-results -o ~/"${name}.md" \
+        && echo "Saved: ~/${name}.md"
+}
+
+# Сохранить одну сессию со всеми tool-results: cchat-save-full <idx|uuid|title> [filename]
+cchat-save-full() {
+    local q="${1:?Usage: cchat-save-full <index|uuid|title> [filename]}"
+    local name="${2:-codex-chat-full-$(date +%Y%m%d-%H%M%S)}"
+    _codex_chat "$q" -o ~/"${name}.md" \
+        && echo "Saved: ~/${name}.md"
+}
+
+# Посмотреть сессию в less: cchat-view <idx|uuid|title>
+cchat-view() {
+    local q="${1:?Usage: cchat-view <index|uuid|title>}"
+    _codex_chat "$q" --no-tool-results | less -R
+}
+
+# Открыть сессию в $EDITOR через временный файл: cchat-edit <idx|uuid|title>
+cchat-edit() {
+    local q="${1:?Usage: cchat-edit <index|uuid|title>}"
+    local tmp
+    tmp="$(mktemp --suffix=.md)" || return 1
+    _codex_chat "$q" --no-tool-results -o "$tmp" && "${EDITOR:-nano}" "$tmp"
+    rm -f "$tmp"
+}
+
+# Фильтр по проекту (подстрока в пути): cchat-project openai
+cchat-project() {
+    local proj="${1:?Usage: cchat-project <project-substring>}"
+    _codex_chat --list --project "$proj"
+}
+
+# Сохранить последнюю сессию проекта: cchat-project-latest openai [filename]
+cchat-project-latest() {
+    local proj="${1:?Usage: cchat-project-latest <project> [filename]}"
+    local name="${2:-codex-chat-${proj}-$(date +%Y%m%d-%H%M%S)}"
+    _codex_chat --latest --project "$proj" --no-tool-results -o ~/"${name}.md" \
+        && echo "Saved: ~/${name}.md"
+}
+
+# Поиск сессии по заголовку: cchat-find "audit"
+cchat-find() {
+    local q="${1:?Usage: cchat-find <substring>}"
+    _codex_chat --list | grep -i --color=auto -- "$q"
+}
+
+# Интерактивный выбор сессии через fzf: cchat-fzf
+cchat-fzf() {
+    command -v fzf >/dev/null || { echo "fzf не установлен"; return 1; }
+    local idx
+    idx=$(_codex_chat --list | tail -n +3 | fzf --height=60% --reverse --prompt='codex session> ' | awk '{print $1}')
+    [[ -n "$idx" ]] && _codex_chat "$idx" --no-tool-results | less -R
+}
+
+# Обновить установленный скрипт до последней версии с GitHub
+alias cchat-update='/root/skripts/bin/pip install --upgrade git+https://github.com/civisrom/codex-chat-to-md.git'
+
+# Очистить старые экспорты: оставить 20 последних .md в ~/codex-chats/ (или в указанной директории)
+cchat-clean() {
+    local dir="${1:-$HOME/codex-chats}"
+    [[ -d "$dir" ]] || { echo "Нет директории: $dir"; return 1; }
+    ls -t "$dir"/*.md 2>/dev/null | tail -n +21 | xargs -r rm -v
+}
+
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
