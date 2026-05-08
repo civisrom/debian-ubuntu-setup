@@ -4,7 +4,7 @@
 # System Setup Script for Debian and Ubuntu
 # Author: Enhanced Version v2.0
 # Description: Initial package installation and system configuration
-# Supported: Debian 12, 13 | Ubuntu 24.04, 25.04
+# Supported: Debian 12, 13 | Ubuntu 24.04, 25.10, 26.04
 #############################################
 
 set -e
@@ -255,9 +255,10 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
         echo "  1) Debian 12 (Bookworm)"
         echo "  2) Debian 13 (Trixie)"
         echo "  3) Ubuntu 24.04 (Noble)"
-        echo "  4) Ubuntu 25.04 (Plucky)"
+        echo "  4) Ubuntu 25.10 (Questing)"
+        echo "  5) Ubuntu 26.04 (Resolute)"
         echo ""
-        read -p "Enter your choice [1-4]: " OS_CHOICE
+        read -p "Enter your choice [1-5]: " OS_CHOICE
         
         case $OS_CHOICE in
             1)
@@ -280,9 +281,15 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
                 ;;
             4)
                 OS="ubuntu"
-                VERSION="25.04"
-                VERSION_CODENAME="plucky"
-                print_message "Selected: Ubuntu 25.04 (Plucky)"
+                VERSION="25.10"
+                VERSION_CODENAME="questing"
+                print_message "Selected: Ubuntu 25.10 (Questing)"
+                ;;
+            5)
+                OS="ubuntu"
+                VERSION="26.04"
+                VERSION_CODENAME="resolute"
+                print_message "Selected: Ubuntu 26.04 (Resolute)"
                 ;;
             *)
                 print_error "Invalid choice. Exiting."
@@ -320,8 +327,8 @@ else
             fi
         fi
     elif [ "$OS" = "ubuntu" ]; then
-        if [ "$VERSION" != "24.04" ] && [ "$VERSION" != "25.04" ]; then
-            print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04, 25.04)"
+        if [ "$VERSION" != "24.04" ] && [ "$VERSION" != "25.10" ] && [ "$VERSION" != "26.04" ]; then
+            print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04, 25.10, 26.04)"
             if [ "$INTERACTIVE" = true ]; then
                 read -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
                 CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
@@ -751,6 +758,65 @@ if [ "$INTERACTIVE" = true ]; then
         SSH_EMPTY_PASSWORDS=""
         SSH_ROOT_LOGIN=""
         SSH_PRINT_MOTD=""
+    fi
+
+    echo ""
+    print_header "───────────────────────────────────────────────"
+    print_header "   YubiKey / FIDO2 SSH Authentication"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Configure SSH login with a YubiKey-backed FIDO2 public key?"
+    print_message "  - Installs OpenSSH/FIDO2 support packages"
+    print_message "  - Adds sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com key to authorized_keys"
+    print_message "  - Enables PubkeyAuthentication in sshd"
+    read -p "Configure YubiKey/FIDO2 SSH? (y/N): " CONFIGURE_YUBIKEY_SSH
+    CONFIGURE_YUBIKEY_SSH=${CONFIGURE_YUBIKEY_SSH:-n}
+
+    if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+        if [ -n "$NEW_USERNAME" ]; then
+            YUBIKEY_SSH_DEFAULT_USER="$NEW_USERNAME"
+        elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+            YUBIKEY_SSH_DEFAULT_USER="$SUDO_USER"
+        else
+            YUBIKEY_SSH_DEFAULT_USER="root"
+        fi
+
+        read -p "Target user for YubiKey SSH (default: ${YUBIKEY_SSH_DEFAULT_USER}): " YUBIKEY_SSH_USER
+        YUBIKEY_SSH_USER=${YUBIKEY_SSH_USER:-$YUBIKEY_SSH_DEFAULT_USER}
+
+        echo ""
+        print_message "Paste the YubiKey/FIDO2 SSH public key line."
+        print_message "Generate on your workstation, for example:"
+        print_message "  ssh-keygen -t ed25519-sk -O resident -O verify-required -C \"${YUBIKEY_SSH_USER}@$(hostname -f 2>/dev/null || hostname)\""
+        print_message "Fallback for older YubiKey firmware:"
+        print_message "  ssh-keygen -t ecdsa-sk -O resident -O verify-required -C \"${YUBIKEY_SSH_USER}@$(hostname -f 2>/dev/null || hostname)\""
+        print_message "Leave empty to install/configure server-side FIDO2 support without adding a key."
+        read -p "YubiKey SSH public key: " YUBIKEY_SSH_PUBLIC_KEY
+
+        if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ] && \
+           ! [[ "$YUBIKEY_SSH_PUBLIC_KEY" =~ ^(sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|sk-ssh-ed25519-cert-v01@openssh\.com|sk-ecdsa-sha2-nistp256-cert-v01@openssh\.com)[[:space:]] ]]; then
+            print_warning "The provided key does not look like an OpenSSH FIDO2/YubiKey public key"
+            print_warning "Expected key type: sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com"
+            read -p "Continue anyway? (y/N): " YUBIKEY_SSH_CONTINUE_INVALID_KEY
+            YUBIKEY_SSH_CONTINUE_INVALID_KEY=${YUBIKEY_SSH_CONTINUE_INVALID_KEY:-n}
+            if [ "$YUBIKEY_SSH_CONTINUE_INVALID_KEY" != "y" ] && [ "$YUBIKEY_SSH_CONTINUE_INVALID_KEY" != "Y" ]; then
+                YUBIKEY_SSH_PUBLIC_KEY=""
+            fi
+        fi
+
+        if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
+            echo ""
+            print_message "Disable password authentication after configuring YubiKey SSH?"
+            print_warning "Only choose YES after verifying you have another working SSH session/key path."
+            read -p "Disable SSH password authentication? (y/N): " YUBIKEY_SSH_DISABLE_PASSWORD_AUTH
+            YUBIKEY_SSH_DISABLE_PASSWORD_AUTH=${YUBIKEY_SSH_DISABLE_PASSWORD_AUTH:-n}
+        else
+            YUBIKEY_SSH_DISABLE_PASSWORD_AUTH="n"
+        fi
+    else
+        YUBIKEY_SSH_USER=""
+        YUBIKEY_SSH_PUBLIC_KEY=""
+        YUBIKEY_SSH_DISABLE_PASSWORD_AUTH="n"
     fi
     
     # Ask about Python virtual environment
@@ -1357,6 +1423,10 @@ else
     SSH_EMPTY_PASSWORDS=""
     SSH_ROOT_LOGIN=""
     SSH_PRINT_MOTD=""
+    CONFIGURE_YUBIKEY_SSH="n"
+    YUBIKEY_SSH_USER=""
+    YUBIKEY_SSH_PUBLIC_KEY=""
+    YUBIKEY_SSH_DISABLE_PASSWORD_AUTH="n"
     CREATE_VENV="n"
     VENV_PATH=""
     INSTALL_DOCKER="n"
@@ -1461,6 +1531,10 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     if [ ! -z "$SSH_PRINT_MOTD" ]; then
         print_message "    - PrintMotd: $SSH_PRINT_MOTD"
     fi
+fi
+print_message "  YubiKey/FIDO2 SSH: $([ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ] && echo "YES (User: ${YUBIKEY_SSH_USER:-none}, Key: $([ -n "$YUBIKEY_SSH_PUBLIC_KEY" ] && echo "provided" || echo "not provided"))" || echo "NO")"
+if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+    print_message "    - Disable SSH password auth: $([ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "y" ] || [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "Y" ] && echo "YES" || echo "NO")"
 fi
 print_message "  Python venv: $([ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ] && echo "YES (Path: $VENV_PATH)" || echo "NO")"
 print_message "  Docker: $([ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ] && echo "YES" || echo "NO")"
@@ -1587,6 +1661,132 @@ echo ""
 print_message "Starting installation..."
 echo ""
 
+configure_apt_repositories() {
+    if [ "$OS" = "debian" ]; then
+        print_message "Configuring Debian repositories..."
+
+        # Backup original sources.list
+        if [ -f /etc/apt/sources.list ]; then
+            cp /etc/apt/sources.list "/etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~"
+            print_message "Original sources.list backed up"
+        fi
+
+        # Use detected or selected codename
+        DEBIAN_CODENAME=${VERSION_CODENAME:-bookworm}
+
+        # Write new sources.list based on version
+        if [ "$VERSION" = "13" ] || [ "$DEBIAN_CODENAME" = "trixie" ]; then
+            # Debian 13 (Trixie) configuration - no backports (testing has no backports)
+            cat > /etc/apt/sources.list << EOF
+### Main Debian ${DEBIAN_CODENAME^} repositories
+deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
+
+### Security updates
+deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+
+### Release updates
+deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
+EOF
+            print_message "Configured Debian 13 (Trixie) repositories without backports"
+        else
+            # Debian 12 (Bookworm) and older configuration - with backports
+            cat > /etc/apt/sources.list << EOF
+### Main Debian ${DEBIAN_CODENAME^} repositories
+deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
+
+### Security updates
+deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+
+### Stable release updates
+deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
+
+### Backports (newer package versions)
+deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
+EOF
+            print_message "Configured Debian ${VERSION} (${DEBIAN_CODENAME^}) repositories with backports"
+        fi
+
+        print_message "Debian repositories configured"
+    elif [ "$OS" = "ubuntu" ]; then
+        print_message "Configuring Ubuntu repositories..."
+
+        # Backup original sources.list if it exists and has content
+        if [ -f /etc/apt/sources.list ] && [ -s /etc/apt/sources.list ]; then
+            cp /etc/apt/sources.list "/etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~"
+            print_message "Original sources.list backed up"
+
+            # Clear the main sources.list file
+            cat > /etc/apt/sources.list << 'EOF'
+# Ubuntu repositories are now managed in /etc/apt/sources.list.d/
+# See /etc/apt/sources.list.d/ubuntu.sources for repository configuration
+EOF
+            print_message "Main sources.list cleared (repositories moved to sources.list.d)"
+        fi
+
+        # Use detected or selected codename
+        UBUNTU_CODENAME=${VERSION_CODENAME:-noble}
+
+        # Use ubuntu.sources (new DEB822 format) instead of ubuntu.list
+        UBUNTU_SOURCES_FILE="/etc/apt/sources.list.d/ubuntu.sources"
+
+        # Backup if exists
+        if [ -f "$UBUNTU_SOURCES_FILE" ]; then
+            cp "$UBUNTU_SOURCES_FILE" "/etc/apt/sources.list.d/ubuntu.sources.backup.$(date +%Y%m%d-%H%M%S)~"
+            print_message "Existing ubuntu.sources backed up"
+        fi
+
+        # Write new ubuntu.sources in DEB822 format
+        cat > "$UBUNTU_SOURCES_FILE" << EOF
+## Ubuntu Main Repositories
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+## Ubuntu Security Updates
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: ${UBUNTU_CODENAME}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+## Ubuntu Sources (optional - uncomment to enable)
+# Types: deb-src
+# URIs: http://archive.ubuntu.com/ubuntu/
+# Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
+# Components: main restricted universe multiverse
+# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+# Types: deb-src
+# URIs: http://security.ubuntu.com/ubuntu/
+# Suites: ${UBUNTU_CODENAME}-security
+# Components: main restricted universe multiverse
+# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+
+        print_message "Ubuntu repositories configured in: $UBUNTU_SOURCES_FILE"
+        print_message "Format: DEB822 (ubuntu.sources)"
+        print_message "Codename: ${UBUNTU_CODENAME^}"
+        print_message "Repositories enabled: main, restricted, universe, multiverse"
+    fi
+}
+
+# Repository configuration must happen before the first apt update/package
+# install; otherwise minimal or stale systems can fail before the script gets a
+# chance to fix their sources.
+if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
+    configure_apt_repositories
+    echo ""
+fi
+
 # Update package lists
 print_message "Updating package lists..."
 if apt-get update; then
@@ -1604,7 +1804,7 @@ COMMON_PACKAGES=(
     mc-data
     wget
     #iptables
-    #ufw
+    ufw
     shellcheck
     nano
     apt-utils
@@ -1646,6 +1846,12 @@ COMMON_PACKAGES=(
 # Add zsh if requested
 if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
     COMMON_PACKAGES+=(zsh)
+fi
+
+# Add OpenSSH server/client when the script will manage SSH settings
+if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || \
+   [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+    COMMON_PACKAGES+=(openssh-client openssh-server)
 fi
 
 # Debian-specific packages
@@ -1922,20 +2128,17 @@ if ( [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] 
     print_message "Configuring SSH key for $NEW_USERNAME"
     
     USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
-    
-    # Create .ssh directory as user
-    sudo -u "$NEW_USERNAME" bash << EOF
-        mkdir -p "$USER_HOME/.ssh"
-        chmod 700 "$USER_HOME/.ssh"
-EOF
+    USER_GROUP=$(id -gn "$NEW_USERNAME")
+
+    # Create .ssh directory safely without evaluating user-provided key text.
+    install -d -m 700 -o "$NEW_USERNAME" -g "$USER_GROUP" "$USER_HOME/.ssh"
     
     print_message "Created .ssh directory for $NEW_USERNAME"
     
     # Add SSH key to authorized_keys
-    sudo -u "$NEW_USERNAME" bash << EOF
-        echo "$USER_SSH_KEY" > "$USER_HOME/.ssh/authorized_keys"
-        chmod 600 "$USER_HOME/.ssh/authorized_keys"
-EOF
+    printf '%s\n' "$USER_SSH_KEY" > "$USER_HOME/.ssh/authorized_keys"
+    chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.ssh/authorized_keys"
+    chmod 600 "$USER_HOME/.ssh/authorized_keys"
     
     print_message "SSH key added to $USER_HOME/.ssh/authorized_keys"
     print_message "SSH key configured successfully for $NEW_USERNAME"
@@ -1943,131 +2146,164 @@ EOF
 fi
 
 # ============================================
-# CONFIGURE REPOSITORIES
+# CONFIGURE YUBIKEY / FIDO2 SSH AUTHENTICATION
 # ============================================
 
-# Configure sources.list for Debian
-if [ "$OS" = "debian" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
-    print_message "Configuring Debian repositories..."
-    
-    # Backup original sources.list
-    if [ -f /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~
-        print_message "Original sources.list backed up"
+if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+    print_message "Configuring YubiKey/FIDO2 SSH authentication..."
+    echo ""
+
+    YUBIKEY_SSH_OK=true
+
+    install_required_yubikey_package() {
+        local pkg="$1"
+        if apt-cache show "$pkg" &>/dev/null; then
+            if apt-get install -y "$pkg"; then
+                print_message "Installed package: $pkg"
+            else
+                print_error "Failed to install required package: $pkg"
+                YUBIKEY_SSH_OK=false
+            fi
+        else
+            print_error "Required package is not available in configured repositories: $pkg"
+            YUBIKEY_SSH_OK=false
+        fi
+    }
+
+    install_optional_yubikey_package() {
+        local pkg="$1"
+        if apt-cache show "$pkg" &>/dev/null; then
+            if apt-get install -y "$pkg"; then
+                print_message "Installed optional package: $pkg"
+            else
+                print_warning "Failed to install optional package: $pkg"
+            fi
+        else
+            print_warning "Optional package not available, skipping: $pkg"
+        fi
+    }
+
+    print_message "Installing OpenSSH/FIDO2 support packages..."
+    install_required_yubikey_package openssh-client
+    install_required_yubikey_package openssh-server
+    install_required_yubikey_package libfido2-1
+    install_optional_yubikey_package libu2f-udev
+    install_optional_yubikey_package yubikey-manager
+
+    if command -v ssh &>/dev/null; then
+        SSH_VERSION_RAW=$(ssh -V 2>&1 || true)
+        print_message "OpenSSH client version: $SSH_VERSION_RAW"
+        SSH_VERSION_MAJOR=$(printf '%s\n' "$SSH_VERSION_RAW" | sed -nE 's/^OpenSSH_([0-9]+)\.([0-9]+).*/\1/p')
+        SSH_VERSION_MINOR=$(printf '%s\n' "$SSH_VERSION_RAW" | sed -nE 's/^OpenSSH_([0-9]+)\.([0-9]+).*/\2/p')
+        if [ -n "$SSH_VERSION_MAJOR" ] && [ -n "$SSH_VERSION_MINOR" ]; then
+            if [ "$SSH_VERSION_MAJOR" -lt 8 ] || { [ "$SSH_VERSION_MAJOR" -eq 8 ] && [ "$SSH_VERSION_MINOR" -lt 2 ]; }; then
+                print_warning "OpenSSH 8.2+ is required for FIDO2 security key SSH authentication"
+                YUBIKEY_SSH_OK=false
+            elif [ "$SSH_VERSION_MAJOR" -eq 8 ] && [ "$SSH_VERSION_MINOR" -eq 2 ]; then
+                print_warning "OpenSSH 8.3+ is recommended for verify-required/PIN enforcement"
+            fi
+        else
+            print_warning "Could not parse OpenSSH version; continuing with sshd validation"
+        fi
     fi
-    
-    # Use detected or selected codename
-    DEBIAN_CODENAME=${VERSION_CODENAME:-bookworm}
-    
-    # Write new sources.list based on version
-    if [ "$VERSION" = "13" ] || [ "$DEBIAN_CODENAME" = "trixie" ]; then
-        # Debian 13 (Trixie) configuration - no backports (testing has no backports)
-        cat > /etc/apt/sources.list << EOF
-### Main Debian ${DEBIAN_CODENAME^} repositories
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
 
-### Security updates
-deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+    if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
+        if id "$YUBIKEY_SSH_USER" &>/dev/null; then
+            YUBIKEY_USER_HOME=$(getent passwd "$YUBIKEY_SSH_USER" | cut -d: -f6)
+            YUBIKEY_USER_GROUP=$(id -gn "$YUBIKEY_SSH_USER")
 
-### Release updates
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-EOF
-        print_message "Configured Debian 13 (Trixie) repositories without backports"
+            if [ -n "$YUBIKEY_USER_HOME" ] && [ -d "$YUBIKEY_USER_HOME" ]; then
+                install -d -m 700 -o "$YUBIKEY_SSH_USER" -g "$YUBIKEY_USER_GROUP" "$YUBIKEY_USER_HOME/.ssh"
+                YUBIKEY_AUTHORIZED_KEYS="$YUBIKEY_USER_HOME/.ssh/authorized_keys"
+                touch "$YUBIKEY_AUTHORIZED_KEYS"
+                chown "$YUBIKEY_SSH_USER:$YUBIKEY_USER_GROUP" "$YUBIKEY_AUTHORIZED_KEYS"
+                chmod 600 "$YUBIKEY_AUTHORIZED_KEYS"
+
+                if grep -Fxq -- "$YUBIKEY_SSH_PUBLIC_KEY" "$YUBIKEY_AUTHORIZED_KEYS"; then
+                    print_message "YubiKey SSH public key already exists in $YUBIKEY_AUTHORIZED_KEYS"
+                else
+                    printf '%s\n' "$YUBIKEY_SSH_PUBLIC_KEY" >> "$YUBIKEY_AUTHORIZED_KEYS"
+                    print_success "YubiKey SSH public key added to $YUBIKEY_AUTHORIZED_KEYS"
+                fi
+            else
+                print_error "Home directory for user '$YUBIKEY_SSH_USER' not found"
+                YUBIKEY_SSH_OK=false
+            fi
+        else
+            print_error "Target user for YubiKey SSH does not exist: $YUBIKEY_SSH_USER"
+            YUBIKEY_SSH_OK=false
+        fi
     else
-        # Debian 12 (Bookworm) and older configuration - with backports
-        cat > /etc/apt/sources.list << EOF
-### Main Debian ${DEBIAN_CODENAME^} repositories
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
-
-### Security updates
-deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
-
-### Stable release updates
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-
-### Backports (newer package versions)
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
-EOF
-        print_message "Configured Debian ${VERSION} (${DEBIAN_CODENAME^}) repositories with backports"
+        print_warning "No YubiKey SSH public key provided; installed packages and sshd support only"
     fi
-    
-    print_message "Debian repositories configured"
-    apt-get update
+
+    SSHD_CONFIG="/etc/ssh/sshd_config"
+    SSHD_CONFIG_DIR="/etc/ssh/sshd_config.d"
+    YUBIKEY_SSHD_DROPIN="${SSHD_CONFIG_DIR}/00-yubikey-fido2.conf"
+
+    if [ -f "$SSHD_CONFIG" ]; then
+        YUBIKEY_SSHD_BACKUP="${SSHD_CONFIG}.backup.yubikey.$(date +%Y%m%d-%H%M%S)~"
+        cp "$SSHD_CONFIG" "$YUBIKEY_SSHD_BACKUP"
+        print_message "Original sshd_config backed up: $YUBIKEY_SSHD_BACKUP"
+
+        mkdir -p "$SSHD_CONFIG_DIR"
+
+        if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$SSHD_CONFIG"; then
+            SSHD_CONFIG_TMP=$(mktemp)
+            {
+                echo "Include /etc/ssh/sshd_config.d/*.conf"
+                cat "$SSHD_CONFIG"
+            } > "$SSHD_CONFIG_TMP"
+            mv "$SSHD_CONFIG_TMP" "$SSHD_CONFIG"
+            print_message "Added sshd_config Include for /etc/ssh/sshd_config.d/*.conf"
+        fi
+
+        {
+            echo "# Managed by system-setup.sh - YubiKey/FIDO2 SSH support"
+            echo "# OpenSSH 8.2+ supports FIDO2 sk-* public key types."
+            echo "PubkeyAuthentication yes"
+            if [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "y" ] || [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "Y" ]; then
+                echo "PasswordAuthentication no"
+                echo "KbdInteractiveAuthentication no"
+            fi
+        } > "$YUBIKEY_SSHD_DROPIN"
+        chmod 644 "$YUBIKEY_SSHD_DROPIN"
+        chown root:root "$YUBIKEY_SSHD_DROPIN"
+
+        print_message "Created sshd drop-in: $YUBIKEY_SSHD_DROPIN"
+
+        if sshd -t; then
+            print_success "sshd configuration is valid"
+            if systemctl restart sshd 2>/dev/null; then
+                print_message "SSH service restarted (sshd)"
+            elif systemctl restart ssh 2>/dev/null; then
+                print_message "SSH service restarted (ssh)"
+            elif service ssh restart 2>/dev/null; then
+                print_message "SSH service restarted (service ssh)"
+            elif service sshd restart 2>/dev/null; then
+                print_message "SSH service restarted (service sshd)"
+            else
+                print_warning "Could not restart SSH automatically; restart manually after checking active sessions"
+            fi
+        else
+            print_error "sshd configuration validation failed; restoring backup"
+            rm -f "$YUBIKEY_SSHD_DROPIN"
+            cp "$YUBIKEY_SSHD_BACKUP" "$SSHD_CONFIG"
+            YUBIKEY_SSH_OK=false
+        fi
+    else
+        print_error "sshd_config not found: $SSHD_CONFIG"
+        YUBIKEY_SSH_OK=false
+    fi
+
+    if [ "$YUBIKEY_SSH_OK" = true ]; then
+        print_success "YubiKey/FIDO2 SSH authentication configuration completed"
+    else
+        print_warning "YubiKey/FIDO2 SSH authentication completed with warnings/errors; review messages above"
+    fi
     echo ""
-fi
-
-# Configure sources.list for Ubuntu
-if [ "$OS" = "ubuntu" ] && { [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; }; then
-    print_message "Configuring Ubuntu repositories..."
-    
-    # Backup original sources.list if it exists and has content
-    if [ -f /etc/apt/sources.list ] && [ -s /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~
-        print_message "Original sources.list backed up"
-        
-        # Clear the main sources.list file
-        cat > /etc/apt/sources.list << 'EOF'
-# Ubuntu repositories are now managed in /etc/apt/sources.list.d/
-# See /etc/apt/sources.list.d/ubuntu.sources for repository configuration
-EOF
-        print_message "Main sources.list cleared (repositories moved to sources.list.d)"
-    fi
-    
-    # Use detected or selected codename
-    UBUNTU_CODENAME=${VERSION_CODENAME:-noble}
-    
-    # Use ubuntu.sources (new DEB822 format) instead of ubuntu.list
-    UBUNTU_SOURCES_FILE="/etc/apt/sources.list.d/ubuntu.sources"
-    
-    # Backup if exists
-    if [ -f "$UBUNTU_SOURCES_FILE" ]; then
-        cp "$UBUNTU_SOURCES_FILE" "/etc/apt/sources.list.d/ubuntu.sources.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Existing ubuntu.sources backed up"
-    fi
-    
-    # Write new ubuntu.sources in DEB822 format
-    cat > "$UBUNTU_SOURCES_FILE" << EOF
-## Ubuntu Main Repositories
-Types: deb
-URIs: http://archive.ubuntu.com/ubuntu/
-Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-## Ubuntu Security Updates
-Types: deb
-URIs: http://security.ubuntu.com/ubuntu/
-Suites: ${UBUNTU_CODENAME}-security
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-## Ubuntu Sources (optional - uncomment to enable)
-# Types: deb-src
-# URIs: http://archive.ubuntu.com/ubuntu/
-# Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
-# Components: main restricted universe multiverse
-# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-# Types: deb-src
-# URIs: http://security.ubuntu.com/ubuntu/
-# Suites: ${UBUNTU_CODENAME}-security
-# Components: main restricted universe multiverse
-# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-EOF
-    
-    print_message "Ubuntu repositories configured in: $UBUNTU_SOURCES_FILE"
-    print_message "Format: DEB822 (ubuntu.sources)"
-    print_message "Codename: ${UBUNTU_CODENAME^}"
-    print_message "Repositories enabled: main, restricted, universe, multiverse"
-    apt-get update
-    echo ""
+else
+    print_message "Skipping YubiKey/FIDO2 SSH authentication (not requested)"
 fi
 
 # ============================================
@@ -4981,6 +5217,22 @@ else
     print_message "- SSH: NOT CONFIGURED"
 fi
 
+if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+    print_message "- YubiKey/FIDO2 SSH: Configured"
+    print_message "  User: ${YUBIKEY_SSH_USER:-not set}"
+    if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
+        print_message "  Public key: added to authorized_keys"
+    else
+        print_message "  Public key: not provided (server-side support only)"
+    fi
+    if [ -f /etc/ssh/sshd_config.d/00-yubikey-fido2.conf ]; then
+        print_message "  sshd drop-in: /etc/ssh/sshd_config.d/00-yubikey-fido2.conf"
+    fi
+    print_message "  Password authentication disabled: $([ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "y" ] || [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "Y" ] && echo "YES" || echo "NO")"
+else
+    print_message "- YubiKey/FIDO2 SSH: Not configured"
+fi
+
 if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
     print_message "- Python venv created at: $VENV_PATH"
 else
@@ -5218,7 +5470,7 @@ fi
 
 print_message ""
 
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ] || { [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; }; then
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ] || { [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; }; then
     print_message "Backup files saved with timestamp (format: filename.backup.YYYYMMDD-HHMMSS~):"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "- /etc/sysctl.conf.backup.*~"
@@ -5233,6 +5485,9 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     fi
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         print_message "- /etc/ssh/sshd_config.backup.*~"
+    fi
+    if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+        print_message "- /etc/ssh/sshd_config.backup.yubikey.*~"
     fi
     if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
         print_message "- /etc/ufw/before.rules.backup.*~"
@@ -5268,6 +5523,15 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         print_warning "   Test connection: ssh -p $SSH_PORT user@host"
         STEP_NUM=$((STEP_NUM + 1))
     fi
+fi
+
+if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+    if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
+        print_warning "$STEP_NUM. Test YubiKey SSH before closing this session: ssh ${YUBIKEY_SSH_USER:-user}@hostname"
+    else
+        print_warning "$STEP_NUM. Add a YubiKey public key later to ~/.ssh/authorized_keys for the target user"
+    fi
+    STEP_NUM=$((STEP_NUM + 1))
 fi
 
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
@@ -5336,6 +5600,12 @@ if [ "$OS" = "ubuntu" ]; then
     print_message "sudo nano /etc/apt/sources.list.d/ubuntu.sources"
 fi
 print_message "sudo nano /etc/ssh/sshd_config"
+if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
+    print_message "ssh-keygen -t ed25519-sk -O resident -O verify-required -C \"user@host\""
+    print_message "ssh-keygen -K                         # Download resident YubiKey SSH keys"
+    print_message "sudo nano /etc/ssh/sshd_config.d/00-yubikey-fido2.conf"
+    print_message "sudo sshd -t                          # Validate SSH configuration"
+fi
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     print_message "nft list ruleset                       # Show nftables rules"
     print_message "sudo nano /etc/nftables.conf           # Edit nftables config"
