@@ -53,11 +53,22 @@ is_yes() {
 ensure_dns_works() {
     local caller_context="${1:-unknown}"
     local RESOLV_FILE="/etc/resolv.conf"
+    local resolved_active=false
+    local resolv_managed_by_resolved=false
+
+    if [ -L "$RESOLV_FILE" ]; then
+        local resolv_target
+        resolv_target=$(readlink -f "$RESOLV_FILE" 2>/dev/null || true)
+        if [[ "$resolv_target" == /run/systemd/resolve/* ]]; then
+            resolv_managed_by_resolved=true
+        fi
+    fi
 
     # Step 1: Configure systemd-resolved with IPv4 upstream DNS (if active)
     # Writing to resolv.conf alone is insufficient when systemd-resolved manages it,
     # because resolved ignores resolv.conf and uses its own config for upstream DNS
     if systemctl is-active systemd-resolved &>/dev/null; then
+        resolved_active=true
         local RESOLVED_CONF="/etc/systemd/resolved.conf"
         local RESOLVED_DROP="/etc/systemd/resolved.conf.d"
 
@@ -81,8 +92,12 @@ DNSEOF
         resolvectl flush-caches 2>/dev/null || true
     fi
 
-    # Step 2: Ensure resolv.conf has real IPv4 nameservers (not just 127.0.0.53 stub)
-    if [ -f "$RESOLV_FILE" ]; then
+    # Step 2: Ensure resolv.conf has real IPv4 nameservers (not just 127.0.0.53 stub).
+    # Do not replace systemd-resolved-managed symlinks; doing so silently disables
+    # resolved integration on Ubuntu/Debian systems using the recommended layout.
+    if [ "$resolved_active" = true ] && [ "$resolv_managed_by_resolved" = true ]; then
+        print_message "[$caller_context] resolv.conf is managed by systemd-resolved; leaving symlink intact"
+    elif [ -f "$RESOLV_FILE" ]; then
         # Check for real (non-loopback) IPv4 nameservers
         if ! grep -qE "^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|8\.8\.4\.4)" "$RESOLV_FILE"; then
             cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.dns.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
@@ -109,15 +124,19 @@ DNSEOF
     if [ "$dns_ok" = true ]; then
         print_success "[$caller_context] DNS resolution verified"
     else
-        print_warning "[$caller_context] DNS resolution failed, forcing direct nameservers..."
-        # Last resort: overwrite resolv.conf completely with known-good DNS
-        cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.force.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
-        # Preserve non-nameserver lines (search, options, etc.)
-        grep -vE "^[[:space:]]*nameserver" "$RESOLV_FILE" > "${RESOLV_FILE}.tmp" 2>/dev/null || true
-        echo "nameserver 1.1.1.1" >> "${RESOLV_FILE}.tmp"
-        echo "nameserver 8.8.8.8" >> "${RESOLV_FILE}.tmp"
-        echo "nameserver 1.0.0.1" >> "${RESOLV_FILE}.tmp"
-        mv "${RESOLV_FILE}.tmp" "$RESOLV_FILE"
+        if [ "$resolved_active" = true ] && [ "$resolv_managed_by_resolved" = true ]; then
+            print_warning "[$caller_context] DNS failed with systemd-resolved-managed resolv.conf; not overwriting symlink"
+        else
+            print_warning "[$caller_context] DNS resolution failed, forcing direct nameservers..."
+            # Last resort: overwrite resolv.conf completely with known-good DNS
+            cp "$RESOLV_FILE" "${RESOLV_FILE}.backup.force.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
+            # Preserve non-nameserver lines (search, options, etc.)
+            grep -vE "^[[:space:]]*nameserver" "$RESOLV_FILE" > "${RESOLV_FILE}.tmp" 2>/dev/null || true
+            echo "nameserver 1.1.1.1" >> "${RESOLV_FILE}.tmp"
+            echo "nameserver 8.8.8.8" >> "${RESOLV_FILE}.tmp"
+            echo "nameserver 1.0.0.1" >> "${RESOLV_FILE}.tmp"
+            mv "${RESOLV_FILE}.tmp" "$RESOLV_FILE"
+        fi
 
         # If systemd-resolved is active, stop it temporarily so resolv.conf is used directly
         if systemctl is-active systemd-resolved &>/dev/null; then
@@ -427,6 +446,11 @@ if [ "$INTERACTIVE" = true ]; then
         if [ -z "$NEW_USERNAME" ]; then
             print_error "Username cannot be empty"
             CREATE_USER="n"
+        elif ! [[ "$NEW_USERNAME" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
+            print_error "Invalid username: $NEW_USERNAME"
+            print_error "Use a Debian-compatible username: start with a lowercase letter or underscore, then lowercase letters, digits, underscores or hyphens"
+            CREATE_USER="n"
+            NEW_USERNAME=""
         else
             # Check if user already exists
             if id "$NEW_USERNAME" &>/dev/null; then
@@ -1149,6 +1173,12 @@ if [ "$INTERACTIVE" = true ]; then
         RESOLVED_DNS_OVER_TLS=""
     fi
 
+    if { [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; } && \
+       { [ "${BBR_FIX_DNS:-n}" = "y" ] || [ "${BBR_FIX_DNS:-n}" = "Y" ]; }; then
+        print_warning "systemd-resolved selected; disabling BBR fix_dns to avoid conflicting DNS rewrites"
+        BBR_FIX_DNS="n"
+    fi
+
     # Ask about IPv6 disable via GRUB (Debian only)
     if [ "$OS" = "debian" ]; then
         echo ""
@@ -1335,6 +1365,7 @@ else
     INSTALL_NFTABLES_CONF="n"
     NFTABLES_PROFILE=""
     INSTALL_NFTABLES_LOGGING="n"
+    INSTALL_NFT_DOCKER_WATCH="n"
     CONFIGURE_UFW="y"
     BLOCK_ICMP="n"
     INSTALL_UFW_CUSTOM_RULES="n"
@@ -1573,7 +1604,7 @@ COMMON_PACKAGES=(
     mc-data
     wget
     #iptables
-    #ufw
+    ufw
     shellcheck
     nano
     apt-utils
@@ -1621,7 +1652,6 @@ fi
 # You can comment out (#) any package to disable its installation
 DEBIAN_PACKAGES=(
     openvswitch-switch-dpdk
-    linux-headers-$(uname -r)
 )
 
 # Add linux-headers only if available for the running kernel
@@ -1632,15 +1662,21 @@ else
 fi
 
 # Ubuntu-specific packages
-# Note: linux-headers-$(uname -r) will be automatically replaced with current kernel version
+# linux-headers-$(uname -r) is added below only when the package exists
 # You can comment out (#) any package to disable its installation
 UBUNTU_PACKAGES=(
-    linux-headers-$(uname -r)
     landscape-common
     update-notifier-common
     ubuntu-keyring
     openvswitch-switch-dpdk
 )
+
+# Add linux-headers only if available for the running kernel
+if apt-cache show "linux-headers-$(uname -r)" &>/dev/null; then
+    UBUNTU_PACKAGES+=("linux-headers-$(uname -r)")
+else
+    print_warning "linux-headers-$(uname -r) not available (kernel updated without reboot?), skipping"
+fi
 
 # Install packages based on OS
 print_message "Installing packages..."
@@ -2208,7 +2244,7 @@ EOF
         
         # Change default shell to zsh
         print_message "Changing default shell to zsh for $NEW_USERNAME"
-        chsh -s $(which zsh) "$NEW_USERNAME"
+        chsh -s "$(which zsh)" "$NEW_USERNAME"
         print_message "Default shell changed to zsh"
     else
         print_error "Oh My Zsh installation failed"
@@ -2268,6 +2304,9 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         else
             # Add Port line after Include directive
             sed -i "/^Include \/etc\/ssh\/sshd_config.d\/\*.conf/a Port $SSH_PORT" "$SSHD_CONFIG"
+            if ! grep -q "^Port $SSH_PORT$" "$SSHD_CONFIG"; then
+                printf '\n# Custom SSH configuration\nPort %s\n' "$SSH_PORT" >> "$SSHD_CONFIG"
+            fi
             print_message "SSH port set to $SSH_PORT"
         fi
     fi
@@ -2361,7 +2400,7 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     print_message "UFW default policies configured"
     
     # Allow SSH (use configured port)
-    ufw allow ${SSH_PORT}/tcp comment 'SSH'
+    ufw allow "${SSH_PORT}"/tcp comment 'SSH'
     print_message "UFW rule added: Allow SSH (port ${SSH_PORT})"
     
     # Add custom ports if specified
@@ -2382,7 +2421,7 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
                 PROTOCOL="${BASH_REMATCH[2]}"
                 
                 if [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
-                    ufw allow ${PORT}/${PROTOCOL} comment "Custom ${PROTOCOL} port"
+                    ufw allow "${PORT}"/"${PROTOCOL}" comment "Custom ${PROTOCOL} port"
                     print_message "UFW rule added: Allow port ${PORT}/${PROTOCOL}"
                 else
                     print_warning "Invalid port number: $PORT (must be 1-65535). Skipping."
@@ -2392,7 +2431,7 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
                 PORT="$PORT_SPEC"
                 
                 if [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
-                    ufw allow ${PORT}/tcp comment "Custom tcp port"
+                    ufw allow "${PORT}"/tcp comment "Custom tcp port"
                     print_message "UFW rule added: Allow port ${PORT}/tcp (default)"
                 else
                     print_warning "Invalid port number: $PORT (must be 1-65535). Skipping."
@@ -2565,7 +2604,7 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             
             # Add current user to docker group if not root
             if [ ! -z "$SUDO_USER" ] && [ "$SUDO_USER" != "$NEW_USERNAME" ]; then
-                usermod -aG docker $SUDO_USER
+                usermod -aG docker "$SUDO_USER"
                 print_message "User $SUDO_USER added to docker group"
             fi
             
@@ -2735,33 +2774,38 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
         LATEST_GO_VERSION=$(curl -s https://go.dev/VERSION?m=text | head -1)
         
         if [ -z "$LATEST_GO_VERSION" ]; then
-            print_warning "Could not fetch latest Go version, using fallback: go1.23.4"
-            LATEST_GO_VERSION="go1.23.4"
+            print_error "Could not fetch latest Go version"
+            print_warning "Skipping Go installation instead of installing a stale fallback version"
+            INSTALL_GO="n"
         fi
-        
-        print_message "Latest Go version: $LATEST_GO_VERSION"
 
-        # Detect system architecture
-        ARCH=$(uname -m)
-        case "$ARCH" in
-            x86_64)
-                GO_ARCH="amd64"
-                ;;
-            aarch64|arm64)
-                GO_ARCH="arm64"
-                ;;
-            armv6l)
-                GO_ARCH="armv6l"
-                ;;
-            i386|i686)
-                GO_ARCH="386"
-                ;;
-            *)
-                print_error "Unsupported architecture: $ARCH"
-                print_error "Go installation skipped"
-                GO_ARCH=""
-                ;;
-        esac
+        if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
+            print_message "Latest Go version: $LATEST_GO_VERSION"
+
+            # Detect system architecture
+            ARCH=$(uname -m)
+            case "$ARCH" in
+                x86_64)
+                    GO_ARCH="amd64"
+                    ;;
+                aarch64|arm64)
+                    GO_ARCH="arm64"
+                    ;;
+                armv6l)
+                    GO_ARCH="armv6l"
+                    ;;
+                i386|i686)
+                    GO_ARCH="386"
+                    ;;
+                *)
+                    print_error "Unsupported architecture: $ARCH"
+                    print_error "Go installation skipped"
+                    GO_ARCH=""
+                    ;;
+            esac
+        else
+            GO_ARCH=""
+        fi
 
         if [ -z "$GO_ARCH" ]; then
             # Skip Go installation for unsupported architectures
@@ -2852,7 +2896,7 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
         print_error "Kernel headers not found at: $KERNEL_HEADERS_DIR"
         print_error "Installing kernel headers..."
         
-        if apt-get install -y linux-headers-${KERNEL_VERSION}; then
+        if apt-get install -y "linux-headers-${KERNEL_VERSION}"; then
             print_message "Kernel headers installed successfully"
         else
             print_error "Failed to install kernel headers"
@@ -2871,18 +2915,20 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
         LATEST_IPSET_VERSION=$(curl -s https://ipset.netfilter.org/ | grep -oP 'ipset-\K[0-9]+\.[0-9]+' | head -1)
         
         if [ -z "$LATEST_IPSET_VERSION" ]; then
-            print_warning "Could not fetch latest ipset version, using fallback: 7.24"
-            LATEST_IPSET_VERSION="7.24"
+            print_error "Could not fetch latest ipset version"
+            print_warning "Skipping ipset build instead of installing a stale fallback version"
+            INSTALL_IPSET="n"
         fi
-        
-        print_message "Latest ipset version: $LATEST_IPSET_VERSION"
-        
-        # Download ipset
-        IPSET_ARCHIVE="ipset-${LATEST_IPSET_VERSION}.tar.bz2"
-        IPSET_URL="https://ipset.netfilter.org/${IPSET_ARCHIVE}"
-        
-        print_message "Downloading ipset from: $IPSET_URL"
-        if wget -q --show-progress "$IPSET_URL" -O "/tmp/${IPSET_ARCHIVE}"; then
+
+        if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
+            print_message "Latest ipset version: $LATEST_IPSET_VERSION"
+
+            # Download ipset
+            IPSET_ARCHIVE="ipset-${LATEST_IPSET_VERSION}.tar.bz2"
+            IPSET_URL="https://ipset.netfilter.org/${IPSET_ARCHIVE}"
+
+            print_message "Downloading ipset from: $IPSET_URL"
+            if wget -q --show-progress "$IPSET_URL" -O "/tmp/${IPSET_ARCHIVE}"; then
             print_message "ipset downloaded successfully"
 
             # Extract ipset
@@ -2903,7 +2949,7 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
 
                         # Build
                         print_message "Building ipset (using $(nproc) cores)..."
-                        if make -j$(nproc); then
+                        if make -j"$(nproc)"; then
                             print_message "Build successful"
 
                             # Install
@@ -2935,8 +2981,9 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
             else
                 print_error "Failed to extract ipset"
             fi
-        else
-            print_error "Failed to download ipset"
+            else
+                print_error "Failed to download ipset"
+            fi
         fi
     fi
     
@@ -3399,11 +3446,11 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
 
         # Check if p7zip is installed, install if needed
         if ! command -v 7z &> /dev/null; then
-            print_message "Installing p7zip-full for archive extraction..."
-            if apt-get install -y p7zip-full; then
-                print_message "p7zip-full installed successfully"
+            print_message "Installing 7z for archive extraction..."
+            if apt-get install -y p7zip-full || apt-get install -y 7zip; then
+                print_message "7z installed successfully"
             else
-                print_error "CRITICAL: Failed to install p7zip-full"
+                print_error "CRITICAL: Failed to install 7z archive tool"
                 print_error "Installation cannot continue"
                 exit 1
             fi
@@ -3549,11 +3596,11 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
 
     # Check if p7zip is installed, install if needed
     if ! command -v 7z &> /dev/null; then
-        print_message "Installing p7zip-full for archive extraction..."
-        if apt-get install -y p7zip-full; then
-            print_message "p7zip-full installed successfully"
+        print_message "Installing 7z for archive extraction..."
+        if apt-get install -y p7zip-full || apt-get install -y 7zip; then
+            print_message "7z installed successfully"
         else
-            print_error "CRITICAL: Failed to install p7zip-full"
+            print_error "CRITICAL: Failed to install 7z archive tool"
             print_error "Cannot extract opt.7z archive"
         fi
     fi
@@ -3793,13 +3840,13 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 
             # Copy selected profile config as /etc/nftables.conf
             cp "$NFTABLES_SRC" "$NFTABLES_DST"
-            chmod 755 "$NFTABLES_DST"
+            chmod 644 "$NFTABLES_DST"
             chown root:root "$NFTABLES_DST"
 
             # Verify the copy was successful
             if [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ] && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
                 print_success "Installed ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
-                print_message "  Permissions: 755, Owner: root:root"
+                print_message "  Permissions: 644, Owner: root:root"
                 print_message "  File size: $(wc -c < "$NFTABLES_DST") bytes"
             else
                 print_error "CRITICAL: Config file copy verification failed!"
@@ -3807,7 +3854,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                 print_error "Destination: $NFTABLES_DST ($(wc -c < "$NFTABLES_DST" 2>/dev/null || echo 0) bytes)"
                 # Force retry with install command
                 print_message "Retrying with install command..."
-                if install -m 755 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST" && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
+                if install -m 644 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST" && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
                     print_success "Retry successful: ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
                 else
                     print_error "Config installation failed after retry"
@@ -4165,8 +4212,8 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
     echo ""
 
     # Ensure zram kernel module is available (missing on some VPS with minimal kernel)
-    if ! find /lib/modules/$(uname -r) -name '*zram*' 2>/dev/null | grep -q .; then
-        KERNEL_HAS_ZRAM=$(grep -c "^CONFIG_ZRAM=m" /boot/config-$(uname -r) 2>/dev/null || echo 0)
+    if ! find "/lib/modules/$(uname -r)" -name '*zram*' 2>/dev/null | grep -q .; then
+        KERNEL_HAS_ZRAM=$(grep -c "^CONFIG_ZRAM=m" "/boot/config-$(uname -r)" 2>/dev/null || echo 0)
         if [ "$KERNEL_HAS_ZRAM" -gt 0 ]; then
             print_warning "zram module not found — CONFIG_ZRAM=m detected, installing linux-modules-extra..."
             apt-get install -y "linux-modules-extra-$(uname -r)" 2>&1 | tail -3 || \
@@ -4174,7 +4221,7 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
         fi
     fi
     # Load zram module now if available (avoids reboot requirement)
-    if find /lib/modules/$(uname -r) -name '*zram*' 2>/dev/null | grep -q .; then
+    if find "/lib/modules/$(uname -r)" -name '*zram*' 2>/dev/null | grep -q .; then
         modprobe zram 2>/dev/null || true
         print_message "zram module loaded successfully"
     else
@@ -4673,7 +4720,7 @@ if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_
             # Update GRUB
             print_message "Updating GRUB configuration..."
             update-grub 2>&1 | tee /tmp/grub-update.log
-            if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            if [ "${PIPESTATUS[0]}" -eq 0 ]; then
                 print_success "GRUB configuration updated successfully"
                 print_warning "IPv6 will be disabled at kernel level after reboot"
             else
