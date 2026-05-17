@@ -989,16 +989,6 @@ if [ "$INTERACTIVE" = true ]; then
         DOCKER_DISABLE_IPTABLES="n"
     fi
 
-    echo ""
-
-    # Ask about ufw-docker installation (separate from Docker)
-    print_message "Install ufw-docker (UFW integration for Docker)?"
-    print_message "  Note: Can be installed even without Docker"
-    read -r -p "Install ufw-docker? (y/N): " INSTALL_UFW_DOCKER
-    INSTALL_UFW_DOCKER=${INSTALL_UFW_DOCKER:-n}
-
-    echo ""
-
     # Ask about Go installation
     print_message "Install the latest version of Go?"
     if [ ! -z "$NEW_USERNAME" ]; then
@@ -1026,14 +1016,50 @@ if [ "$INTERACTIVE" = true ]; then
 
     echo ""
 
+    # Select a single firewall backend so UFW and nftables prompts are mutually exclusive.
+    print_header "───────────────────────────────────────────────"
+    print_header "   Firewall Backend"
+    print_header "───────────────────────────────────────────────"
+    echo ""
+    print_message "Select firewall backend:"
+    print_message "  1) nftables — replace iptables/UFW with nftables"
+    print_message "  2) UFW      — configure UFW firewall"
+    print_message "  3) none     — skip firewall configuration"
+    read -r -p "Firewall backend [1-3] (default: 2): " FIREWALL_BACKEND_CHOICE
+    FIREWALL_BACKEND_CHOICE=${FIREWALL_BACKEND_CHOICE:-2}
+
+    case "$FIREWALL_BACKEND_CHOICE" in
+        1) FIREWALL_BACKEND="nftables" ;;
+        2) FIREWALL_BACKEND="ufw" ;;
+        3) FIREWALL_BACKEND="none" ;;
+        *)
+            print_warning "Invalid firewall backend choice: '$FIREWALL_BACKEND_CHOICE', using UFW"
+            FIREWALL_BACKEND="ufw"
+            ;;
+    esac
+
+    echo ""
+
     # Ask about UFW configuration
+    if [ "$FIREWALL_BACKEND" = "ufw" ]; then
+    CONFIGURE_UFW="y"
+    ENABLE_NFTABLES="n"
+    INSTALL_NFTABLES_CONF="n"
+    NFTABLES_PROFILE=""
+    NFTABLES_LOG_SCRIPT=""
+    INSTALL_NFTABLES_LOGGING="n"
+    INSTALL_NFT_DOCKER_WATCH="n"
+
     print_header "───────────────────────────────────────────────"
     print_header "   Firewall (UFW)"
     print_header "───────────────────────────────────────────────"
     echo ""
-    print_message "Configure UFW firewall?"
-    read -r -p "Configure UFW? (Y/n): " CONFIGURE_UFW
-    CONFIGURE_UFW=${CONFIGURE_UFW:-y}
+    print_message "UFW selected as firewall backend"
+
+    print_message "Install ufw-docker (UFW integration for Docker)?"
+    print_message "  Note: Can be installed even without Docker"
+    read -r -p "Install ufw-docker? (y/N): " INSTALL_UFW_DOCKER
+    INSTALL_UFW_DOCKER=${INSTALL_UFW_DOCKER:-n}
 
     # Ask about ICMP blocking (only if UFW is enabled)
     if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
@@ -1135,20 +1161,39 @@ if [ "$INTERACTIVE" = true ]; then
         UFW_INSTALL_SOURCE="1"
         UFW_SSH_PORT=""
     fi
+    else
+        CONFIGURE_UFW="n"
+        BLOCK_ICMP="n"
+        INSTALL_UFW_CUSTOM_RULES="n"
+        UFW_RULES_VERSION="6"
+        UFW_INSTALL_SOURCE="1"
+        UFW_SSH_PORT=""
+        UFW_CUSTOM_RULES_PASSWORD=""
+        INSTALL_UFW_DOCKER="n"
+    fi
 
     # Ask about nftables
+    if [ "$FIREWALL_BACKEND" = "nftables" ]; then
+    ENABLE_NFTABLES="y"
+    CONFIGURE_UFW="n"
+    BLOCK_ICMP="n"
+    INSTALL_UFW_CUSTOM_RULES="n"
+    UFW_RULES_VERSION="6"
+    UFW_INSTALL_SOURCE="1"
+    UFW_SSH_PORT=""
+    UFW_CUSTOM_RULES_PASSWORD=""
+    INSTALL_UFW_DOCKER="n"
+
     echo ""
     print_header "───────────────────────────────────────────────"
     print_header "   nftables Firewall"
     print_header "───────────────────────────────────────────────"
     echo ""
-    print_message "Switch to nftables as the packet filter?"
+    print_message "nftables selected as firewall backend"
     print_message "  - Replaces iptables/UFW with nftables"
     print_message "  - Disables and masks UFW if installed"
     print_message "  - Flushes all iptables rules"
     print_message "  - Installs and enables nftables service"
-    read -r -p "Enable nftables? (y/N): " ENABLE_NFTABLES
-    ENABLE_NFTABLES=${ENABLE_NFTABLES:-n}
 
     if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         # Warn about UFW conflict and auto-disable UFW options
@@ -1242,6 +1287,15 @@ if [ "$INTERACTIVE" = true ]; then
         read -r -p "Install nft-docker-watch? (Y/n): " INSTALL_NFT_DOCKER_WATCH
         INSTALL_NFT_DOCKER_WATCH=${INSTALL_NFT_DOCKER_WATCH:-y}
     else
+        INSTALL_NFT_DOCKER_WATCH="n"
+    fi
+    else
+        ENABLE_NFTABLES="n"
+        INSTALL_NFTABLES_CONF="n"
+        NFTABLES_PROFILE=""
+        NFTABLES_CONF_FILE=""
+        NFTABLES_LOG_SCRIPT=""
+        INSTALL_NFTABLES_LOGGING="n"
         INSTALL_NFT_DOCKER_WATCH="n"
     fi
 
