@@ -264,6 +264,29 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
 fi
 unset _NFT_PROFILES_LOADED _SCRIPT_DIR
 
+verify_nft_profile_assets() {
+    local nft_dir="${1:-/opt/nftables}"
+    local missing=false
+    local i conf_file log_file
+
+    for i in $(seq 1 "$NFT_PROFILES_COUNT"); do
+        conf_file="${NFT_PROFILE_CONFIGS[$i]:-}"
+        log_file="${NFT_PROFILE_LOGSCRIPTS[$i]:-}"
+
+        if [ -z "$conf_file" ] || [ ! -s "${nft_dir}/${conf_file}" ]; then
+            print_warning "Missing nftables profile config: ${nft_dir}/${conf_file:-<empty>}"
+            missing=true
+        fi
+
+        if [ -n "$log_file" ] && [ ! -s "${nft_dir}/logging/${log_file}" ]; then
+            print_warning "Missing nftables logging script: ${nft_dir}/logging/${log_file}"
+            missing=true
+        fi
+    done
+
+    [ "$missing" = false ]
+}
+
 # Print banner
 echo ""
 print_header "╔═══════════════════════════════════════════════╗"
@@ -3977,26 +4000,39 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
                         else
                             print_warning "nftables/logging directory not found in archive"
                         fi
+                        verify_nft_profile_assets "/opt/nftables" || print_warning "Some configured nftables profile assets are missing"
                     else
                         print_warning "nftables directory NOT found after extraction"
                         print_warning "Archive may have different internal structure"
                         # Try to find nftables files in case of nested directory
-                        FOUND_NFTABLES=$(find /opt -name "*_nftables.conf" -type f 2>/dev/null | head -1)
+                        FOUND_NFTABLES=$(find /opt -name "*nftables*.conf" -type f 2>/dev/null | head -1)
                         if [ -n "$FOUND_NFTABLES" ]; then
                             FOUND_DIR=$(dirname "$FOUND_NFTABLES")
                             print_message "Found nftables configs in: $FOUND_DIR"
                             print_message "Restructuring: moving files to /opt/nftables/..."
                             mkdir -p /opt/nftables
-                            cp "$FOUND_DIR"/*_nftables.conf /opt/nftables/ 2>/dev/null
+                            NFT_CONF_COPIED=0
+                            while IFS= read -r _nft_conf; do
+                                cp "$_nft_conf" /opt/nftables/
+                                NFT_CONF_COPIED=$((NFT_CONF_COPIED + 1))
+                            done < <(find "$FOUND_DIR" -maxdepth 1 -type f -name "*nftables*.conf" 2>/dev/null | sort)
+                            print_message "Copied $NFT_CONF_COPIED nftables config file(s)"
                             # Also try to find and copy logging scripts
-                            FOUND_LOGGING=$(find /opt -name "*_logging.sh" -type f 2>/dev/null | head -1)
+                            FOUND_LOGGING=$(find /opt -type f -name "*.sh" -path "*/logging/*" 2>/dev/null | head -1)
                             if [ -n "$FOUND_LOGGING" ]; then
                                 FOUND_LOG_DIR=$(dirname "$FOUND_LOGGING")
                                 mkdir -p /opt/nftables/logging
-                                cp "$FOUND_LOG_DIR"/*_logging.sh /opt/nftables/logging/ 2>/dev/null
+                                NFT_LOG_COPIED=0
+                                while IFS= read -r _nft_log; do
+                                    cp "$_nft_log" /opt/nftables/logging/
+                                    NFT_LOG_COPIED=$((NFT_LOG_COPIED + 1))
+                                done < <(find "$FOUND_LOG_DIR" -maxdepth 1 -type f -name "*.sh" 2>/dev/null | sort)
+                                print_message "Copied $NFT_LOG_COPIED nftables logging script(s)"
                             fi
+                            unset _nft_conf _nft_log NFT_CONF_COPIED NFT_LOG_COPIED
                             OPT_EXTRACTED_OK=true
                             print_success "nftables files restructured to /opt/nftables/"
+                            verify_nft_profile_assets "/opt/nftables" || print_warning "Some configured nftables profile assets are missing"
                         fi
                     fi
 
