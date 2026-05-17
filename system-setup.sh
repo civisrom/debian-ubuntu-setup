@@ -287,6 +287,76 @@ verify_nft_profile_assets() {
     [ "$missing" = false ]
 }
 
+disable_ufw_firewall() {
+    local ufw_status
+    local ufw_disabled_ok=true
+    local ufw_enabled_state
+
+    print_message "Step 1: Checking UFW status..."
+    if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
+        print_message "UFW is not installed — skipping"
+        return 0
+    fi
+
+    print_message "UFW package is installed"
+    if command -v ufw &>/dev/null; then
+        ufw_status=$(ufw status 2>/dev/null | head -1 || true)
+        ufw_status=${ufw_status:-unknown}
+        print_message "UFW status: $ufw_status"
+
+        if echo "$ufw_status" | grep -qiE '^Status:[[:space:]]+active([[:space:]]|$)'; then
+            print_message "Disabling UFW firewall..."
+            if ufw disable; then
+                print_message "UFW disabled"
+            else
+                print_warning "ufw disable returned an error; continuing with systemd disable/mask"
+            fi
+        else
+            print_message "UFW is not active — skipping ufw disable, continuing with systemd disable/mask"
+        fi
+    else
+        print_warning "UFW package is installed but ufw command was not found"
+    fi
+
+    if ! command -v systemctl &>/dev/null; then
+        print_error "systemctl not found; cannot fully disable/mask UFW service"
+        return 1
+    fi
+
+    # Stop, disable and mask UFW to prevent any future activation.
+    # mask creates a symlink to /dev/null — strongest form of disable.
+    print_message "Stopping, disabling and masking UFW service..."
+    if ! systemctl stop ufw.service 2>/dev/null; then
+        print_warning "systemctl stop ufw.service returned an error"
+    fi
+    if ! systemctl disable ufw.service 2>/dev/null; then
+        print_warning "systemctl disable ufw.service returned an error"
+    fi
+    if ! systemctl mask ufw.service 2>/dev/null; then
+        print_warning "systemctl mask ufw.service returned an error; verifying final state"
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+
+    if systemctl is-active --quiet ufw.service 2>/dev/null; then
+        print_error "UFW service is still active after disable attempt"
+        ufw_disabled_ok=false
+    fi
+
+    ufw_enabled_state=$(systemctl is-enabled ufw.service 2>/dev/null || true)
+    if [ "$ufw_enabled_state" != "masked" ]; then
+        print_error "UFW service is not masked (state: ${ufw_enabled_state:-unknown})"
+        ufw_disabled_ok=false
+    fi
+
+    if [ "$ufw_disabled_ok" = true ]; then
+        print_success "UFW service: stopped, disabled, masked and verified"
+        return 0
+    fi
+
+    print_error "UFW was not fully disabled; nftables setup will stop before flushing iptables"
+    return 1
+}
+
 # Print banner
 echo ""
 print_header "╔═══════════════════════════════════════════════╗"
@@ -4149,29 +4219,9 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 
     # --- Step 1: Check and disable UFW ---
     if [ "$NFTABLES_OK" = true ]; then
-    print_message "Step 1: Checking UFW status..."
-    if dpkg -l ufw 2>/dev/null | grep -q "^ii"; then
-        print_message "UFW package is installed"
-        if command -v ufw &>/dev/null; then
-            UFW_STATUS=$(ufw status 2>/dev/null | head -1 || echo "unknown")
-            print_message "UFW status: $UFW_STATUS"
-            if echo "$UFW_STATUS" | grep -q "active"; then
-                print_message "Disabling UFW firewall..."
-                ufw disable
-                print_message "UFW disabled"
-            else
-                print_message "UFW is already inactive"
-            fi
+        if ! disable_ufw_firewall; then
+            NFTABLES_OK=false
         fi
-        # Stop, disable and mask UFW to prevent any future activation
-        # mask creates a symlink to /dev/null — strongest form of disable
-        systemctl stop ufw 2>/dev/null || true
-        systemctl disable ufw 2>/dev/null || true
-        systemctl mask ufw 2>/dev/null || true
-        print_success "UFW service: stopped, disabled, masked"
-    else
-        print_message "UFW is not installed — skipping"
-    fi
     fi
 
     # --- Step 2: Flush all iptables rules ---
