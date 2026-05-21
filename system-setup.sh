@@ -2590,13 +2590,38 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
         fi
     }
 
+    # Try to install the first available alternative from a list (e.g. libfido2-1
+    # vs libfido2t64-1 after Ubuntu's t64 transition). Marks YUBIKEY_SSH_OK=false
+    # if none are available.
+    install_required_yubikey_package_alts() {
+        local label="$1"; shift
+        local pkg
+        for pkg in "$@"; do
+            if apt-cache show "$pkg" &>/dev/null; then
+                if apt-get install -y "$pkg"; then
+                    print_message "Installed $label package: $pkg"
+                    return 0
+                fi
+            fi
+        done
+        print_error "None of the candidate packages for $label could be installed: $*"
+        YUBIKEY_SSH_OK=false
+        return 1
+    }
+
     print_message "Installing OpenSSH/FIDO2 support packages..."
     install_required_yubikey_package openssh-client
     install_required_yubikey_package openssh-server
-    install_required_yubikey_package libfido2-1
+    # libfido2-1 was renamed to libfido2t64-1 on Ubuntu 24.04+ during the t64 transition.
+    install_required_yubikey_package_alts "libfido2 runtime" libfido2-1 libfido2t64-1
     install_optional_yubikey_package libu2f-udev
     install_optional_yubikey_package yubikey-manager
 
+    # YUBIKEY_SSH_FIDO2_SUPPORTED gates everything that requires sk-* key support
+    # in sshd: writing the drop-in, and especially disabling password auth.
+    # Without FIDO2-capable OpenSSH, configuring the drop-in + disabling passwords
+    # would lock the user out (no working auth methods left).
+    YUBIKEY_SSH_FIDO2_SUPPORTED=true
     if command -v ssh &>/dev/null; then
         SSH_VERSION_RAW=$(ssh -V 2>&1 || true)
         print_message "OpenSSH client version: $SSH_VERSION_RAW"
@@ -2604,8 +2629,14 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
         SSH_VERSION_MINOR=$(printf '%s\n' "$SSH_VERSION_RAW" | sed -nE 's/^OpenSSH_([0-9]+)\.([0-9]+).*/\2/p')
         if [ -n "$SSH_VERSION_MAJOR" ] && [ -n "$SSH_VERSION_MINOR" ]; then
             if [ "$SSH_VERSION_MAJOR" -lt 8 ] || { [ "$SSH_VERSION_MAJOR" -eq 8 ] && [ "$SSH_VERSION_MINOR" -lt 2 ]; }; then
-                print_warning "OpenSSH 8.2+ is required for FIDO2 security key SSH authentication"
+                print_error "OpenSSH 8.2+ is required for FIDO2 security key SSH authentication; this system has $SSH_VERSION_RAW"
+                print_error "Skipping sshd drop-in to avoid locking you out (sshd cannot accept sk-* keys)"
+                YUBIKEY_SSH_FIDO2_SUPPORTED=false
                 YUBIKEY_SSH_OK=false
+                if [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "y" ] || [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "Y" ]; then
+                    print_warning "Forcing YUBIKEY_SSH_DISABLE_PASSWORD_AUTH=n: password auth must remain enabled"
+                    YUBIKEY_SSH_DISABLE_PASSWORD_AUTH="n"
+                fi
             elif [ "$SSH_VERSION_MAJOR" -eq 8 ] && [ "$SSH_VERSION_MINOR" -eq 2 ]; then
                 print_warning "OpenSSH 8.3+ is recommended for verify-required/PIN enforcement"
             fi
@@ -2614,6 +2645,7 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
         fi
     fi
 
+    YUBIKEY_AUTHORIZED_KEYS=""
     if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
         if id "$YUBIKEY_SSH_USER" &>/dev/null; then
             YUBIKEY_USER_HOME=$(getent passwd "$YUBIKEY_SSH_USER" | cut -d: -f6)
@@ -2648,50 +2680,64 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
     SSHD_CONFIG_DIR="/etc/ssh/sshd_config.d"
     YUBIKEY_SSHD_DROPIN="${SSHD_CONFIG_DIR}/00-yubikey-fido2.conf"
 
-    if [ -f "$SSHD_CONFIG" ]; then
+    if [ "$YUBIKEY_SSH_FIDO2_SUPPORTED" != true ]; then
+        print_warning "Skipping sshd drop-in for YubiKey: OpenSSH does not support FIDO2 sk-* key types on this system"
+        print_warning "Authorized key (if any) has been added but sshd will not accept it until OpenSSH is upgraded to 8.2+"
+    elif [ ! -f "$SSHD_CONFIG" ]; then
+        print_error "sshd_config not found: $SSHD_CONFIG"
+        YUBIKEY_SSH_OK=false
+    else
         YUBIKEY_SSHD_BACKUP="${SSHD_CONFIG}.backup.yubikey.$(date +%Y%m%d-%H%M%S)~"
         cp "$SSHD_CONFIG" "$YUBIKEY_SSHD_BACKUP"
         print_message "Original sshd_config backed up: $YUBIKEY_SSHD_BACKUP"
 
         mkdir -p "$SSHD_CONFIG_DIR"
 
-        ensure_sshd_include_first "$SSHD_CONFIG"
-
-        {
-            echo "# Managed by system-setup.sh - YubiKey/FIDO2 SSH support"
-            echo "# OpenSSH 8.2+ supports FIDO2 sk-* public key types."
-            echo "# WARNING: This file is regenerated on every run; manual edits will be lost."
-            echo "PubkeyAuthentication yes"
-            if [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "y" ] || [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "Y" ]; then
-                echo "PasswordAuthentication no"
-                echo "KbdInteractiveAuthentication no"
-            fi
-        } | write_file_atomic "$YUBIKEY_SSHD_DROPIN" 0644 root:root
-
-        print_message "Created sshd drop-in: $YUBIKEY_SSHD_DROPIN"
-
-        if sshd -t; then
-            print_success "sshd configuration is valid"
-            if systemctl restart sshd 2>/dev/null; then
-                print_message "SSH service restarted (sshd)"
-            elif systemctl restart ssh 2>/dev/null; then
-                print_message "SSH service restarted (ssh)"
-            elif service ssh restart 2>/dev/null; then
-                print_message "SSH service restarted (service ssh)"
-            elif service sshd restart 2>/dev/null; then
-                print_message "SSH service restarted (service sshd)"
-            else
-                print_warning "Could not restart SSH automatically; restart manually after checking active sessions"
-            fi
-        else
-            print_error "sshd configuration validation failed; restoring backup"
-            rm -f "$YUBIKEY_SSHD_DROPIN"
+        if ! ensure_sshd_include_first "$SSHD_CONFIG"; then
+            print_error "Failed to ensure Include directive in $SSHD_CONFIG; restoring backup"
             cp "$YUBIKEY_SSHD_BACKUP" "$SSHD_CONFIG"
             YUBIKEY_SSH_OK=false
+        else
+            if ! {
+                echo "# Managed by system-setup.sh - YubiKey/FIDO2 SSH support"
+                echo "# OpenSSH 8.2+ supports FIDO2 sk-* public key types."
+                echo "# WARNING: This file is regenerated on every run; manual edits will be lost."
+                echo "PubkeyAuthentication yes"
+                if [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "y" ] || [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "Y" ]; then
+                    echo "PasswordAuthentication no"
+                    echo "KbdInteractiveAuthentication no"
+                fi
+            } | write_file_atomic "$YUBIKEY_SSHD_DROPIN" 0644 root:root; then
+                print_error "Failed to write sshd drop-in: $YUBIKEY_SSHD_DROPIN"
+                YUBIKEY_SSH_OK=false
+            else
+                print_message "Created sshd drop-in: $YUBIKEY_SSHD_DROPIN"
+
+                if sshd -t; then
+                    print_success "sshd configuration is valid"
+                    if systemctl restart sshd 2>/dev/null; then
+                        print_message "SSH service restarted (sshd)"
+                    elif systemctl restart ssh 2>/dev/null; then
+                        print_message "SSH service restarted (ssh)"
+                    elif service ssh restart 2>/dev/null; then
+                        print_message "SSH service restarted (service ssh)"
+                    elif service sshd restart 2>/dev/null; then
+                        print_message "SSH service restarted (service sshd)"
+                    else
+                        print_warning "Could not restart SSH automatically; restart manually after checking active sessions"
+                    fi
+                else
+                    print_error "sshd configuration validation failed; restoring backup"
+                    rm -f "$YUBIKEY_SSHD_DROPIN"
+                    cp "$YUBIKEY_SSHD_BACKUP" "$SSHD_CONFIG"
+                    if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ] && [ -n "${YUBIKEY_AUTHORIZED_KEYS:-}" ] && [ -f "$YUBIKEY_AUTHORIZED_KEYS" ]; then
+                        print_warning "Public key was already appended to $YUBIKEY_AUTHORIZED_KEYS and was NOT rolled back."
+                        print_warning "Review and remove the FIDO2 line manually if desired: sudo -u $YUBIKEY_SSH_USER nano $YUBIKEY_AUTHORIZED_KEYS"
+                    fi
+                    YUBIKEY_SSH_OK=false
+                fi
+            fi
         fi
-    else
-        print_error "sshd_config not found: $SSHD_CONFIG"
-        YUBIKEY_SSH_OK=false
     fi
 
     if [ "$YUBIKEY_SSH_OK" = true ]; then
