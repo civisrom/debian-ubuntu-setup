@@ -2069,7 +2069,7 @@ COMMON_PACKAGES=(
     mc-data
     wget
     #iptables
-    ufw
+    #ufw
     shellcheck
     nano
     apt-utils
