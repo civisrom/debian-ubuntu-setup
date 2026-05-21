@@ -4,7 +4,7 @@
 # System Setup Script for Debian and Ubuntu
 # Author: Enhanced Version v2.0
 # Description: Initial package installation and system configuration
-# Supported: Debian 12, 13 | Ubuntu 24.04, 25.10, 26.04
+# Supported: Debian 12, 13 | Ubuntu 24.04 LTS, 25.10, 26.04 LTS
 #############################################
 
 set -e
@@ -45,6 +45,20 @@ print_success() {
 # Helper function to check if variable is yes
 is_yes() {
     [ "$1" = "y" ] || [ "$1" = "Y" ]
+}
+
+default_codename_for_release() {
+    local os="$1"
+    local version="$2"
+
+    case "${os}:${version}" in
+        debian:12) echo "bookworm" ;;
+        debian:13) echo "trixie" ;;
+        ubuntu:24.04) echo "noble" ;;
+        ubuntu:25.10) echo "questing" ;;
+        ubuntu:26.04) echo "resolute" ;;
+        *) echo "" ;;
+    esac
 }
 
 # Reusable DNS recovery function
@@ -387,9 +401,9 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
         print_message "Please select the operating system:"
         echo "  1) Debian 12 (Bookworm)"
         echo "  2) Debian 13 (Trixie)"
-        echo "  3) Ubuntu 24.04 (Noble)"
+        echo "  3) Ubuntu 24.04 LTS (Noble)"
         echo "  4) Ubuntu 25.10 (Questing)"
-        echo "  5) Ubuntu 26.04 (Resolute)"
+        echo "  5) Ubuntu 26.04 LTS (Resolute)"
         echo ""
         read -r -p "Enter your choice [1-5]: " OS_CHOICE
         
@@ -410,7 +424,7 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
                 OS="ubuntu"
                 VERSION="24.04"
                 VERSION_CODENAME="noble"
-                print_message "Selected: Ubuntu 24.04 (Noble)"
+                print_message "Selected: Ubuntu 24.04 LTS (Noble)"
                 ;;
             4)
                 OS="ubuntu"
@@ -422,7 +436,7 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
                 OS="ubuntu"
                 VERSION="26.04"
                 VERSION_CODENAME="resolute"
-                print_message "Selected: Ubuntu 26.04 (Resolute)"
+                print_message "Selected: Ubuntu 26.04 LTS (Resolute)"
                 ;;
             *)
                 print_error "Invalid choice. Exiting."
@@ -436,6 +450,7 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
     fi
 else
     print_message "Detected OS: $OS $VERSION"
+    VERSION_CODENAME=${VERSION_CODENAME:-$(default_codename_for_release "$OS" "$VERSION")}
     VERSION_CODENAME=${VERSION_CODENAME:-unknown}
     
     # Validate OS
@@ -461,7 +476,7 @@ else
         fi
     elif [ "$OS" = "ubuntu" ]; then
         if [ "$VERSION" != "24.04" ] && [ "$VERSION" != "25.10" ] && [ "$VERSION" != "26.04" ]; then
-            print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04, 25.10, 26.04)"
+            print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04 LTS, 25.10, 26.04 LTS)"
             if [ "$INTERACTIVE" = true ]; then
                 read -r -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
                 CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
