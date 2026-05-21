@@ -1,6 +1,6 @@
 #!/bin/bash
 
-############################################
+#############################################
 # System Setup Script for Debian and Ubuntu
 # Author: Enhanced Version v2.0
 # Description: Initial package installation and system configuration
