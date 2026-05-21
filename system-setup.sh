@@ -85,6 +85,139 @@ validate_shell_script() {
     fi
 }
 
+# Atomically replace a file with the given content (read from stdin).
+# Preserves owner/mode of an existing target; falls back to root:root 0644 for new files.
+write_file_atomic() {
+    local target="$1"
+    local mode="${2:-}"
+    local owner="${3:-}"
+    local tmp
+
+    tmp=$(mktemp "${target}.XXXXXX") || {
+        print_error "Failed to create temporary file for $target"
+        return 1
+    }
+
+    if ! cat > "$tmp"; then
+        rm -f "$tmp"
+        print_error "Failed to write content to temporary file for $target"
+        return 1
+    fi
+
+    if [ -e "$target" ]; then
+        chmod --reference="$target" "$tmp" 2>/dev/null || chmod "${mode:-0644}" "$tmp"
+        chown --reference="$target" "$tmp" 2>/dev/null || chown "${owner:-root:root}" "$tmp"
+    else
+        chmod "${mode:-0644}" "$tmp"
+        chown "${owner:-root:root}" "$tmp"
+    fi
+
+    if ! mv "$tmp" "$target"; then
+        rm -f "$tmp"
+        print_error "Failed to move temporary file into place: $target"
+        return 1
+    fi
+}
+
+# Ensure 'Include /etc/ssh/sshd_config.d/*.conf' is the FIRST active directive in sshd_config.
+# Critical for sshd's "first value wins" rule: drop-ins must be parsed before any
+# parameter set later in the main file. Removes duplicate Include lines anywhere
+# in the file and prepends a single canonical one.
+ensure_sshd_include_first() {
+    local sshd_config="${1:-/etc/ssh/sshd_config}"
+    local include_line="Include /etc/ssh/sshd_config.d/*.conf"
+    local include_regex='^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf[[:space:]]*$'
+
+    if [ ! -f "$sshd_config" ]; then
+        print_error "sshd_config not found: $sshd_config"
+        return 1
+    fi
+
+    local first_active
+    first_active=$(awk 'NF && $1 !~ /^#/ { print; exit }' "$sshd_config")
+
+    if [[ "$first_active" =~ ${include_regex} ]]; then
+        # Already first; still strip any duplicate Include lines further down.
+        if [ "$(grep -Ec "$include_regex" "$sshd_config")" -gt 1 ]; then
+            {
+                echo "$include_line"
+                grep -Ev "$include_regex" "$sshd_config"
+            } | write_file_atomic "$sshd_config" || return 1
+            print_message "Removed duplicate Include directives from $sshd_config"
+        fi
+        return 0
+    fi
+
+    {
+        echo "$include_line"
+        grep -Ev "$include_regex" "$sshd_config"
+    } | write_file_atomic "$sshd_config" || return 1
+
+    print_message "Ensured 'Include /etc/ssh/sshd_config.d/*.conf' is the first active directive in $sshd_config"
+}
+
+# Disable systemd socket activation for sshd if active. Required before changing
+# the SSH port via sshd_config, because ssh.socket overrides the Port directive
+# (the listen port is taken from ListenStream= in the socket unit instead).
+disable_ssh_socket_if_active() {
+    local unit
+
+    for unit in ssh.socket sshd.socket; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            print_warning "$unit is active; it would override the Port directive in sshd_config"
+            print_message "Disabling $unit so the configured SSH port takes effect"
+            systemctl disable --now "$unit" 2>/dev/null || \
+                print_warning "Failed to disable $unit; SSH port change may not take effect"
+        elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+            print_message "Disabling $unit (enabled but not active)"
+            systemctl disable "$unit" 2>/dev/null || true
+        fi
+    done
+
+    return 0
+}
+
+# Warn if any sshd_config.d drop-in that is lexicographically earlier than ours
+# defines parameters we also set: by "first value wins", the earlier file's
+# value will override ours and our selection will be silently ignored.
+warn_sshd_dropin_conflicts() {
+    local our_dropin="$1"
+    local dropin_dir
+    dropin_dir=$(dirname -- "$our_dropin")
+    local our_basename
+    our_basename=$(basename -- "$our_dropin")
+
+    [ -d "$dropin_dir" ] || return 0
+    [ -f "$our_dropin" ] || return 0
+
+    local our_params
+    our_params=$(awk 'NF && $1 !~ /^#/ {print $1}' "$our_dropin" | sort -u)
+    [ -z "$our_params" ] && return 0
+
+    local earlier
+    for earlier in "$dropin_dir"/*.conf; do
+        [ -f "$earlier" ] || continue
+        local earlier_basename
+        earlier_basename=$(basename -- "$earlier")
+        # Only files that sort BEFORE ours will be parsed first.
+        [[ "$earlier_basename" < "$our_basename" ]] || continue
+
+        local param
+        for param in $our_params; do
+            if grep -qE "^[[:space:]]*${param}[[:space:]]" "$earlier"; then
+                local earlier_value our_value
+                earlier_value=$(grep -E "^[[:space:]]*${param}[[:space:]]" "$earlier" | head -1 | sed -E "s/^[[:space:]]*${param}[[:space:]]+//")
+                our_value=$(grep -E "^[[:space:]]*${param}[[:space:]]" "$our_dropin" | head -1 | sed -E "s/^[[:space:]]*${param}[[:space:]]+//")
+                if [ "$earlier_value" != "$our_value" ]; then
+                    print_warning "sshd parameter '${param}' is also set in ${earlier_basename} ('${earlier_value}'); that value will WIN over ${our_basename} ('${our_value}')"
+                fi
+            fi
+        done
+    done
+
+    return 0
+}
+
 default_codename_for_release() {
     local os="$1"
     local version="$2"
@@ -2522,27 +2655,18 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
 
         mkdir -p "$SSHD_CONFIG_DIR"
 
-        if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$SSHD_CONFIG"; then
-            SSHD_CONFIG_TMP=$(mktemp)
-            {
-                echo "Include /etc/ssh/sshd_config.d/*.conf"
-                cat "$SSHD_CONFIG"
-            } > "$SSHD_CONFIG_TMP"
-            mv "$SSHD_CONFIG_TMP" "$SSHD_CONFIG"
-            print_message "Added sshd_config Include for /etc/ssh/sshd_config.d/*.conf"
-        fi
+        ensure_sshd_include_first "$SSHD_CONFIG"
 
         {
             echo "# Managed by system-setup.sh - YubiKey/FIDO2 SSH support"
             echo "# OpenSSH 8.2+ supports FIDO2 sk-* public key types."
+            echo "# WARNING: This file is regenerated on every run; manual edits will be lost."
             echo "PubkeyAuthentication yes"
             if [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "y" ] || [ "$YUBIKEY_SSH_DISABLE_PASSWORD_AUTH" = "Y" ]; then
                 echo "PasswordAuthentication no"
                 echo "KbdInteractiveAuthentication no"
             fi
-        } > "$YUBIKEY_SSHD_DROPIN"
-        chmod 644 "$YUBIKEY_SSHD_DROPIN"
-        chown root:root "$YUBIKEY_SSHD_DROPIN"
+        } | write_file_atomic "$YUBIKEY_SSHD_DROPIN" 0644 root:root
 
         print_message "Created sshd drop-in: $YUBIKEY_SSHD_DROPIN"
 
@@ -2793,101 +2917,103 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         mkdir -p "$SSHD_CONFIG_DIR"
 
-        SSHD_FIRST_ACTIVE=$(awk 'NF && $1 !~ /^#/ { print; exit }' "$SSHD_CONFIG")
-        if ! [[ "$SSHD_FIRST_ACTIVE" =~ ^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf ]]; then
-            SSHD_CONFIG_TMP=$(mktemp)
-            {
-                echo "Include /etc/ssh/sshd_config.d/*.conf"
-                cat "$SSHD_CONFIG"
-            } > "$SSHD_CONFIG_TMP"
-            mv "$SSHD_CONFIG_TMP" "$SSHD_CONFIG"
-            print_message "Added sshd_config Include at the top so managed drop-ins take effect"
+        ensure_sshd_include_first "$SSHD_CONFIG"
+
+        # Build drop-in content in a buffer, then write atomically at the end.
+        # This avoids a window where the file exists but is only partially written.
+        SSHD_DROPIN_CONTENT="# Managed by system-setup.sh
+# WARNING: This file is regenerated on every run; manual edits will be lost.
+# To customize sshd beyond what this script manages, create another drop-in
+# whose name sorts BEFORE this one (e.g. /etc/ssh/sshd_config.d/10-local.conf).
+"
+
+        # Helper: append a parameter to the in-memory drop-in content.
+        append_ssh_parameter() {
+            local param_name="$1"
+            local param_value="$2"
+            SSHD_DROPIN_CONTENT+="$(printf '%s %s\n' "$param_name" "$param_value")"$'\n'
+            print_message "SSH parameter set: ${param_name} ${param_value}"
+        }
+
+        # Change SSH port
+        if [ ! -z "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
+            # On systems using socket activation (Ubuntu 22.10+, recent Debian),
+            # ssh.socket dictates the listen port and Port in sshd_config is ignored.
+            disable_ssh_socket_if_active
+            append_ssh_parameter "Port" "$SSH_PORT"
         fi
 
-        cat > "$SSHD_DROPIN" << 'SSHDROPEOF'
-# Managed by system-setup.sh
-SSHDROPEOF
-        chmod 644 "$SSHD_DROPIN"
-        chown root:root "$SSHD_DROPIN"
+        # Configure PubkeyAuthentication
+        if [ ! -z "$SSH_PUBKEY_AUTH" ]; then
+            append_ssh_parameter "PubkeyAuthentication" "$SSH_PUBKEY_AUTH"
+        fi
 
-    # Function to set or update SSH parameter in the managed drop-in.
-    configure_ssh_parameter() {
-        local param_name="$1"
-        local param_value="$2"
-        local config_file="$3"
+        # Configure PasswordAuthentication
+        if [ ! -z "$SSH_PASSWORD_AUTH" ]; then
+            append_ssh_parameter "PasswordAuthentication" "$SSH_PASSWORD_AUTH"
+        fi
 
-        sed -i "/^[[:space:]]*${param_name}[[:space:]]/d" "$config_file"
-        printf '%s %s\n' "$param_name" "$param_value" >> "$config_file"
-        print_message "SSH parameter set: ${param_name} ${param_value}"
-    }
+        # Configure PermitEmptyPasswords (ALWAYS no for security)
+        if [ ! -z "$SSH_EMPTY_PASSWORDS" ]; then
+            append_ssh_parameter "PermitEmptyPasswords" "$SSH_EMPTY_PASSWORDS"
+            print_warning "PermitEmptyPasswords set to 'no' for security reasons"
+        fi
 
-    # Change SSH port
-    if [ ! -z "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
-        configure_ssh_parameter "Port" "$SSH_PORT" "$SSHD_DROPIN"
-    fi
+        # Configure PermitRootLogin
+        if [ ! -z "$SSH_ROOT_LOGIN" ]; then
+            append_ssh_parameter "PermitRootLogin" "$SSH_ROOT_LOGIN"
+        fi
 
-    # Configure PubkeyAuthentication
-    if [ ! -z "$SSH_PUBKEY_AUTH" ]; then
-        configure_ssh_parameter "PubkeyAuthentication" "$SSH_PUBKEY_AUTH" "$SSHD_DROPIN"
-    fi
-    
-    # Configure PasswordAuthentication
-    if [ ! -z "$SSH_PASSWORD_AUTH" ]; then
-        configure_ssh_parameter "PasswordAuthentication" "$SSH_PASSWORD_AUTH" "$SSHD_DROPIN"
-    fi
-    
-    # Configure PermitEmptyPasswords (ALWAYS no for security)
-    if [ ! -z "$SSH_EMPTY_PASSWORDS" ]; then
-        configure_ssh_parameter "PermitEmptyPasswords" "$SSH_EMPTY_PASSWORDS" "$SSHD_DROPIN"
-        print_warning "PermitEmptyPasswords set to 'no' for security reasons"
-    fi
-    
-    # Configure PermitRootLogin
-    if [ ! -z "$SSH_ROOT_LOGIN" ]; then
-        configure_ssh_parameter "PermitRootLogin" "$SSH_ROOT_LOGIN" "$SSHD_DROPIN"
-    fi
+        # Configure PrintMotd
+        if [ ! -z "$SSH_PRINT_MOTD" ]; then
+            append_ssh_parameter "PrintMotd" "$SSH_PRINT_MOTD"
+        fi
 
-    # Configure PrintMotd
-    if [ ! -z "$SSH_PRINT_MOTD" ]; then
-        configure_ssh_parameter "PrintMotd" "$SSH_PRINT_MOTD" "$SSHD_DROPIN"
-    fi
+        # Add AllowUsers if specified
+        if [ ! -z "$SSH_ALLOW_USERS" ]; then
+            append_ssh_parameter "AllowUsers" "$SSH_ALLOW_USERS"
+            print_message "AllowUsers set to: $SSH_ALLOW_USERS"
+        fi
 
-    # Add AllowUsers if specified
-    if [ ! -z "$SSH_ALLOW_USERS" ]; then
-        configure_ssh_parameter "AllowUsers" "$SSH_ALLOW_USERS" "$SSHD_DROPIN"
-        print_message "AllowUsers set to: $SSH_ALLOW_USERS"
-    fi
-    
-    # Test SSH configuration
-    print_message "Testing SSH configuration..."
-    if sshd -t; then
-        print_message "SSH configuration is valid"
-        
-        # Restart SSH service
-        print_message "Restarting SSH service..."
-        if systemctl restart sshd 2>/dev/null; then
-            print_message "SSH service restarted (sshd)"
-        elif systemctl restart ssh 2>/dev/null; then
-            print_message "SSH service restarted (ssh)"
-        elif service ssh restart 2>/dev/null; then
-            print_message "SSH service restarted (service ssh)"
-        elif service sshd restart 2>/dev/null; then
-            print_message "SSH service restarted (service sshd)"
+        # Atomically install the drop-in.
+        printf '%s' "$SSHD_DROPIN_CONTENT" | write_file_atomic "$SSHD_DROPIN" 0644 root:root
+
+        # Warn if an earlier-loaded drop-in (e.g. 00-yubikey-fido2.conf) sets
+        # any of the same parameters: sshd uses "first value wins", so the
+        # earlier file silently overrides ours.
+        warn_sshd_dropin_conflicts "$SSHD_DROPIN"
+
+        # Test SSH configuration
+        print_message "Testing SSH configuration..."
+        if sshd -t; then
+            print_message "SSH configuration is valid"
+
+            # Restart SSH service
+            print_message "Restarting SSH service..."
+            if systemctl restart sshd 2>/dev/null; then
+                print_message "SSH service restarted (sshd)"
+            elif systemctl restart ssh 2>/dev/null; then
+                print_message "SSH service restarted (ssh)"
+            elif service ssh restart 2>/dev/null; then
+                print_message "SSH service restarted (service ssh)"
+            elif service sshd restart 2>/dev/null; then
+                print_message "SSH service restarted (service sshd)"
+            else
+                print_error "Failed to restart SSH service"
+                print_warning "Please restart SSH manually: sudo systemctl restart ssh"
+            fi
         else
-            print_error "Failed to restart SSH service"
-            print_warning "Please restart SSH manually: sudo systemctl restart ssh"
+            print_error "SSH configuration test failed!"
+            print_error "Removing managed drop-in and restoring sshd_config backup..."
+            rm -f "$SSHD_DROPIN"
+            LATEST_BACKUP=$(ls -t /etc/ssh/sshd_config.backup.*~ 2>/dev/null | head -1)
+            if [ ! -z "$LATEST_BACKUP" ]; then
+                cp "$LATEST_BACKUP" "$SSHD_CONFIG"
+                print_error "SSH configuration restored from backup"
+            else
+                print_error "No backup found to restore"
+            fi
         fi
-    else
-        print_error "SSH configuration test failed!"
-        print_error "Restoring backup..."
-        LATEST_BACKUP=$(ls -t /etc/ssh/sshd_config.backup.*~ 2>/dev/null | head -1)
-        if [ ! -z "$LATEST_BACKUP" ]; then
-            cp "$LATEST_BACKUP" "$SSHD_CONFIG"
-            print_error "SSH configuration restored from backup"
-        else
-            print_error "No backup found to restore"
-        fi
-    fi
     fi
 else
     print_message "Skipping SSH configuration (not requested)"
@@ -5906,9 +6032,11 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     fi
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         print_message "- /etc/ssh/sshd_config.backup.*~"
+        print_message "- /etc/ssh/sshd_config.d/99-system-setup.conf (managed drop-in)"
     fi
     if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
         print_message "- /etc/ssh/sshd_config.backup.yubikey.*~"
+        print_message "- /etc/ssh/sshd_config.d/00-yubikey-fido2.conf (managed drop-in)"
     fi
     if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
         print_message "- /etc/ufw/before.rules.backup.*~"
@@ -6021,10 +6149,17 @@ if [ "$OS" = "ubuntu" ]; then
     print_message "sudo nano /etc/apt/sources.list.d/ubuntu.sources"
 fi
 print_message "sudo nano /etc/ssh/sshd_config"
+if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
+    print_message "sudo nano /etc/ssh/sshd_config.d/99-system-setup.conf  # Managed drop-in (overwritten on re-run!)"
+    print_message "sudo sshd -T | less                    # Show effective sshd config (resolves all drop-ins)"
+    print_warning "Note: /etc/ssh/sshd_config.d/99-system-setup.conf is REGENERATED every time this script runs."
+    print_warning "      For permanent customization, create another drop-in that sorts BEFORE it,"
+    print_warning "      e.g. /etc/ssh/sshd_config.d/10-local.conf  (first value wins in sshd)."
+fi
 if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
     print_message "ssh-keygen -t ed25519-sk -O resident -O verify-required -C \"user@host\""
     print_message "ssh-keygen -K                         # Download resident YubiKey SSH keys"
-    print_message "sudo nano /etc/ssh/sshd_config.d/00-yubikey-fido2.conf"
+    print_message "sudo nano /etc/ssh/sshd_config.d/00-yubikey-fido2.conf  # Managed drop-in (overwritten on re-run!)"
     print_message "sudo sshd -t                          # Validate SSH configuration"
 fi
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
