@@ -14,8 +14,6 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
 # Script version
@@ -45,6 +43,46 @@ print_success() {
 # Helper function to check if variable is yes
 is_yes() {
     [ "$1" = "y" ] || [ "$1" = "Y" ]
+}
+
+SYSTEM_SETUP_TEMP_DIRS=()
+
+create_temp_dir() {
+    local prefix="${1:-system-setup}"
+    local temp_dir
+
+    temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX") || {
+        print_error "Failed to create temporary directory"
+        return 1
+    }
+    SYSTEM_SETUP_TEMP_DIRS+=("$temp_dir")
+    printf '%s\n' "$temp_dir"
+}
+
+cleanup_temp_dirs() {
+    local temp_dir
+
+    for temp_dir in "${SYSTEM_SETUP_TEMP_DIRS[@]:-}"; do
+        if [ -n "$temp_dir" ] && [ -d "$temp_dir" ]; then
+            rm -rf -- "$temp_dir" 2>/dev/null || true
+        fi
+    done
+}
+trap cleanup_temp_dirs EXIT
+
+validate_shell_script() {
+    local script_path="$1"
+    local shell_bin="${2:-bash}"
+
+    if [ ! -s "$script_path" ]; then
+        print_error "Downloaded script is missing or empty: $script_path"
+        return 1
+    fi
+
+    if ! "$shell_bin" -n "$script_path"; then
+        print_error "Downloaded script failed syntax check: $script_path"
+        return 1
+    fi
 }
 
 default_codename_for_release() {
@@ -174,9 +212,14 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Detect if running interactively
+# Detect if running interactively. When launched through a downloader wrapper,
+# stdin can be a pipe even though the user has a real terminal available.
 if [ -t 0 ]; then
     INTERACTIVE=true
+elif [ -r /dev/tty ]; then
+    exec < /dev/tty
+    INTERACTIVE=true
+    print_message "Attached to /dev/tty for interactive prompts"
 else
     INTERACTIVE=false
     print_warning "Running in non-interactive mode with default settings"
@@ -3012,6 +3055,24 @@ fi
 # INSTALL DOCKER
 # ============================================
 
+install_docker_from_official_script() {
+    local docker_tmp_dir
+    local docker_install_script
+
+    docker_tmp_dir=$(create_temp_dir "docker-install") || return 1
+    docker_install_script="${docker_tmp_dir}/get-docker.sh"
+
+    if curl -fsSL https://get.docker.com -o "$docker_install_script"; then
+        validate_shell_script "$docker_install_script" sh || return 1
+        sh "$docker_install_script"
+        print_message "Docker installed successfully"
+        return 0
+    fi
+
+    print_error "Failed to download Docker installation script"
+    return 1
+}
+
 # Install Docker if requested
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     print_message "Installing Docker..."
@@ -3030,24 +3091,16 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
         else
             print_message "Reinstalling Docker..."
             # Use Docker's official installation script
-            if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh; then
-                sh /tmp/get-docker.sh
-                rm /tmp/get-docker.sh
-                print_message "Docker installed successfully"
+            if install_docker_from_official_script; then
                 DOCKER_INSTALLED="yes"
             else
-                print_error "Failed to download Docker installation script"
                 DOCKER_INSTALLED="no"
             fi
         fi
     else
         # Install Docker using official script
         print_message "Downloading Docker installation script..."
-        if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh; then
-            print_message "Running Docker installation script..."
-            sh /tmp/get-docker.sh
-            rm /tmp/get-docker.sh
-            print_message "Docker installed successfully"
+        if install_docker_from_official_script; then
             DOCKER_INSTALLED="yes"
             
             # Start and enable Docker
@@ -3079,7 +3132,6 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
                 print_warning "Users need to log out and log back in (or run 'newgrp docker') for docker group to take effect"
             fi
         else
-            print_error "Failed to download Docker installation script"
             DOCKER_INSTALLED="no"
         fi
     fi
@@ -3282,24 +3334,23 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
             # Download Go
             GO_ARCHIVE="${LATEST_GO_VERSION}.linux-${GO_ARCH}.tar.gz"
             GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
+            GO_TMP_DIR=$(create_temp_dir "go-install") || GO_TMP_DIR=""
+            GO_ARCHIVE_PATH="${GO_TMP_DIR}/${GO_ARCHIVE}"
 
             print_message "Downloading Go from: $GO_URL"
-            if wget -q --show-progress "$GO_URL" -O "/tmp/${GO_ARCHIVE}"; then
+            if [ -n "$GO_TMP_DIR" ] && wget -q --show-progress "$GO_URL" -O "$GO_ARCHIVE_PATH"; then
                 print_message "Go downloaded successfully"
 
                 # Remove old Go installation
                 if [ -d /usr/local/go ]; then
                     print_message "Removing old Go installation..."
-                    rm -rf /usr/local/go
+                    rm -rf -- /usr/local/go
                 fi
 
                 # Extract Go
                 print_message "Extracting Go..."
-                tar -C /usr/local -xzf "/tmp/${GO_ARCHIVE}"
+                tar -C /usr/local -xzf "$GO_ARCHIVE_PATH"
                 print_message "Go extracted to /usr/local/go"
-
-                # Cleanup
-                rm "/tmp/${GO_ARCHIVE}"
 
                 # Add Go to PATH for the user
                 print_message "Configuring Go environment for $NEW_USERNAME..."
@@ -3392,21 +3443,23 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
             # Download ipset
             IPSET_ARCHIVE="ipset-${LATEST_IPSET_VERSION}.tar.bz2"
             IPSET_URL="https://ipset.netfilter.org/${IPSET_ARCHIVE}"
+            IPSET_TMP_DIR=$(create_temp_dir "ipset-build") || IPSET_TMP_DIR=""
+            IPSET_ARCHIVE_PATH="${IPSET_TMP_DIR}/${IPSET_ARCHIVE}"
 
             print_message "Downloading ipset from: $IPSET_URL"
-            if wget -q --show-progress "$IPSET_URL" -O "/tmp/${IPSET_ARCHIVE}"; then
+            if [ -n "$IPSET_TMP_DIR" ] && wget -q --show-progress "$IPSET_URL" -O "$IPSET_ARCHIVE_PATH"; then
             print_message "ipset downloaded successfully"
 
             # Extract ipset
             print_message "Extracting ipset..."
-            tar xjf "/tmp/${IPSET_ARCHIVE}" -C /tmp
+            tar xjf "$IPSET_ARCHIVE_PATH" -C "$IPSET_TMP_DIR"
 
             IPSET_DIR="ipset-${LATEST_IPSET_VERSION}"
 
-            if [ -d "/tmp/${IPSET_DIR}" ]; then
+            if [ -d "${IPSET_TMP_DIR}/${IPSET_DIR}" ]; then
                 # Build in subshell to avoid changing working directory
                 (
-                    cd "/tmp/${IPSET_DIR}"
+                    cd "${IPSET_TMP_DIR}/${IPSET_DIR}"
 
                     # Configure with proper kernel source
                     print_message "Configuring ipset with kernel headers..."
@@ -3443,7 +3496,7 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
                 fi
 
                 # Cleanup
-                rm -rf "/tmp/${IPSET_DIR}" "/tmp/${IPSET_ARCHIVE}"
+                rm -rf -- "$IPSET_TMP_DIR"
             else
                 print_error "Failed to extract ipset"
             fi
@@ -3481,19 +3534,23 @@ if [ "$INSTALL_RCLONE" = "y" ] || [ "$INSTALL_RCLONE" = "Y" ]; then
 
     # Download and run the official rclone install script
     print_message "Downloading official rclone install script from rclone.org..."
-    if curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh; then
-        print_message "Running rclone install script..."
-        if bash /tmp/rclone-install.sh; then
-            rm -f /tmp/rclone-install.sh
-            if command -v rclone &>/dev/null; then
-                RCLONE_VERSION=$(rclone version 2>/dev/null | head -1 || echo "unknown")
-                print_success "rclone installed: $RCLONE_VERSION"
+    RCLONE_TMP_DIR=$(create_temp_dir "rclone-install") || RCLONE_TMP_DIR=""
+    RCLONE_INSTALL_SCRIPT="${RCLONE_TMP_DIR}/rclone-install.sh"
+    if [ -n "$RCLONE_TMP_DIR" ] && curl -fsSL https://rclone.org/install.sh -o "$RCLONE_INSTALL_SCRIPT"; then
+        if validate_shell_script "$RCLONE_INSTALL_SCRIPT" bash; then
+            print_message "Running rclone install script..."
+            if bash "$RCLONE_INSTALL_SCRIPT"; then
+                if command -v rclone &>/dev/null; then
+                    RCLONE_VERSION=$(rclone version 2>/dev/null | head -1 || echo "unknown")
+                    print_success "rclone installed: $RCLONE_VERSION"
+                else
+                    print_warning "Install script finished but rclone not found in PATH"
+                fi
             else
-                print_warning "Install script finished but rclone not found in PATH"
+                print_error "rclone install script failed"
             fi
         else
-            print_error "rclone install script failed"
-            rm -f /tmp/rclone-install.sh
+            print_error "Refusing to run invalid rclone install script"
         fi
     else
         print_error "Failed to download rclone install script"
@@ -3586,19 +3643,26 @@ fi
 if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     print_message "Configuring crontab for root..."
 
+    CRONTAB_TMP_DIR=$(create_temp_dir "crontab") || {
+        print_error "Failed to create temporary directory for crontab"
+        CONFIGURE_CRONTAB="n"
+    }
+
+    if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     # Backup existing crontab
-    EXISTING_CRONTAB_FILE=$(mktemp)
+    EXISTING_CRONTAB_FILE="${CRONTAB_TMP_DIR}/existing-crontab"
     if crontab -l &>/dev/null; then
-        CRONTAB_BACKUP="/tmp/crontab.backup.$(date +%Y%m%d-%H%M%S)~"
+        CRONTAB_BACKUP=$(mktemp "${TMPDIR:-/tmp}/crontab.backup.$(date +%Y%m%d-%H%M%S).XXXXXX")
         crontab -l > "$CRONTAB_BACKUP"
+        chmod 600 "$CRONTAB_BACKUP"
         cp "$CRONTAB_BACKUP" "$EXISTING_CRONTAB_FILE"
-        print_message "Existing crontab backed up"
+        print_message "Existing crontab backed up: $CRONTAB_BACKUP"
     else
         : > "$EXISTING_CRONTAB_FILE"
     fi
 
     # Remove previous managed block only; preserve user-managed cron entries.
-    CLEAN_CRONTAB_FILE=$(mktemp)
+    CLEAN_CRONTAB_FILE="${CRONTAB_TMP_DIR}/clean-crontab"
     awk '
         /^# BEGIN system-setup.sh managed crontab$/ { skip=1; next }
         /^# END system-setup.sh managed crontab$/ { skip=0; next }
@@ -3642,6 +3706,7 @@ ${CRONTAB_TASKS}"
     crontab -l
     echo "----------------------------------------"
     echo ""
+    fi
 else
     print_message "Skipping crontab configuration (not requested)"
 fi
@@ -3655,7 +3720,10 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     print_message "Installing custom MOTD (Message of the Day)..."
     echo ""
     
-    MOTD_SCRIPT="/tmp/motd_install.sh"
+    MOTD_TMP_DIR=$(create_temp_dir "motd-install") || MOTD_TMP_DIR=""
+    MOTD_SCRIPT="${MOTD_TMP_DIR}/motd_install.sh"
+    MOTD_TEST_OUTPUT="${MOTD_TMP_DIR}/motd-test.txt"
+    MOTD_SCRIPT_READY=false
     
     if [ "$OS" = "debian" ]; then
         MOTD_URL="https://raw.githubusercontent.com/civisrom/motd-ubuntu-debian/refs/heads/main/scripts/debian.sh"
@@ -3664,7 +3732,15 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     fi
     
     print_message "Downloading MOTD installation script for $OS..."
-    if curl -fsSL "$MOTD_URL" -o "$MOTD_SCRIPT"; then
+    if [ -n "$MOTD_TMP_DIR" ] && curl -fsSL "$MOTD_URL" -o "$MOTD_SCRIPT"; then
+        if validate_shell_script "$MOTD_SCRIPT" bash; then
+            MOTD_SCRIPT_READY=true
+        else
+            print_error "Refusing to run invalid MOTD installation script"
+        fi
+    fi
+
+    if [ "$MOTD_SCRIPT_READY" = true ]; then
         chmod +x "$MOTD_SCRIPT"
         print_message "Running MOTD installation script..."
         
@@ -3795,11 +3871,11 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             # 7. Test MOTD generation
             print_message "Testing MOTD generation..."
             if command -v run-parts &> /dev/null; then
-                if run-parts /etc/update-motd.d/ > /tmp/motd-test.txt 2>&1; then
+                if run-parts /etc/update-motd.d/ > "$MOTD_TEST_OUTPUT" 2>&1; then
                     print_success "MOTD scripts executed successfully"
                     
                     # Check if output was generated
-                    if [ -s /tmp/motd-test.txt ]; then
+                    if [ -s "$MOTD_TEST_OUTPUT" ]; then
                         print_message "MOTD content generated successfully"
                     else
                         print_warning "MOTD scripts ran but produced no output"
@@ -3807,9 +3883,8 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                 else
                     print_warning "Some MOTD scripts may have errors"
                     print_message "Error details:"
-                    cat /tmp/motd-test.txt
+                    cat "$MOTD_TEST_OUTPUT"
                 fi
-                rm -f /tmp/motd-test.txt
             else
                 print_warning "Cannot test MOTD without run-parts"
             fi
@@ -3849,7 +3924,7 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             rm -f "$MOTD_SCRIPT"
         fi
     else
-        print_error "Failed to download MOTD installation script"
+        print_error "Failed to download or validate MOTD installation script"
     fi
     
     echo ""
@@ -3860,6 +3935,47 @@ fi
 # ============================================
 # INSTALL CUSTOM UFW DOCKER RULES
 # ============================================
+
+run_ufw_custom_rules_script() {
+    if ! validate_shell_script "$UFW_INSTALL_PATH" bash; then
+        print_error "Refusing to run invalid custom UFW Docker rules script: $UFW_INSTALL_PATH"
+        return 0
+    fi
+
+    print_message "Executing custom UFW Docker rules script..."
+    if [ -n "$UFW_SSH_PORT" ]; then
+        print_message "Using custom SSH port: $UFW_SSH_PORT"
+    fi
+    echo ""
+    print_header "═══════════════════════════════════════════════════"
+    print_header "  Custom UFW Docker Rules Script Output (v${UFW_RULES_VERSION})"
+    print_header "═══════════════════════════════════════════════════"
+    echo ""
+
+    if [ -n "$UFW_SSH_PORT" ]; then
+        # Execute with SSH_PORT environment variable
+        if SSH_PORT="$UFW_SSH_PORT" bash "$UFW_INSTALL_PATH"; then
+            echo ""
+            print_header "═══════════════════════════════════════════════════"
+            print_message "Custom UFW Docker rules applied successfully"
+        else
+            echo ""
+            print_header "═══════════════════════════════════════════════════"
+            print_warning "Custom UFW Docker rules script completed with warnings"
+        fi
+    else
+        # Execute without custom SSH_PORT
+        if bash "$UFW_INSTALL_PATH"; then
+            echo ""
+            print_header "═══════════════════════════════════════════════════"
+            print_message "Custom UFW Docker rules applied successfully"
+        else
+            echo ""
+            print_header "═══════════════════════════════════════════════════"
+            print_warning "Custom UFW Docker rules script completed with warnings"
+        fi
+    fi
+}
 
 if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
     print_message "Installing custom UFW Docker rules (v${UFW_RULES_VERSION})..."
@@ -3893,40 +4009,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
             chmod +x "$UFW_INSTALL_PATH"
             print_message "Script installed with executable permissions"
 
-            # Execute the script
-            print_message "Executing custom UFW Docker rules script..."
-            if [ -n "$UFW_SSH_PORT" ]; then
-                print_message "Using custom SSH port: $UFW_SSH_PORT"
-            fi
-            echo ""
-            print_header "═══════════════════════════════════════════════════"
-            print_header "  Custom UFW Docker Rules Script Output (v${UFW_RULES_VERSION})"
-            print_header "═══════════════════════════════════════════════════"
-            echo ""
-
-            if [ -n "$UFW_SSH_PORT" ]; then
-                # Execute with SSH_PORT environment variable
-                if SSH_PORT="$UFW_SSH_PORT" bash "$UFW_INSTALL_PATH"; then
-                    echo ""
-                    print_header "═══════════════════════════════════════════════════"
-                    print_message "Custom UFW Docker rules applied successfully"
-                else
-                    echo ""
-                    print_header "═══════════════════════════════════════════════════"
-                    print_warning "Custom UFW Docker rules script completed with warnings"
-                fi
-            else
-                # Execute without custom SSH_PORT
-                if bash "$UFW_INSTALL_PATH"; then
-                    echo ""
-                    print_header "═══════════════════════════════════════════════════"
-                    print_message "Custom UFW Docker rules applied successfully"
-                else
-                    echo ""
-                    print_header "═══════════════════════════════════════════════════"
-                    print_warning "Custom UFW Docker rules script completed with warnings"
-                fi
-            fi
+            run_ufw_custom_rules_script
         else
             print_error "Failed to download script from repository"
             print_error "URL: $UFW_REPO_URL"
@@ -3948,11 +4031,12 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         fi
 
         UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
-        UFW_ARCHIVE_FILE="/tmp/ufw-docker-rules-v4.7z"
-        UFW_EXTRACT_DIR="/tmp/ufw-docker-rules"
+        UFW_TMP_DIR=$(create_temp_dir "ufw-docker-rules") || UFW_TMP_DIR=""
+        UFW_ARCHIVE_FILE="${UFW_TMP_DIR}/ufw-docker-rules-v4.7z"
+        UFW_EXTRACT_DIR="${UFW_TMP_DIR}/extract"
 
         print_message "Downloading custom UFW rules archive..."
-        if wget -q --show-progress "$UFW_ARCHIVE_URL" -O "$UFW_ARCHIVE_FILE"; then
+        if [ -n "$UFW_TMP_DIR" ] && wget -q --show-progress "$UFW_ARCHIVE_URL" -O "$UFW_ARCHIVE_FILE"; then
             print_message "Archive downloaded successfully"
 
             # Create extraction directory
@@ -4008,40 +4092,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                         sed -i "s/^SSH_PORT=\${SSH_PORT:-22}$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
                     fi
 
-                    # Execute the script
-                    print_message "Executing custom UFW Docker rules script..."
-                    if [ -n "$UFW_SSH_PORT" ]; then
-                        print_message "Using custom SSH port: $UFW_SSH_PORT"
-                    fi
-                    echo ""
-                    print_header "═══════════════════════════════════════════════════"
-                    print_header "  Custom UFW Docker Rules Script Output (v${UFW_RULES_VERSION})"
-                    print_header "═══════════════════════════════════════════════════"
-                    echo ""
-
-                    if [ -n "$UFW_SSH_PORT" ]; then
-                        # Execute with SSH_PORT environment variable
-                        if SSH_PORT="$UFW_SSH_PORT" bash "$UFW_INSTALL_PATH"; then
-                            echo ""
-                            print_header "═══════════════════════════════════════════════════"
-                            print_message "Custom UFW Docker rules applied successfully"
-                        else
-                            echo ""
-                            print_header "═══════════════════════════════════════════════════"
-                            print_warning "Custom UFW Docker rules script completed with warnings"
-                        fi
-                    else
-                        # Execute without custom SSH_PORT
-                        if bash "$UFW_INSTALL_PATH"; then
-                            echo ""
-                            print_header "═══════════════════════════════════════════════════"
-                            print_message "Custom UFW Docker rules applied successfully"
-                        else
-                            echo ""
-                            print_header "═══════════════════════════════════════════════════"
-                            print_warning "Custom UFW Docker rules script completed with warnings"
-                        fi
-                    fi
+                    run_ufw_custom_rules_script
                 else
                     print_error "Script file not found in archive: ${UFW_SCRIPT_NAME}"
                     print_error "Checked locations:"
@@ -4101,11 +4152,12 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
     # Only proceed if 7z is available
     if command -v 7z &> /dev/null; then
         OPT_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/opt.7z"
-        OPT_ARCHIVE_FILE="/tmp/opt.7z"
-        OPT_EXTRACT_DIR="/tmp/opt_extract"
+        OPT_TMP_DIR=$(create_temp_dir "opt-archive") || OPT_TMP_DIR=""
+        OPT_ARCHIVE_FILE="${OPT_TMP_DIR}/opt.7z"
+        OPT_EXTRACT_DIR="${OPT_TMP_DIR}/extract"
 
         print_message "Downloading opt.7z archive for /opt files..."
-        if wget -q --show-progress "$OPT_ARCHIVE_URL" -O "$OPT_ARCHIVE_FILE"; then
+        if [ -n "$OPT_TMP_DIR" ] && wget -q --show-progress "$OPT_ARCHIVE_URL" -O "$OPT_ARCHIVE_FILE"; then
             print_message "opt.7z archive downloaded successfully"
 
             # Create extraction directory
@@ -4122,8 +4174,8 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
 
                 # Copy all contents to /opt
                 print_message "Copying files and folders to /opt..."
-                if [ "$(ls -A ${OPT_EXTRACT_DIR})" ]; then
-                    cp -r "${OPT_EXTRACT_DIR}/"* /opt/
+                if [ -n "$(find "$OPT_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+                    find "$OPT_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -exec cp -a -t /opt/ {} +
                     print_message "Files copied to /opt successfully"
 
                     # Verify nftables directory was extracted (critical for config installation)
@@ -4189,7 +4241,7 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
 
                     # List what was copied
                     print_message "Contents copied to /opt:"
-                    ls -la /opt/ | grep -v "^total" | tail -n +2 | awk '{print "  - " $NF}'
+                    find /opt -mindepth 1 -maxdepth 1 -printf '  - %f\n' | sort
                 else
                     print_warning "opt.7z archive is empty"
                 fi
@@ -4237,6 +4289,13 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 
     NFTABLES_OK=true
     NFTABLES_DST="/etc/nftables.conf"
+    NFT_TMP_DIR=$(create_temp_dir "nftables") || {
+        print_error "Failed to create nftables temporary directory"
+        NFTABLES_OK=false
+    }
+    NFT_PREFLIGHT_ERR="${NFT_TMP_DIR}/preflight.err"
+    NFT_SYNTAX_ERR="${NFT_TMP_DIR}/syntax.err"
+    NFT_APPLY_ERR="${NFT_TMP_DIR}/apply.err"
 
     # Install nftables before syntax preflight, but before disabling any
     # existing firewall.
@@ -4261,25 +4320,25 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             print_error "nftables config preflight failed: source file not found: $NFTABLES_SRC"
             print_error "UFW/iptables will not be disabled"
             NFTABLES_OK=false
-        elif ! nft -c -f "$NFTABLES_SRC" 2>/tmp/nft_preflight_err; then
+        elif ! nft -c -f "$NFTABLES_SRC" 2>"$NFT_PREFLIGHT_ERR"; then
             print_error "nftables config preflight failed: syntax error in $NFTABLES_SRC"
-            [ -s /tmp/nft_preflight_err ] && cat /tmp/nft_preflight_err
+            [ -s "$NFT_PREFLIGHT_ERR" ] && cat "$NFT_PREFLIGHT_ERR"
             print_error "UFW/iptables will not be disabled"
             NFTABLES_OK=false
         else
             print_success "nftables preflight passed for $NFTABLES_SRC"
         fi
-        rm -f /tmp/nft_preflight_err
+        rm -f "$NFT_PREFLIGHT_ERR"
     elif [ "$NFTABLES_OK" = true ] && [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ]; then
-        if nft -c -f "$NFTABLES_DST" 2>/tmp/nft_preflight_err; then
+        if nft -c -f "$NFTABLES_DST" 2>"$NFT_PREFLIGHT_ERR"; then
             print_success "nftables preflight passed for existing $NFTABLES_DST"
         else
             print_error "nftables preflight failed: syntax error in existing $NFTABLES_DST"
-            [ -s /tmp/nft_preflight_err ] && cat /tmp/nft_preflight_err
+            [ -s "$NFT_PREFLIGHT_ERR" ] && cat "$NFT_PREFLIGHT_ERR"
             print_error "UFW/iptables will not be disabled"
             NFTABLES_OK=false
         fi
-        rm -f /tmp/nft_preflight_err
+        rm -f "$NFT_PREFLIGHT_ERR"
     elif [ "$NFTABLES_OK" = true ]; then
         print_error "nftables selected but no config profile or existing /etc/nftables.conf was found"
         print_error "UFW/iptables will not be disabled"
@@ -4450,14 +4509,14 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 
             # Syntax check (dry-run)
             print_message "Checking syntax: nft -c -f $NFTABLES_DST"
-            if nft -c -f "$NFTABLES_DST" 2>/tmp/nft_syntax_err; then
+            if nft -c -f "$NFTABLES_DST" 2>"$NFT_SYNTAX_ERR"; then
                 print_success "Syntax check passed"
 
                 # Apply configuration
                 print_message "Applying rules: nft -f $NFTABLES_DST"
                 # Flush existing ruleset before loading new config to avoid conflicts
                 nft flush ruleset 2>/dev/null || true
-                if nft -f "$NFTABLES_DST" 2>/tmp/nft_apply_err; then
+                if nft -f "$NFTABLES_DST" 2>"$NFT_APPLY_ERR"; then
                     print_success "nftables rules applied successfully"
 
                     # Restart service to ensure config is loaded persistently
@@ -4480,9 +4539,9 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                     print_message "Loaded: ${TABLES_COUNT} table(s), ${CHAINS_COUNT} chain(s)"
                 else
                     print_error "Failed to apply nftables configuration"
-                    if [ -f /tmp/nft_apply_err ] && [ -s /tmp/nft_apply_err ]; then
+                    if [ -f "$NFT_APPLY_ERR" ] && [ -s "$NFT_APPLY_ERR" ]; then
                         print_error "Error details:"
-                        cat /tmp/nft_apply_err
+                        cat "$NFT_APPLY_ERR"
                     fi
                     # Restore backup
                     LATEST_BACKUP=$(ls -t ${NFTABLES_DST}.backup.*~ 2>/dev/null | head -1)
@@ -4493,12 +4552,12 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                         print_warning "Previous nftables.conf restored from backup"
                     fi
                 fi
-                rm -f /tmp/nft_apply_err
+                rm -f "$NFT_APPLY_ERR"
             else
                 print_error "Syntax error in $NFTABLES_DST!"
-                if [ -f /tmp/nft_syntax_err ] && [ -s /tmp/nft_syntax_err ]; then
+                if [ -f "$NFT_SYNTAX_ERR" ] && [ -s "$NFT_SYNTAX_ERR" ]; then
                     print_error "Error details:"
-                    cat /tmp/nft_syntax_err
+                    cat "$NFT_SYNTAX_ERR"
                 fi
                 # Restore backup on syntax error
                 LATEST_BACKUP=$(ls -t ${NFTABLES_DST}.backup.*~ 2>/dev/null | head -1)
@@ -4511,7 +4570,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                 print_message "  nft -c -f $NFTABLES_DST  # verify"
                 print_message "  nft -f $NFTABLES_DST     # apply"
             fi
-            rm -f /tmp/nft_syntax_err
+            rm -f "$NFT_SYNTAX_ERR"
         else
             print_message "Step 7: No $NFTABLES_DST found — nftables will use empty ruleset"
             print_message "You can create one manually or copy from /opt/nftables/"
@@ -4774,11 +4833,21 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
     fi
 
     SWAP_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/swapfile-script/main/swap-setup.sh"
-    SWAP_SCRIPT_PATH="/tmp/swap-setup.sh"
+    SWAP_TMP_DIR=$(create_temp_dir "swap-setup") || SWAP_TMP_DIR=""
+    SWAP_SCRIPT_PATH="${SWAP_TMP_DIR}/swap-setup.sh"
     SWAP_INSTALL_PATH="/usr/local/sbin/swap-setup.sh"
+    SWAP_SCRIPT_READY=false
 
     print_message "Downloading swap-setup.sh..."
-    if curl -fsSL "$SWAP_SCRIPT_URL" -o "$SWAP_SCRIPT_PATH"; then
+    if [ -n "$SWAP_TMP_DIR" ] && curl -fsSL "$SWAP_SCRIPT_URL" -o "$SWAP_SCRIPT_PATH"; then
+        if validate_shell_script "$SWAP_SCRIPT_PATH" bash; then
+            SWAP_SCRIPT_READY=true
+        else
+            print_error "Refusing to run invalid swap-setup.sh"
+        fi
+    fi
+
+    if [ "$SWAP_SCRIPT_READY" = true ]; then
         print_message "Swap script downloaded successfully"
         chmod +x "$SWAP_SCRIPT_PATH"
 
@@ -4806,7 +4875,7 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
         print_header "═══════════════════════════════════════════════════"
         echo ""
     else
-        print_error "Failed to download swap-setup.sh"
+        print_error "Failed to download or validate swap-setup.sh"
         print_message "You can manually install it later:"
         print_message "  wget -qO- https://raw.githubusercontent.com/civisrom/swapfile-script/main/install.sh | sudo bash"
     fi
@@ -4826,10 +4895,21 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     echo ""
     
     BBR_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/Linux_NetworkOptimizer/refs/heads/main/bbr.sh"
-    BBR_SCRIPT_PATH="/tmp/bbr_optimizer.sh"
+    BBR_TMP_DIR=$(create_temp_dir "bbr-optimizer") || BBR_TMP_DIR=""
+    BBR_SCRIPT_PATH="${BBR_TMP_DIR}/bbr_optimizer.sh"
+    BBR_WRAPPER_PATH="${BBR_TMP_DIR}/bbr_wrapper.sh"
+    BBR_SCRIPT_READY=false
     
     print_message "Downloading BBR Network Optimizer script..."
-    if curl -fsSL "$BBR_SCRIPT_URL" -o "$BBR_SCRIPT_PATH"; then
+    if [ -n "$BBR_TMP_DIR" ] && curl -fsSL "$BBR_SCRIPT_URL" -o "$BBR_SCRIPT_PATH"; then
+        if validate_shell_script "$BBR_SCRIPT_PATH" bash; then
+            BBR_SCRIPT_READY=true
+        else
+            print_error "Refusing to run invalid BBR Network Optimizer script"
+        fi
+    fi
+
+    if [ "$BBR_SCRIPT_READY" = true ]; then
         print_message "BBR script downloaded successfully"
         chmod +x "$BBR_SCRIPT_PATH"
         
@@ -4837,7 +4917,7 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
         print_message "Configuring BBR script options..."
         
         # Create a wrapper script that will call functions based on user's choices
-        cat > /tmp/bbr_wrapper.sh << 'EOFWRAPPER'
+        cat > "$BBR_WRAPPER_PATH" << 'EOFWRAPPER'
 #!/bin/bash
 
 # Define print_message in case bbr.sh doesn't provide it
@@ -4846,22 +4926,28 @@ print_message() {
 }
 
 # Source the original BBR script (may override print_message)
-source /tmp/bbr_optimizer.sh
+if [ -z "${1:-}" ] || [ ! -f "$1" ]; then
+    echo "BBR optimizer script path is missing or invalid" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$1"
+shift
 
 # Run selected functions based on parameters
-if [ "$1" = "force_ipv4" ]; then
+if [ "${1:-}" = "force_ipv4" ]; then
     force_ipv4_apt
 fi
 
-if [ "$2" = "full_update" ]; then
+if [ "${2:-}" = "full_update" ]; then
     full_update_upgrade
 fi
 
-if [ "$3" = "fix_hosts" ]; then
+if [ "${3:-}" = "fix_hosts" ]; then
     fix_etc_hosts
 fi
 
-if [ "$4" = "fix_dns" ]; then
+if [ "${4:-}" = "fix_dns" ]; then
     fix_dns
 fi
 
@@ -4873,7 +4959,7 @@ print_message "Applying BBR adaptive network optimizations..."
 intelligent_settings
 EOFWRAPPER
         
-        chmod +x /tmp/bbr_wrapper.sh
+        chmod +x "$BBR_WRAPPER_PATH"
         
         # Prepare parameters based on user choices
         PARAM1="skip"
@@ -4907,10 +4993,7 @@ EOFWRAPPER
         echo ""
         
         # Run the wrapper script with parameters
-        bash /tmp/bbr_wrapper.sh "$PARAM1" "$PARAM2" "$PARAM3" "$PARAM4"
-        
-        # Cleanup
-        rm -f "$BBR_SCRIPT_PATH" /tmp/bbr_wrapper.sh
+        bash "$BBR_WRAPPER_PATH" "$BBR_SCRIPT_PATH" "$PARAM1" "$PARAM2" "$PARAM3" "$PARAM4"
         
         echo ""
         print_header "═══════════════════════════════════════════════════"
@@ -4918,7 +5001,7 @@ EOFWRAPPER
         print_header "═══════════════════════════════════════════════════"
         echo ""
     else
-        print_error "Failed to download BBR Network Optimizer script"
+        print_error "Failed to download or validate BBR Network Optimizer script"
         print_message "You can manually run it later from: $BBR_SCRIPT_URL"
     fi
 else
@@ -5291,13 +5374,15 @@ if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_
 
             # Update GRUB
             print_message "Updating GRUB configuration..."
-            update-grub 2>&1 | tee /tmp/grub-update.log
+            GRUB_UPDATE_LOG=$(mktemp "${TMPDIR:-/tmp}/grub-update.$(date +%Y%m%d-%H%M%S).XXXXXX")
+            chmod 600 "$GRUB_UPDATE_LOG"
+            update-grub 2>&1 | tee "$GRUB_UPDATE_LOG"
             if [ "${PIPESTATUS[0]}" -eq 0 ]; then
                 print_success "GRUB configuration updated successfully"
                 print_warning "IPv6 will be disabled at kernel level after reboot"
             else
                 print_error "Failed to update GRUB configuration"
-                print_warning "Check /tmp/grub-update.log for details"
+                print_warning "Check $GRUB_UPDATE_LOG for details"
 
                 # Try to restore backup
                 print_warning "Attempting to restore GRUB config from backup..."
@@ -5829,7 +5914,7 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
         print_message "- /etc/ufw/before.rules.backup.*~"
     fi
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
-        print_message "- /tmp/crontab.backup.*~"
+        print_message "- ${TMPDIR:-/tmp}/crontab.backup.*"
     fi
     if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
         print_message "- /etc/default/grub.backup.*~"

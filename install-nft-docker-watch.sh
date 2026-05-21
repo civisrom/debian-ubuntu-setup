@@ -32,7 +32,10 @@ readonly SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 readonly DROP_IN_DIR="/etc/systemd/system/docker.service.d"
 readonly DROP_IN_PATH="${DROP_IN_DIR}/nftables-reload.conf"
 
+# Kept in sync with the generated nft-apply.sh defaults below.
+# shellcheck disable=SC2034
 readonly DOCKER_WAIT_TIMEOUT=60   # секунд ожидания готовности Docker
+# shellcheck disable=SC2034
 readonly DOCKER_SETTLE_DELAY=2    # секунд после готовности Docker (создание br-*)
 
 # ─── Цвета ────────────────────────────────────────────────────────────────

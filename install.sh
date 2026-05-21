@@ -5,22 +5,21 @@
 # Downloads, runs, and cleans up system-setup.sh
 #############################################
 
-set -e
+set -euo pipefail
 
 SCRIPT_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh.sha256"
-TEMP_DIR="/tmp/system-setup-$$"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/system-setup.XXXXXX")"
 TEMP_SCRIPT="${TEMP_DIR}/system-setup.sh"
 TEMP_CHECKSUM="${TEMP_DIR}/system-setup.sha256"
 
 # Cleanup temporary files on exit (normal, error, or interrupt)
 cleanup() {
-    rm -rf "$TEMP_DIR"
+    if [ -n "${TEMP_DIR:-}" ] && [ -d "$TEMP_DIR" ]; then
+        rm -rf -- "$TEMP_DIR"
+    fi
 }
 trap cleanup EXIT
-
-# Create temp directory
-mkdir -p "$TEMP_DIR"
 
 # Colors
 RED='\033[0;31m'
@@ -59,18 +58,23 @@ fi
 
 # Download script
 print_message "Downloading setup script..."
-if wget --show-progress "$SCRIPT_URL" -O "$TEMP_SCRIPT" 2>&1 | grep -v "^$"; then
+if wget --show-progress "$SCRIPT_URL" -O "$TEMP_SCRIPT"; then
     print_message "Download complete"
 else
     print_error "Failed to download script"
     exit 1
 fi
 
-# Download and verify checksum if available
+# Download and verify checksum
 print_message "Verifying integrity..."
 if wget -q "$CHECKSUM_URL" -O "$TEMP_CHECKSUM" 2>/dev/null; then
     # Extract expected checksum
     EXPECTED_CHECKSUM=$(awk '{print $1}' "$TEMP_CHECKSUM")
+
+    if ! [[ "$EXPECTED_CHECKSUM" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        print_error "Checksum file is invalid"
+        exit 1
+    fi
 
     # Calculate actual checksum
     ACTUAL_CHECKSUM=$(sha256sum "$TEMP_SCRIPT" | awk '{print $1}')
@@ -86,8 +90,8 @@ if wget -q "$CHECKSUM_URL" -O "$TEMP_CHECKSUM" 2>/dev/null; then
     fi
     rm -f "$TEMP_CHECKSUM"
 else
-    print_warning "Checksum file not available, skipping integrity check"
-    print_warning "This is less secure. Consider adding a checksum file to the repository."
+    print_error "Checksum file not available; refusing to run unverified script"
+    exit 1
 fi
 
 # Make executable
@@ -96,7 +100,13 @@ chmod +x "$TEMP_SCRIPT"
 # Run script (disable set -e to capture exit code properly)
 print_message "Running setup script..."
 set +e
-bash "$TEMP_SCRIPT"
+if [ -t 0 ]; then
+    bash "$TEMP_SCRIPT"
+elif [ -r /dev/tty ]; then
+    bash "$TEMP_SCRIPT" < /dev/tty
+else
+    bash "$TEMP_SCRIPT"
+fi
 EXIT_CODE=$?
 set -e
 
