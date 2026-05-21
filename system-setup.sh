@@ -1693,7 +1693,7 @@ if [ "$INTERACTIVE" = true ]; then
                 INSTALL_PHP_CLI=${INSTALL_PHP_CLI:-n}
 
                 if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
-                    read -r -p "   Install PHP 8.4 extensions (mbstring, xml, curl, mysql)? (y/N): " INSTALL_PHP_EXTENSIONS
+                    read -r -p "   Install PHP extensions (mbstring, xml, curl, mysql)? (y/N): " INSTALL_PHP_EXTENSIONS
                     INSTALL_PHP_EXTENSIONS=${INSTALL_PHP_EXTENSIONS:-n}
                 fi
             fi
@@ -1993,7 +1993,7 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         print_message "    - Ondrej PHP: YES"
         print_message "      - php-cli: $([ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ] && echo "YES" || echo "NO")"
         if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
-            print_message "      - PHP 8.4 extensions: $([ "$INSTALL_PHP_EXTENSIONS" = "y" ] || [ "$INSTALL_PHP_EXTENSIONS" = "Y" ] && echo "YES" || echo "NO")"
+            print_message "      - PHP extensions: $([ "$INSTALL_PHP_EXTENSIONS" = "y" ] || [ "$INSTALL_PHP_EXTENSIONS" = "Y" ] && echo "YES" || echo "NO")"
         fi
     fi
     if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
@@ -2861,8 +2861,11 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" 
         echo ""
 
         if [ "$INSTALL_PHP_EXTENSIONS" = "y" ] || [ "$INSTALL_PHP_EXTENSIONS" = "Y" ]; then
-            print_message "Installing PHP 8.4 extensions..."
-            apt-get install -y php8.4-mbstring php8.4-xml php8.4-curl php8.4-mysql || print_warning "Failed to install PHP 8.4 extensions"
+            # Use version-neutral metapackages (php-mbstring, etc.) instead of
+            # pinning to php8.4-*. The metapackages pull in extensions for the
+            # default PHP version of the running distro (e.g. 8.5 on Ubuntu 26.04).
+            print_message "Installing PHP extensions (mbstring, xml, curl, mysql)..."
+            apt-get install -y php-mbstring php-xml php-curl php-mysql || print_warning "Failed to install PHP extensions"
             echo ""
         fi
     fi
@@ -5886,7 +5889,7 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
                 if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
                     print_message "    - php-cli installed"
                     if [ "$INSTALL_PHP_EXTENSIONS" = "y" ] || [ "$INSTALL_PHP_EXTENSIONS" = "Y" ]; then
-                        print_message "    - PHP 8.4 extensions installed"
+                        print_message "    - PHP extensions installed (mbstring, xml, curl, mysql)"
                     fi
                 fi
             fi
