@@ -1634,11 +1634,12 @@ if [ "$INTERACTIVE" = true ]; then
         BBR_FIX_DNS="n"
     fi
 
-    # Ask about IPv6 disable via GRUB (Debian only)
-    if [ "$OS" = "debian" ]; then
+    # Ask about IPv6 disable via GRUB (Debian and Ubuntu)
+    if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && command -v update-grub >/dev/null 2>&1; then
         echo ""
         print_message "Do you want to disable IPv6 at kernel level (GRUB)?"
-        print_message "This adds 'ipv6.disable=1' to GRUB_CMDLINE_LINUX_DEFAULT"
+        print_message "Adds 'ipv6.disable=1' to BOTH GRUB_CMDLINE_LINUX_DEFAULT"
+        print_message "and GRUB_CMDLINE_LINUX (so recovery boot is also covered)."
         print_message "Note: This is in addition to sysctl IPv6 disable and requires reboot"
         read -r -p "Disable IPv6 via GRUB? (y/N): " DISABLE_IPV6_GRUB
         DISABLE_IPV6_GRUB=${DISABLE_IPV6_GRUB:-n}
@@ -1729,6 +1730,23 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  Useful for static network configuration"
     read -r -p "Comment out IPv6 in /etc/network/interfaces? (y/N): " COMMENT_IPV6_INTERFACES
     COMMENT_IPV6_INTERFACES=${COMMENT_IPV6_INTERFACES:-n}
+
+    # Ask about disabling IPv6 in netplan (Ubuntu default, also possible on Debian)
+    if [ -d /etc/netplan ] && \
+       compgen -G '/etc/netplan/*.yaml' >/dev/null 2>&1 || \
+       compgen -G '/etc/netplan/*.yml'  >/dev/null 2>&1; then
+        echo ""
+        print_message "Disable IPv6 in /etc/netplan/*.yaml?"
+        print_message "  Removes IPv6 addresses, gateway6, IPv6 nameservers/routes"
+        print_message "  Sets dhcp6: false, accept-ra: false, link-local: [] on all ifaces"
+        print_message "  Validates with 'netplan generate' before keeping changes"
+        print_warning "  Will NOT auto-apply — run 'sudo netplan apply' yourself when ready"
+        print_warning "  (avoids losing SSH if IPv6 connectivity was active)"
+        read -r -p "Disable IPv6 in netplan? (y/N): " DISABLE_IPV6_NETPLAN
+        DISABLE_IPV6_NETPLAN=${DISABLE_IPV6_NETPLAN:-n}
+    else
+        DISABLE_IPV6_NETPLAN="n"
+    fi
 
     echo ""
 
@@ -1851,6 +1869,7 @@ else
     INSTALL_PHP_CLI="n"
     INSTALL_PHP_EXTENSIONS="n"
     COMMENT_IPV6_INTERFACES="n"
+    DISABLE_IPV6_NETPLAN="n"
     INSTALL_GO="n"
     INSTALL_IPSET="n"
     INSTALL_RCLONE="n"
@@ -1980,8 +1999,8 @@ if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
     print_message "    - DNSStubListener: $([ "$RESOLVED_STUB_LISTENER_OFF" = "y" ] || [ "$RESOLVED_STUB_LISTENER_OFF" = "Y" ] && echo "disabled" || echo "enabled (default)")"
     print_message "    - DNSOverTLS: $([ "$RESOLVED_DNS_OVER_TLS" = "y" ] || [ "$RESOLVED_DNS_OVER_TLS" = "Y" ] && echo "yes" || echo "no")"
 fi
-if [ "$OS" = "debian" ]; then
-    print_message "  IPv6 disable via GRUB: $([ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ] && echo "YES (kernel level)" || echo "NO")"
+if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    print_message "  IPv6 disable via GRUB: $([ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ] && echo "YES (kernel level, both GRUB lines)" || echo "NO")"
 fi
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; }; then
@@ -2004,6 +2023,7 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
     fi
 fi
 print_message "  Comment IPv6 in /etc/network/interfaces: $([ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ] && echo "YES" || echo "NO")"
+print_message "  Disable IPv6 in /etc/netplan/*.yaml:      $([ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ] && echo "YES (validated, manual apply)" || echo "NO")"
 print_message "  Custom MOTD: $([ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ] && echo "YES" || echo "NO")"
 if [ ! -z "$CUSTOM_PORTS" ]; then
     print_message "  UFW Custom Ports: $CUSTOM_PORTS"
@@ -5502,80 +5522,89 @@ else
 fi
 
 # ============================================
-# DISABLE IPv6 VIA GRUB (DEBIAN ONLY)
+# DISABLE IPv6 VIA GRUB (Debian and Ubuntu)
 # ============================================
+# Adds 'ipv6.disable=1' to BOTH GRUB_CMDLINE_LINUX_DEFAULT and
+# GRUB_CMDLINE_LINUX. The DEFAULT variant only applies to the normal boot
+# menu entry; the bare _LINUX variant applies to ALL entries (including
+# recovery/single-user), so setting both is the reliable form.
 
-if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
+   { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
     print_message "Disabling IPv6 at kernel level via GRUB..."
 
     GRUB_CONFIG="/etc/default/grub"
 
-    # Backup original grub config
-    if [ -f "$GRUB_CONFIG" ]; then
-        cp "$GRUB_CONFIG" "${GRUB_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Original GRUB config backed up"
-    else
+    if [ ! -f "$GRUB_CONFIG" ]; then
         print_error "GRUB config file not found: $GRUB_CONFIG"
         print_warning "Skipping IPv6 GRUB disable"
-        DISABLE_IPV6_GRUB="n"
-    fi
+    elif ! command -v update-grub >/dev/null 2>&1; then
+        print_error "update-grub not found — system may use systemd-boot or similar"
+        print_warning "Skipping IPv6 GRUB disable"
+    else
+        # Single backup for the whole block — both line edits roll back together.
+        cp "$GRUB_CONFIG" "${GRUB_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original GRUB config backed up"
 
-    if [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; then
-        # Check if ipv6.disable is already present
-        if grep -q "ipv6.disable=1" "$GRUB_CONFIG"; then
-            print_warning "IPv6 disable parameter already present in GRUB config"
-        else
-            # Modify GRUB_CMDLINE_LINUX_DEFAULT
-            if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"; then
-                # Get current value
-                CURRENT_VALUE=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG" | cut -d'"' -f2)
+        # Idempotent: add $2 to the $1=\"...\" line in $GRUB_CONFIG.
+        # If line exists & has param → no-op. If line exists w/o param → append.
+        # If line missing → create it.
+        _grub_add_param() {
+            local line_name="$1" param="$2"
+            local current_value esc_new
 
-                # Add ipv6.disable=1 to the existing parameters
-                if [ -z "$CURRENT_VALUE" ]; then
-                    # Empty, just add ipv6.disable=1
-                    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"/' "$GRUB_CONFIG"
+            if grep -q "^${line_name}=" "$GRUB_CONFIG"; then
+                current_value=$(grep "^${line_name}=" "$GRUB_CONFIG" | head -1 | \
+                                sed -E "s/^${line_name}=\"([^\"]*)\"$/\1/")
+                # Whole-word check (spaces as boundaries)
+                if printf '%s' " ${current_value} " | grep -Fq " ${param} "; then
+                    print_message "  '${param}' already present in ${line_name}"
+                    return 0
+                fi
+                if [ -z "$current_value" ]; then
+                    esc_new=$(printf '%s' "$param" | sed -e 's/[\/&]/\\&/g')
                 else
-                    # Add to existing parameters
-                    NEW_VALUE="${CURRENT_VALUE} ipv6.disable=1"
-                    sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"${NEW_VALUE}\"/" "$GRUB_CONFIG"
+                    esc_new=$(printf '%s' "${current_value} ${param}" | sed -e 's/[\/&]/\\&/g')
                 fi
-
-                print_message "Added ipv6.disable=1 to GRUB_CMDLINE_LINUX_DEFAULT"
+                sed -i "s/^${line_name}=.*/${line_name}=\"${esc_new}\"/" "$GRUB_CONFIG"
+                print_message "  Added '${param}' to ${line_name}"
             else
-                # Line doesn't exist, add it
-                echo 'GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"' >> "$GRUB_CONFIG"
-                print_message "Added GRUB_CMDLINE_LINUX_DEFAULT with ipv6.disable=1"
+                printf '%s="%s"\n' "$line_name" "$param" >> "$GRUB_CONFIG"
+                print_message "  Created ${line_name}=\"${param}\""
             fi
+        }
 
-            # Update GRUB
-            print_message "Updating GRUB configuration..."
-            GRUB_UPDATE_LOG=$(mktemp "${TMPDIR:-/tmp}/grub-update.$(date +%Y%m%d-%H%M%S).XXXXXX")
-            chmod 600 "$GRUB_UPDATE_LOG"
-            update-grub 2>&1 | tee "$GRUB_UPDATE_LOG"
-            if [ "${PIPESTATUS[0]}" -eq 0 ]; then
-                print_success "GRUB configuration updated successfully"
-                print_warning "IPv6 will be disabled at kernel level after reboot"
-            else
-                print_error "Failed to update GRUB configuration"
-                print_warning "Check $GRUB_UPDATE_LOG for details"
+        _grub_add_param "GRUB_CMDLINE_LINUX_DEFAULT" "ipv6.disable=1"
+        _grub_add_param "GRUB_CMDLINE_LINUX"         "ipv6.disable=1"
 
-                # Try to restore backup
-                print_warning "Attempting to restore GRUB config from backup..."
-                LATEST_BACKUP=$(ls -t ${GRUB_CONFIG}.backup.*~ 2>/dev/null | head -1)
-                if [ ! -z "$LATEST_BACKUP" ]; then
-                    cp "$LATEST_BACKUP" "$GRUB_CONFIG"
-                    print_message "GRUB config restored from backup"
-                fi
+        # Update GRUB
+        print_message "Running update-grub..."
+        GRUB_UPDATE_LOG=$(mktemp "${TMPDIR:-/tmp}/grub-update.$(date +%Y%m%d-%H%M%S).XXXXXX")
+        chmod 600 "$GRUB_UPDATE_LOG"
+        update-grub 2>&1 | tee "$GRUB_UPDATE_LOG"
+        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+            print_success "GRUB configuration updated successfully"
+            print_warning "IPv6 will be disabled at kernel level after reboot"
+        else
+            print_error "Failed to update GRUB configuration"
+            print_warning "Check $GRUB_UPDATE_LOG for details"
+
+            # Roll back this run's changes
+            print_warning "Attempting to restore GRUB config from backup..."
+            LATEST_BACKUP=$(ls -t ${GRUB_CONFIG}.backup.*~ 2>/dev/null | head -1)
+            if [ ! -z "$LATEST_BACKUP" ]; then
+                cp "$LATEST_BACKUP" "$GRUB_CONFIG"
+                print_message "GRUB config restored from backup"
             fi
         fi
 
-        # Display current GRUB_CMDLINE_LINUX_DEFAULT
-        print_message "Current GRUB_CMDLINE_LINUX_DEFAULT:"
-        grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CONFIG"
+        # Show resulting state
+        print_message "Resulting GRUB cmdline lines:"
+        grep -E '^GRUB_CMDLINE_LINUX(_DEFAULT)?=' "$GRUB_CONFIG" | sed 's/^/  /'
     fi
     echo ""
 else
-    if [ "$OS" = "debian" ]; then
+    if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
         print_message "Skipping IPv6 GRUB disable (not requested)"
     fi
 fi
@@ -5736,6 +5765,210 @@ else
 fi
 
 # ============================================
+# DISABLE IPv6 IN NETPLAN (Ubuntu default, also possible on Debian)
+# ============================================
+# Edits every /etc/netplan/*.yaml|*.yml via python3+pyyaml (safe AST edit, not sed).
+# For each interface across ethernets/wifis/bonds/bridges/vlans/tunnels:
+#   - drop IPv6 addresses from 'addresses'
+#   - drop 'gateway6'
+#   - drop IPv6 entries from 'nameservers.addresses'
+#   - drop routes whose 'to' or 'via' contain ':'
+#   - set dhcp6: false, accept-ra: false, link-local: []
+# Validates the result with 'netplan generate' (writes to /run, harmless until apply).
+# Rolls back on failure. NEVER auto-applies — avoids killing SSH on IPv6-routed boxes.
+
+if [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
+    print_message "Disabling IPv6 in /etc/netplan/*.yaml ..."
+
+    NETPLAN_DIR="/etc/netplan"
+
+    if [ ! -d "$NETPLAN_DIR" ]; then
+        print_warning "$NETPLAN_DIR not found — system does not use netplan"
+        print_message "Skipping netplan IPv6 disable"
+    elif ! command -v netplan >/dev/null 2>&1; then
+        print_warning "'netplan' command not found — skipping"
+    elif ! command -v python3 >/dev/null 2>&1; then
+        print_error "python3 not available — required for safe YAML editing"
+        print_message "Skipping netplan IPv6 disable"
+    else
+        # Ensure pyyaml is available. On netplan-using systems python3-yaml is
+        # already a dep of netplan.io, but defend against minimal images.
+        if ! python3 -c "import yaml" 2>/dev/null; then
+            print_message "Installing python3-yaml (required for netplan editing)..."
+            apt-get install -y python3-yaml >/dev/null 2>&1 || \
+                print_warning "Failed to install python3-yaml"
+        fi
+
+        if ! python3 -c "import yaml" 2>/dev/null; then
+            print_error "python3 yaml module unavailable — skipping netplan IPv6 disable"
+        else
+            # Collect netplan files
+            NETPLAN_FILES=()
+            while IFS= read -r -d '' f; do
+                NETPLAN_FILES+=("$f")
+            done < <(find "$NETPLAN_DIR" -maxdepth 1 -type f \
+                          \( -name '*.yaml' -o -name '*.yml' \) -print0 | sort -z)
+
+            if [ "${#NETPLAN_FILES[@]}" -eq 0 ]; then
+                print_warning "No .yaml/.yml files found in $NETPLAN_DIR"
+            else
+                NETPLAN_TS=$(date +%Y%m%d-%H%M%S)
+                NETPLAN_CHANGED_FILES=()
+
+                for f in "${NETPLAN_FILES[@]}"; do
+                    print_message "Processing: $f"
+                    cp "$f" "${f}.backup.${NETPLAN_TS}~"
+
+                    python3 - "$f" <<'PYEOF'
+import sys
+import yaml
+
+path = sys.argv[1]
+
+try:
+    with open(path, 'r') as fp:
+        cfg = yaml.safe_load(fp)
+except yaml.YAMLError as e:
+    print(f"  YAML parse error: {e}")
+    sys.exit(2)
+
+if not isinstance(cfg, dict) or 'network' not in cfg \
+        or not isinstance(cfg['network'], dict):
+    print("  no 'network:' key — leaving file untouched")
+    sys.exit(0)
+
+net = cfg['network']
+changed = False
+
+def _addr_has_colon(item):
+    # netplan 'addresses' entries: "192.0.2.1/24" or {"2001:db8::1/64": {...}}
+    if isinstance(item, str):
+        return ':' in item
+    if isinstance(item, dict) and item:
+        return ':' in next(iter(item))
+    return False
+
+for dev_type in ('ethernets', 'wifis', 'bonds', 'bridges', 'vlans', 'tunnels'):
+    devs = net.get(dev_type)
+    if not isinstance(devs, dict):
+        continue
+    for iface_name, iface in devs.items():
+        if not isinstance(iface, dict):
+            continue
+
+        # dhcp6 → false (force, regardless of prior value)
+        if iface.get('dhcp6') is not False:
+            iface['dhcp6'] = False
+            changed = True
+
+        # accept-ra → false
+        if iface.get('accept-ra') is not False:
+            iface['accept-ra'] = False
+            changed = True
+
+        # link-local → [] (suppress fe80::)
+        if iface.get('link-local') != []:
+            iface['link-local'] = []
+            changed = True
+
+        # addresses: drop IPv6 entries
+        if isinstance(iface.get('addresses'), list):
+            new_addrs = [a for a in iface['addresses'] if not _addr_has_colon(a)]
+            if len(new_addrs) != len(iface['addresses']):
+                changed = True
+            if new_addrs:
+                iface['addresses'] = new_addrs
+            else:
+                del iface['addresses']
+
+        # gateway6
+        if 'gateway6' in iface:
+            del iface['gateway6']
+            changed = True
+
+        # nameservers: drop IPv6 entries
+        ns = iface.get('nameservers')
+        if isinstance(ns, dict) and isinstance(ns.get('addresses'), list):
+            new_ns = [a for a in ns['addresses'] if ':' not in str(a)]
+            if len(new_ns) != len(ns['addresses']):
+                changed = True
+            if new_ns:
+                ns['addresses'] = new_ns
+            else:
+                del ns['addresses']
+            if not ns:
+                del iface['nameservers']
+
+        # routes: drop IPv6 entries
+        if isinstance(iface.get('routes'), list):
+            new_routes = []
+            for r in iface['routes']:
+                if isinstance(r, dict) and (':' in str(r.get('to', '')) \
+                                            or ':' in str(r.get('via', ''))):
+                    changed = True
+                    continue
+                new_routes.append(r)
+            if new_routes:
+                iface['routes'] = new_routes
+            else:
+                iface.pop('routes', None)
+
+if changed:
+    with open(path, 'w') as fp:
+        yaml.safe_dump(cfg, fp, default_flow_style=False, sort_keys=False)
+    print("  CHANGED: IPv6 settings disabled")
+    sys.exit(10)
+else:
+    print("  no IPv6 config found — file unchanged")
+    sys.exit(0)
+PYEOF
+                    rc=$?
+                    if [ "$rc" -eq 10 ]; then
+                        NETPLAN_CHANGED_FILES+=("$f")
+                        # netplan since 0.106 (Ubuntu 23.10+) requires 0600 on YAML
+                        chmod 600 "$f"
+                    elif [ "$rc" -eq 2 ]; then
+                        print_error "  YAML parse failed for $f — restoring backup"
+                        cp "${f}.backup.${NETPLAN_TS}~" "$f"
+                    fi
+                done
+
+                if [ "${#NETPLAN_CHANGED_FILES[@]}" -eq 0 ]; then
+                    print_message "No IPv6 configuration found in any netplan file"
+                else
+                    print_message "Validating netplan config with 'netplan generate'..."
+                    NETPLAN_LOG=$(mktemp "${TMPDIR:-/tmp}/netplan-generate.${NETPLAN_TS}.XXXXXX")
+                    chmod 600 "$NETPLAN_LOG"
+                    if netplan generate >"$NETPLAN_LOG" 2>&1; then
+                        print_success "Netplan config is valid"
+                        print_message "Modified files:"
+                        for f in "${NETPLAN_CHANGED_FILES[@]}"; do
+                            print_message "  - $f (backup: ${f}.backup.${NETPLAN_TS}~)"
+                        done
+                        echo ""
+                        print_warning "Changes are NOT applied yet — run when you're ready:"
+                        print_warning "  sudo netplan apply"
+                        print_warning "If the box's only working route is IPv6, applying will drop SSH."
+                    else
+                        print_error "netplan generate FAILED — see $NETPLAN_LOG"
+                        cat "$NETPLAN_LOG" | sed 's/^/    /'
+                        print_warning "Restoring all modified netplan files from backup..."
+                        for f in "${NETPLAN_CHANGED_FILES[@]}"; do
+                            cp "${f}.backup.${NETPLAN_TS}~" "$f"
+                            chmod 600 "$f"
+                            print_message "  Restored: $f"
+                        done
+                    fi
+                fi
+            fi
+        fi
+    fi
+    echo ""
+else
+    print_message "Skipping IPv6 netplan disable (not requested)"
+fi
+
+# ============================================
 # FINAL MESSAGE
 # ============================================
 
@@ -5869,8 +6102,9 @@ else
     print_message "- systemd-resolved: Not configured"
 fi
 
-if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
-    print_message "- IPv6 disabled via GRUB (kernel level)"
+if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
+   { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+    print_message "- IPv6 disabled via GRUB (kernel level, both GRUB_CMDLINE_LINUX[_DEFAULT])"
     print_warning "  Note: Requires reboot to take effect"
 fi
 
@@ -5908,6 +6142,11 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
         print_message "- IPv6 commented in /etc/network/interfaces"
         print_warning "  Note: May require network restart or reboot"
     fi
+fi
+
+if [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
+    print_message "- IPv6 stripped from /etc/netplan/*.yaml (validated, NOT applied)"
+    print_warning "  Run 'sudo netplan apply' manually when ready"
 fi
 
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
@@ -6066,7 +6305,7 @@ fi
 
 print_message ""
 
-if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ] || { [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; }; then
+if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ] || { { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; } || [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
     print_message "Backup files saved with timestamp (format: filename.backup.YYYYMMDD-HHMMSS~):"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         print_message "- /etc/sysctl.conf.backup.*~"
@@ -6093,8 +6332,12 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
         print_message "- ${TMPDIR:-/tmp}/crontab.backup.*"
     fi
-    if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+    if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
+       { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
         print_message "- /etc/default/grub.backup.*~"
+    fi
+    if [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
+        print_message "- /etc/netplan/*.yaml.backup.*~ (per modified file)"
     fi
     if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
         print_message "- /etc/systemd/resolved.conf.backup.*~"
@@ -6178,8 +6421,15 @@ if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
-if [ "$OS" = "debian" ] && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
+if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
+   { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
     print_warning "$STEP_NUM. Check GRUB IPv6 disable after reboot: cat /proc/cmdline | grep ipv6"
+    STEP_NUM=$((STEP_NUM + 1))
+fi
+
+if [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
+    print_warning "$STEP_NUM. Apply netplan IPv6 disable when ready: sudo netplan apply"
+    print_warning "   (skipped here on purpose to avoid breaking SSH if IPv6 was in use)"
     STEP_NUM=$((STEP_NUM + 1))
 fi
 
