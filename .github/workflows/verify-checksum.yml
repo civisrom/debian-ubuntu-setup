@@ -1,14 +1,10 @@
 name: Verify checksum integrity
 
-# Run on pull requests and pushes to main
+# Pull requests only. On push to main the auto-update workflow keeps the
+# checksum in sync, so running verify there caused a race condition where
+# verify would fail before update-checksum had a chance to commit the fix.
 on:
   pull_request:
-    paths:
-      - 'system-setup.sh'
-      - 'system-setup.sh.sha256'
-  push:
-    branches:
-      - main
     paths:
       - 'system-setup.sh'
       - 'system-setup.sh.sha256'
@@ -19,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Verify checksum
         id: verify
@@ -65,6 +61,7 @@ jobs:
           echo "**Problem:** The checksum file does not match system-setup.sh" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Solution:**" >> $GITHUB_STEP_SUMMARY
-          echo "1. Wait for automatic update (if on main/claude/* branch)" >> $GITHUB_STEP_SUMMARY
-          echo "2. Or run manually: \`./update-checksum.sh\`" >> $GITHUB_STEP_SUMMARY
-          echo "3. Then commit: \`git add system-setup.sh.sha256 && git commit && git push\`" >> $GITHUB_STEP_SUMMARY
+          echo "1. Run locally: \`./update-checksum.sh\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. Commit and push the updated \`system-setup.sh.sha256\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "On push to \`main\` / \`claude/**\` the auto-update workflow handles this automatically." >> $GITHUB_STEP_SUMMARY
