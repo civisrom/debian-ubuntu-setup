@@ -74,17 +74,26 @@ jobs:
 
       - name: Commit and push changes
         if: steps.check.outputs.needs_update == 'true'
+        # Pass values via env so quotes / backticks / $ in the trigger commit
+        # message can't break shell parsing. Build the commit message on
+        # stdin and feed it to `git commit -F -`.
+        env:
+          TRIGGER_MSG: ${{ github.event.head_commit.message }}
+          COMMIT_SHA: ${{ github.sha }}
+          OLD_CHECKSUM: ${{ steps.check.outputs.stored }}
+          NEW_CHECKSUM: ${{ steps.check.outputs.actual }}
         run: |
           git add system-setup.sh.sha256
-          git commit -m "Auto-update checksum for system-setup.sh [skip-checksum]
-
-          Updated by GitHub Actions
-          Triggered by: ${{ github.event.head_commit.message }}
-          Commit: ${{ github.sha }}
-
-          Old checksum: ${{ steps.check.outputs.stored }}
-          New checksum: ${{ steps.check.outputs.actual }}"
-
+          {
+            echo "Auto-update checksum for system-setup.sh [skip-checksum]"
+            echo
+            echo "Updated by GitHub Actions"
+            echo "Triggered by: ${TRIGGER_MSG}"
+            echo "Commit: ${COMMIT_SHA}"
+            echo
+            echo "Old checksum: ${OLD_CHECKSUM}"
+            echo "New checksum: ${NEW_CHECKSUM}"
+          } | git commit -F -
           git push
 
       - name: Summary
