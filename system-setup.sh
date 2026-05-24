@@ -5548,10 +5548,10 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
 
         # Idempotent: add $2 to the $1=\"...\" line in $GRUB_CONFIG.
         # If line exists & has param → no-op. If line exists w/o param → append.
-        # If line missing → create it.
+        # If line missing → create it (with optional $3 prefix prepended).
         _grub_add_param() {
-            local line_name="$1" param="$2"
-            local current_value esc_new
+            local line_name="$1" param="$2" default_prefix="${3:-}"
+            local current_value esc_new initial
 
             if grep -q "^${line_name}=" "$GRUB_CONFIG"; then
                 current_value=$(grep "^${line_name}=" "$GRUB_CONFIG" | head -1 | \
@@ -5569,12 +5569,20 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                 sed -i "s/^${line_name}=.*/${line_name}=\"${esc_new}\"/" "$GRUB_CONFIG"
                 print_message "  Added '${param}' to ${line_name}"
             else
-                printf '%s="%s"\n' "$line_name" "$param" >> "$GRUB_CONFIG"
-                print_message "  Created ${line_name}=\"${param}\""
+                if [ -n "$default_prefix" ]; then
+                    initial="${default_prefix} ${param}"
+                else
+                    initial="${param}"
+                fi
+                printf '%s="%s"\n' "$line_name" "$initial" >> "$GRUB_CONFIG"
+                print_message "  Created ${line_name}=\"${initial}\""
             fi
         }
 
-        _grub_add_param "GRUB_CMDLINE_LINUX_DEFAULT" "ipv6.disable=1"
+        # When the line is missing entirely, create it in the canonical form:
+        #   GRUB_CMDLINE_LINUX_DEFAULT="quiet splash ipv6.disable=1"
+        #   GRUB_CMDLINE_LINUX="ipv6.disable=1"
+        _grub_add_param "GRUB_CMDLINE_LINUX_DEFAULT" "ipv6.disable=1" "quiet splash"
         _grub_add_param "GRUB_CMDLINE_LINUX"         "ipv6.disable=1"
 
         # Update GRUB
