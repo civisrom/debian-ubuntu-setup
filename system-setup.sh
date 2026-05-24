@@ -411,45 +411,47 @@ fi
 
 # Embedded fallback — used when script is downloaded standalone (via install.sh)
 if [ "$_NFT_PROFILES_LOADED" != true ]; then
-    NFT_PROFILES_COUNT=9
-    NFT_DEFAULT_PROFILE=2
+    NFT_PROFILES_COUNT=7
+    NFT_DEFAULT_PROFILE=4
 
-    # ── Basic profiles ──
-    NFT_PROFILE_NAMES=( [1]="relay" [2]="docker" [3]="native" )
+    # ── Relay v4 family ──
+    NFT_PROFILE_NAMES=( [1]="relay-v4" [2]="relay-v4-eth0" [3]="relay-v4-net0" )
     NFT_PROFILE_DESCRIPTIONS=(
-        [1]="relay  — for relay/proxy servers"
-        [2]="docker — for servers with Docker (default)"
-        [3]="native — for standard servers without Docker"
+        [1]="relay-v4       — relay host v4"
+        [2]="relay-v4-eth0  — relay host v4 + eth0 iface"
+        [3]="relay-v4-net0  — relay host v4 + net0 iface"
     )
-    NFT_PROFILE_CONFIGS=( [1]="relay_nftables.conf" [2]="docker_nftables.conf" [3]="native_nftables.conf" )
-    NFT_PROFILE_LOGSCRIPTS=( [1]="relay_logging.sh" [2]="docker_logging.sh" [3]="native_logging.sh" )
+    NFT_PROFILE_CONFIGS=(
+        [1]="relay_host_nftables_v4.conf"
+        [2]="relay_host_nftables_v4_eth0.conf"
+        [3]="relay_host_nftables_v4_net0.conf"
+    )
+    NFT_PROFILE_LOGSCRIPTS=(
+        [1]="relay_host_nftables_v4.sh"
+        [2]="relay_host_nftables_v4_eth0.sh"
+        [3]="relay_host_nftables_v4_net0.sh"
+    )
 
-    # ── v2 profiles (advanced) ──
-    NFT_PROFILE_NAMES+=( [4]="relay-wg-autossh-v2" [5]="relay-wg-autossh-v2-ge2" [6]="relay-wg-autossh-v2-ge2-eth0" )
-    NFT_PROFILE_NAMES+=( [7]="ge-docker-v2" [8]="ge-docker-v2-eth0" [9]="nl-nginx-wg-easy" )
+    # ── GE Docker host family ──
+    NFT_PROFILE_NAMES+=( [4]="ge-docker-v4" [5]="ge-docker-v4-eth0" [6]="ge-docker-v5" )
+    NFT_PROFILE_NAMES+=( [7]="nl-nginx-v4" )
     NFT_PROFILE_DESCRIPTIONS+=(
-        [4]="relay-wg-autossh-v2          — relay + WireGuard + autossh"
-        [5]="relay-wg-autossh-v2-ge2      — relay + WG + autossh + ge2 iface"
-        [6]="relay-wg-autossh-v2-ge2-eth0 — relay + WG + autossh + ge2 + eth0"
-        [7]="ge-docker-v2                 — GE Docker host"
-        [8]="ge-docker-v2-eth0            — GE Docker host + eth0"
-        [9]="nl-nginx-wg-easy             — NL nginx host + wg-easy"
+        [4]="ge-docker-v4       — GE Docker host v4 (default)"
+        [5]="ge-docker-v4-eth0  — GE Docker host v4 + eth0 iface"
+        [6]="ge-docker-v5       — GE Docker host v5"
+        [7]="nl-nginx-v4        — NL nginx host v4"
     )
     NFT_PROFILE_CONFIGS+=(
-        [4]="relay_host_nftables_wg_autossh_v2.conf"
-        [5]="relay_host_nftables_wg_autossh_v2_ge2.conf"
-        [6]="relay_host_nftables_wg_autossh_v2_ge2_eth0.conf"
-        [7]="ge_docker_host_nftables_v2.conf"
-        [8]="ge_docker_host_nftables_v2_eth0.conf"
-        [9]="nl_nginx_host_nftables_v2_wg-easy.conf"
+        [4]="ge_docker_host_nftables_v4.conf"
+        [5]="ge_docker_host_nftables_v4_eth0.conf"
+        [6]="ge_docker_host_nftables_v5.conf"
+        [7]="nl_nginx_host_nftables_v4.conf"
     )
     NFT_PROFILE_LOGSCRIPTS+=(
-        [4]="relay_host_nftables_wg_autossh_v2.sh"
-        [5]="relay_host_nftables_wg_autossh_v2_ge2.sh"
-        [6]="relay_host_nftables_wg_autossh_v2_ge2_eth0.sh"
-        [7]="ge_docker_host_nftables_v2.sh"
-        [8]="ge_docker_host_nftables_v2_eth0.sh"
-        [9]="nl_nginx_host_nftables_v2_wg-easy.sh"
+        [4]="ge_docker_host_nftables_v4.sh"
+        [5]="ge_docker_host_nftables_v4_eth0.sh"
+        [6]="ge_docker_host_nftables_v5.sh"
+        [7]="nl_nginx_host_nftables_v4.sh"
     )
 fi
 unset _NFT_PROFILES_LOADED _SCRIPT_DIR
@@ -4635,15 +4637,17 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                 print_message "Existing $NFTABLES_DST backed up"
             fi
 
-            # Copy selected profile config as /etc/nftables.conf
+            # Copy selected profile config as /etc/nftables.conf.
+            # Mode 0755: the config carries a `#!/usr/sbin/nft -f` shebang and
+            # is expected to be executable so it can be invoked directly.
             cp "$NFTABLES_SRC" "$NFTABLES_DST"
-            chmod 644 "$NFTABLES_DST"
+            chmod 755 "$NFTABLES_DST"
             chown root:root "$NFTABLES_DST"
 
             # Verify the copy was successful
             if [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ] && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
                 print_success "Installed ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
-                print_message "  Permissions: 644, Owner: root:root"
+                print_message "  Permissions: 755, Owner: root:root"
                 print_message "  File size: $(wc -c < "$NFTABLES_DST") bytes"
             else
                 print_error "CRITICAL: Config file copy verification failed!"
@@ -4651,7 +4655,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                 print_error "Destination: $NFTABLES_DST ($(wc -c < "$NFTABLES_DST" 2>/dev/null || echo 0) bytes)"
                 # Force retry with install command
                 print_message "Retrying with install command..."
-                if install -m 644 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST" && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
+                if install -m 755 -o root -g root "$NFTABLES_SRC" "$NFTABLES_DST" && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
                     print_success "Retry successful: ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
                 else
                     print_error "Config installation failed after retry"
