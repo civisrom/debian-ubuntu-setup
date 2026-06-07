@@ -5304,13 +5304,16 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
 
     SYSCTL_MAIN_FILE="/etc/sysctl.conf"
     SYSCTL_TARGET_FILE="$SYSCTL_MAIN_FILE"
+    SYSCTL_DROPIN_FILE="/etc/sysctl.d/99-system-setup.conf"
 
-    # Ubuntu 26.04 images may omit /etc/sysctl.conf. In that case keep all
-    # script-managed parameters in a dedicated sysctl.d drop-in.
-    if [ "$OS" = "ubuntu" ] && [ "$VERSION" = "26.04" ] && [ ! -f "$SYSCTL_MAIN_FILE" ]; then
+    # Use the traditional /etc/sysctl.conf when it exists. Minimal images may
+    # omit it; then keep all script-managed parameters in a sysctl.d drop-in.
+    if [ -f "$SYSCTL_MAIN_FILE" ]; then
+        print_message "Detected ${SYSCTL_MAIN_FILE}; using standard sysctl.conf configuration"
+    else
         mkdir -p /etc/sysctl.d
-        SYSCTL_TARGET_FILE="/etc/sysctl.d/99-system-setup.conf"
-        print_message "Ubuntu 26.04 without ${SYSCTL_MAIN_FILE}; using ${SYSCTL_TARGET_FILE}"
+        SYSCTL_TARGET_FILE="$SYSCTL_DROPIN_FILE"
+        print_message "${SYSCTL_MAIN_FILE} not found; using ${SYSCTL_TARGET_FILE}"
     fi
 
     # Backup original sysctl configuration file
