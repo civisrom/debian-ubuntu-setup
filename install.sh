@@ -45,20 +45,42 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Check if wget is available
-if ! command -v wget &> /dev/null; then
-    print_warning "wget not found, attempting to install..."
+download_file() {
+    local url="$1"
+    local output="$2"
+    local label="$3"
+
+    if command -v curl &> /dev/null; then
+        if curl --ipv4 -fsSL --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 "$url" -o "$output"; then
+            return 0
+        fi
+        print_warning "curl IPv4 download failed for $label; trying wget"
+    fi
+
+    if command -v wget &> /dev/null; then
+        if wget -4 -q --show-progress --timeout=15 --dns-timeout=15 --connect-timeout=15 --read-timeout=30 --tries=3 "$url" -O "$output"; then
+            return 0
+        fi
+        print_warning "wget IPv4 download failed for $label"
+    fi
+
+    return 1
+}
+
+# Check if at least one downloader is available
+if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
+    print_warning "curl/wget not found, attempting to install curl..."
     if command -v apt-get &> /dev/null; then
-        apt-get update -qq && apt-get install -y -qq wget
+        apt-get update -qq && apt-get install -y -qq curl ca-certificates
     else
-        print_error "wget is required but not installed and cannot be auto-installed"
+        print_error "curl or wget is required but not installed and cannot be auto-installed"
         exit 1
     fi
 fi
 
 # Download script
 print_message "Downloading setup script..."
-if wget --show-progress "$SCRIPT_URL" -O "$TEMP_SCRIPT"; then
+if download_file "$SCRIPT_URL" "$TEMP_SCRIPT" "setup script"; then
     print_message "Download complete"
 else
     print_error "Failed to download script"
@@ -67,7 +89,7 @@ fi
 
 # Download and verify checksum
 print_message "Verifying integrity..."
-if wget -q "$CHECKSUM_URL" -O "$TEMP_CHECKSUM" 2>/dev/null; then
+if download_file "$CHECKSUM_URL" "$TEMP_CHECKSUM" "checksum"; then
     # Extract expected checksum
     EXPECTED_CHECKSUM=$(awk '{print $1}' "$TEMP_CHECKSUM")
 

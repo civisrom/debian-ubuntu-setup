@@ -21,12 +21,12 @@
 
 ### Вариант 1: Прямая загрузка и запуск (рекомендуется)
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
+bash <(curl -4fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
 ```
 
-Или с помощью curl:
+Или с помощью wget:
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
+bash <(wget -4 -qO- https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
 ```
 
 **Что делает install.sh:**
