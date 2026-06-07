@@ -40,10 +40,30 @@ print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+ensure_downloader_available() {
+    if command -v curl &>/dev/null || command -v wget &>/dev/null; then
+        return 0
+    fi
+
+    print_warning "Neither curl nor wget is installed; installing curl and ca-certificates..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq || print_warning "apt-get update failed while preparing downloader install"
+        if apt-get install -y -qq curl ca-certificates; then
+            print_message "curl installed successfully"
+            return 0
+        fi
+    fi
+
+    print_error "curl or wget is required for downloads"
+    return 1
+}
+
 download_url_ipv4() {
     local url="$1"
     local output="$2"
     local max_time="${3:-300}"
+
+    ensure_downloader_available || return 1
 
     if command -v curl &>/dev/null; then
         if curl --ipv4 -fsSL --connect-timeout 15 --max-time "$max_time" --retry 3 --retry-delay 2 "$url" -o "$output"; then
@@ -3763,13 +3783,6 @@ if [ "$INSTALL_RCLONE" = "y" ] || [ "$INSTALL_RCLONE" = "Y" ]; then
         RCLONE_CURRENT=$(rclone version 2>/dev/null | head -1 || echo "unknown")
         print_warning "rclone is already installed: $RCLONE_CURRENT"
         print_message "The official script will update it to the latest version"
-    fi
-
-    # Verify curl is available (should be, but check)
-    if ! command -v curl &>/dev/null; then
-        print_error "curl is required but not found"
-        print_message "Installing curl..."
-        apt-get install -y curl || true
     fi
 
     # Download and run the official rclone install script
