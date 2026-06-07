@@ -40,6 +40,28 @@ print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+download_url_ipv4() {
+    local url="$1"
+    local output="$2"
+    local max_time="${3:-300}"
+
+    if command -v curl &>/dev/null; then
+        if curl --ipv4 -fsSL --connect-timeout 15 --max-time "$max_time" --retry 3 --retry-delay 2 "$url" -o "$output"; then
+            return 0
+        fi
+        print_warning "curl IPv4 download failed for $url; trying wget"
+    fi
+
+    if command -v wget &>/dev/null; then
+        if wget -4 -q --show-progress --timeout=15 --dns-timeout=15 --connect-timeout=15 --read-timeout=60 --tries=3 "$url" -O "$output"; then
+            return 0
+        fi
+        print_warning "wget IPv4 download failed for $url"
+    fi
+
+    return 1
+}
+
 # Helper function to check if variable is yes
 is_yes() {
     [ "$1" = "y" ] || [ "$1" = "Y" ]
@@ -2355,7 +2377,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
 
     # Download docker-compose.yml
     print_message "Downloading docker-compose.yml..."
-    if curl -fsSL "$RUSTDESK_COMPOSE_URL" -o "${RUSTDESK_DIR}/docker-compose.yml"; then
+    if download_url_ipv4 "$RUSTDESK_COMPOSE_URL" "${RUSTDESK_DIR}/docker-compose.yml"; then
         print_message "docker-compose.yml downloaded successfully"
     else
         print_error "CRITICAL: Failed to download docker-compose.yml"
@@ -2365,7 +2387,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
 
     # Download systemd service file
     print_message "Downloading systemd service file..."
-    if curl -fsSL "$RUSTDESK_SERVICE_URL" -o "$RUSTDESK_SERVICE_PATH"; then
+    if download_url_ipv4 "$RUSTDESK_SERVICE_URL" "$RUSTDESK_SERVICE_PATH"; then
         print_message "Service file downloaded successfully"
     else
         print_error "CRITICAL: Failed to download service file"
@@ -2440,7 +2462,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
 
         RUSTDESK_UPDATE_OK=true
 
-        if curl -fsSL "$RUSTDESK_UPDATE_SERVICE_URL" -o "$RUSTDESK_UPDATE_SERVICE_PATH"; then
+        if download_url_ipv4 "$RUSTDESK_UPDATE_SERVICE_URL" "$RUSTDESK_UPDATE_SERVICE_PATH"; then
             print_message "rustdesk-update.service downloaded"
         else
             print_warning "Failed to download rustdesk-update.service"
@@ -2448,7 +2470,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         fi
 
         if [ "$RUSTDESK_UPDATE_OK" = true ]; then
-            if curl -fsSL "$RUSTDESK_UPDATE_TIMER_URL" -o "$RUSTDESK_UPDATE_TIMER_PATH"; then
+            if download_url_ipv4 "$RUSTDESK_UPDATE_TIMER_URL" "$RUSTDESK_UPDATE_TIMER_PATH"; then
                 print_message "rustdesk-update.timer downloaded"
             else
                 print_warning "Failed to download rustdesk-update.timer"
@@ -2917,13 +2939,21 @@ if ( [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] ) && [ ! -z "$NEW_USER
     if [ -d "$USER_HOME/.oh-my-zsh" ]; then
         print_message "Oh My Zsh already installed, reusing existing directory"
     else
-        sudo -u "$NEW_USERNAME" -i bash << EOF
-        export HOME="$USER_HOME"
-        export RUNZSH=no
-        export CHSH=no
-        cd "\$HOME"
-        sh -c "\$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+        OH_MY_ZSH_INSTALLER_TMP=$(mktemp)
+        if download_url_ipv4 "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" "$OH_MY_ZSH_INSTALLER_TMP"; then
+            chmod 755 "$OH_MY_ZSH_INSTALLER_TMP"
+            sudo -u "$NEW_USERNAME" -i bash << EOF
+	        export HOME="$USER_HOME"
+	        export RUNZSH=no
+	        export CHSH=no
+	        cd "\$HOME"
+	        sh "$OH_MY_ZSH_INSTALLER_TMP" --unattended
 EOF
+            rm -f "$OH_MY_ZSH_INSTALLER_TMP"
+        else
+            rm -f "$OH_MY_ZSH_INSTALLER_TMP"
+            print_warning "Failed to download Oh My Zsh installer"
+        fi
     fi
     
     if [ -d "$USER_HOME/.oh-my-zsh" ]; then
@@ -2946,9 +2976,10 @@ EOF
         
         # Download custom .zshrc
         print_message "Downloading custom .zshrc configuration..."
-        if sudo -u "$NEW_USERNAME" curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/.zshrc -o "$USER_HOME/.zshrc"; then
+        if download_url_ipv4 "https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/.zshrc" "$USER_HOME/.zshrc"; then
             print_message "Custom .zshrc downloaded successfully"
-            sudo -u "$NEW_USERNAME" chmod 644 "$USER_HOME/.zshrc"
+            chown "$NEW_USERNAME:$NEW_USERNAME" "$USER_HOME/.zshrc"
+            chmod 644 "$USER_HOME/.zshrc"
         else
             print_warning "Failed to download custom .zshrc, using default"
         fi
@@ -3259,7 +3290,7 @@ install_docker_from_official_script() {
     docker_tmp_dir=$(create_temp_dir "docker-install") || return 1
     docker_install_script="${docker_tmp_dir}/get-docker.sh"
 
-    if curl -fsSL https://get.docker.com -o "$docker_install_script"; then
+    if download_url_ipv4 "https://get.docker.com" "$docker_install_script"; then
         validate_shell_script "$docker_install_script" sh || return 1
         sh "$docker_install_script"
         print_message "Docker installed successfully"
@@ -3451,7 +3482,7 @@ fi
 if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
     print_message "Installing ufw-docker..."
     
-    if wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker; then
+    if download_url_ipv4 "https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker" /usr/local/bin/ufw-docker; then
         chmod +x /usr/local/bin/ufw-docker
         print_message "ufw-docker downloaded successfully"
         
@@ -3486,9 +3517,15 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
         
         # Get the latest Go version from official website
         print_message "Fetching latest Go version..."
-        LATEST_GO_VERSION=$(curl -s https://go.dev/VERSION?m=text | head -1)
-        
-        if [ -z "$LATEST_GO_VERSION" ]; then
+        GO_VERSION_TMP=$(mktemp)
+        if download_url_ipv4 "https://go.dev/VERSION?m=text" "$GO_VERSION_TMP"; then
+            LATEST_GO_VERSION=$(head -1 "$GO_VERSION_TMP")
+        else
+            LATEST_GO_VERSION=""
+        fi
+        rm -f "$GO_VERSION_TMP"
+
+        if [ -z "$LATEST_GO_VERSION" ] || ! [[ "$LATEST_GO_VERSION" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
             print_error "Could not fetch latest Go version"
             print_warning "Skipping Go installation instead of installing a stale fallback version"
             INSTALL_GO="n"
@@ -3535,7 +3572,7 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
             GO_ARCHIVE_PATH="${GO_TMP_DIR}/${GO_ARCHIVE}"
 
             print_message "Downloading Go from: $GO_URL"
-            if [ -n "$GO_TMP_DIR" ] && wget -q --show-progress "$GO_URL" -O "$GO_ARCHIVE_PATH"; then
+            if [ -n "$GO_TMP_DIR" ] && download_url_ipv4 "$GO_URL" "$GO_ARCHIVE_PATH" 900; then
                 print_message "Go downloaded successfully"
 
                 # Remove old Go installation
@@ -3626,7 +3663,13 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
     if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
         # Get the latest ipset version
         print_message "Fetching latest ipset version..."
-        LATEST_IPSET_VERSION=$(curl -s https://ipset.netfilter.org/ | grep -oP 'ipset-\K[0-9]+\.[0-9]+' | head -1)
+        IPSET_INDEX_TMP=$(mktemp)
+        if download_url_ipv4 "https://ipset.netfilter.org/" "$IPSET_INDEX_TMP"; then
+            LATEST_IPSET_VERSION=$(grep -oP 'ipset-\K[0-9]+\.[0-9]+' "$IPSET_INDEX_TMP" | head -1)
+        else
+            LATEST_IPSET_VERSION=""
+        fi
+        rm -f "$IPSET_INDEX_TMP"
         
         if [ -z "$LATEST_IPSET_VERSION" ]; then
             print_error "Could not fetch latest ipset version"
@@ -3644,7 +3687,7 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
             IPSET_ARCHIVE_PATH="${IPSET_TMP_DIR}/${IPSET_ARCHIVE}"
 
             print_message "Downloading ipset from: $IPSET_URL"
-            if [ -n "$IPSET_TMP_DIR" ] && wget -q --show-progress "$IPSET_URL" -O "$IPSET_ARCHIVE_PATH"; then
+            if [ -n "$IPSET_TMP_DIR" ] && download_url_ipv4 "$IPSET_URL" "$IPSET_ARCHIVE_PATH" 900; then
             print_message "ipset downloaded successfully"
 
             # Extract ipset
@@ -3733,7 +3776,7 @@ if [ "$INSTALL_RCLONE" = "y" ] || [ "$INSTALL_RCLONE" = "Y" ]; then
     print_message "Downloading official rclone install script from rclone.org..."
     RCLONE_TMP_DIR=$(create_temp_dir "rclone-install") || RCLONE_TMP_DIR=""
     RCLONE_INSTALL_SCRIPT="${RCLONE_TMP_DIR}/rclone-install.sh"
-    if [ -n "$RCLONE_TMP_DIR" ] && curl -fsSL https://rclone.org/install.sh -o "$RCLONE_INSTALL_SCRIPT"; then
+    if [ -n "$RCLONE_TMP_DIR" ] && download_url_ipv4 "https://rclone.org/install.sh" "$RCLONE_INSTALL_SCRIPT"; then
         if validate_shell_script "$RCLONE_INSTALL_SCRIPT" bash; then
             print_message "Running rclone install script..."
             if bash "$RCLONE_INSTALL_SCRIPT"; then
@@ -3751,7 +3794,7 @@ if [ "$INSTALL_RCLONE" = "y" ] || [ "$INSTALL_RCLONE" = "Y" ]; then
         fi
     else
         print_error "Failed to download rclone install script"
-        print_message "You can install manually: curl https://rclone.org/install.sh | sudo bash"
+        print_message "You can install manually: curl -4fsSL https://rclone.org/install.sh | sudo bash"
     fi
 
     echo ""
@@ -3929,7 +3972,7 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     fi
     
     print_message "Downloading MOTD installation script for $OS..."
-    if [ -n "$MOTD_TMP_DIR" ] && curl -fsSL "$MOTD_URL" -o "$MOTD_SCRIPT"; then
+    if [ -n "$MOTD_TMP_DIR" ] && download_url_ipv4 "$MOTD_URL" "$MOTD_SCRIPT"; then
         if validate_shell_script "$MOTD_SCRIPT" bash; then
             MOTD_SCRIPT_READY=true
         else
@@ -4188,7 +4231,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         UFW_REPO_URL="https://raw.githubusercontent.com/civisrom/ufw-rules-docker/refs/heads/main/ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
 
         print_message "Downloading script from repository..."
-        if wget -q --show-progress "$UFW_REPO_URL" -O "$UFW_INSTALL_PATH"; then
+        if download_url_ipv4 "$UFW_REPO_URL" "$UFW_INSTALL_PATH"; then
             print_message "Script downloaded successfully"
 
             # Replace SSH port in script if custom port is specified
@@ -4233,7 +4276,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         UFW_EXTRACT_DIR="${UFW_TMP_DIR}/extract"
 
         print_message "Downloading custom UFW rules archive..."
-        if [ -n "$UFW_TMP_DIR" ] && wget -q --show-progress "$UFW_ARCHIVE_URL" -O "$UFW_ARCHIVE_FILE"; then
+        if [ -n "$UFW_TMP_DIR" ] && download_url_ipv4 "$UFW_ARCHIVE_URL" "$UFW_ARCHIVE_FILE" 900; then
             print_message "Archive downloaded successfully"
 
             # Create extraction directory
@@ -4354,7 +4397,7 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
         OPT_EXTRACT_DIR="${OPT_TMP_DIR}/extract"
 
         print_message "Downloading opt.7z archive for /opt files..."
-        if [ -n "$OPT_TMP_DIR" ] && wget -q --show-progress "$OPT_ARCHIVE_URL" -O "$OPT_ARCHIVE_FILE"; then
+        if [ -n "$OPT_TMP_DIR" ] && download_url_ipv4 "$OPT_ARCHIVE_URL" "$OPT_ARCHIVE_FILE" 900; then
             print_message "opt.7z archive downloaded successfully"
 
             # Create extraction directory
@@ -5038,7 +5081,7 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
     SWAP_SCRIPT_READY=false
 
     print_message "Downloading swap-setup.sh..."
-    if [ -n "$SWAP_TMP_DIR" ] && curl -fsSL "$SWAP_SCRIPT_URL" -o "$SWAP_SCRIPT_PATH"; then
+    if [ -n "$SWAP_TMP_DIR" ] && download_url_ipv4 "$SWAP_SCRIPT_URL" "$SWAP_SCRIPT_PATH"; then
         if validate_shell_script "$SWAP_SCRIPT_PATH" bash; then
             SWAP_SCRIPT_READY=true
         else
@@ -5082,7 +5125,7 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
     else
         print_error "Failed to download or validate swap-setup.sh"
         print_message "You can manually install it later:"
-        print_message "  wget -qO- https://raw.githubusercontent.com/civisrom/swapfile-script/main/install.sh | sudo bash"
+        print_message "  wget -4 -qO- https://raw.githubusercontent.com/civisrom/swapfile-script/main/install.sh | sudo bash"
     fi
 else
     print_message "Skipping swap configuration (not requested)"
@@ -5106,7 +5149,7 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     BBR_SCRIPT_READY=false
     
     print_message "Downloading BBR Network Optimizer script..."
-    if [ -n "$BBR_TMP_DIR" ] && curl -fsSL "$BBR_SCRIPT_URL" -o "$BBR_SCRIPT_PATH"; then
+    if [ -n "$BBR_TMP_DIR" ] && download_url_ipv4 "$BBR_SCRIPT_URL" "$BBR_SCRIPT_PATH"; then
         if validate_shell_script "$BBR_SCRIPT_PATH" bash; then
             BBR_SCRIPT_READY=true
         else
