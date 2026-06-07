@@ -13,6 +13,7 @@ filename.backup.YYYYMMDD-HHMMSS~
 
 **Примеры:**
 - `/etc/sysctl.conf.backup.20260126-143949~`
+- `/etc/sysctl.d/99-system-setup.conf.backup.20260126-143949~`
 - `/etc/ssh/sshd_config.backup.20260126-143949~`
 - `/etc/apt/sources.list.backup.20260126-143949~`
 - `/etc/default/grub.backup.20260126-143949~`
@@ -67,8 +68,9 @@ sshd_config.backup.motd~       # бэкап
 ### Timestamped backup (рекомендуется)
 ```bash
 # Для файлов конфигурации
-if [ -f /etc/sysctl.conf ]; then
-    cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)~
+CONFIG_FILE="/etc/sysctl.conf"
+if [ -f "$CONFIG_FILE" ]; then
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
 fi
 ```
 
@@ -131,7 +133,7 @@ find /etc -name "*.backup.*~" -mtime +30 -delete
 | `/etc/apt/sources.list` | `sources.list.backup.YYYYMMDD-HHMMSS~` | ✅ |
 | `/etc/apt/sources.list.d/ubuntu.sources` | `ubuntu.sources.backup.YYYYMMDD-HHMMSS~` | ✅ |
 | `/etc/apt/sources.list.d/tataranovich*.list` | `tataranovich*.list.backup.YYYYMMDD-HHMMSS~` | ✅ |
-| `/etc/sysctl.conf` | `sysctl.conf.backup.YYYYMMDD-HHMMSS~` | ✅ |
+| `/etc/sysctl.conf` or `/etc/sysctl.d/99-system-setup.conf` | `*.conf.backup.YYYYMMDD-HHMMSS~` | ✅ |
 | `/etc/default/grub` | `grub.backup.YYYYMMDD-HHMMSS~` | ✅ |
 | `/etc/network/interfaces` | `interfaces.backup.YYYYMMDD-HHMMSS~` | ✅ |
 | `/etc/ssh/sshd_config` | `sshd_config.backup.YYYYMMDD-HHMMSS~` | ✅ |

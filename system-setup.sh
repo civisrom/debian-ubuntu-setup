@@ -1495,10 +1495,10 @@ if [ "$INTERACTIVE" = true ]; then
     # Ask about sysctl configuration
     echo ""
     print_header "───────────────────────────────────────────────"
-    print_header "   System Parameters (sysctl.conf)"
+    print_header "   System Parameters (sysctl)"
     print_header "───────────────────────────────────────────────"
     echo ""
-    print_message "Optimize system parameters (sysctl.conf)?"
+    print_message "Optimize system parameters (sysctl)?"
     print_message "Includes: IPv6 disable, network tuning, BBR congestion control"
     read -r -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
     CONFIGURE_SYSCTL=${CONFIGURE_SYSCTL:-y}
@@ -1576,7 +1576,7 @@ if [ "$INTERACTIVE" = true ]; then
         # Systemd service for sysctl enforcement
         echo ""
         print_message "Install systemd service for sysctl enforcement?"
-        print_message "Creates disable-ipv6.service that runs 'sysctl -p' after network is online"
+        print_message "Creates disable-ipv6.service that reapplies the selected sysctl file after network is online"
         print_message "Ensures sysctl settings are always applied on boot"
         read -r -p "Install sysctl enforcement service? (Y/n): " INSTALL_SYSCTL_SERVICE
         INSTALL_SYSCTL_SERVICE=${INSTALL_SYSCTL_SERVICE:-y}
@@ -5208,7 +5208,7 @@ else
 fi
 
 # ============================================
-# CONFIGURE SYSCTL.CONF
+# CONFIGURE SYSCTL
 # ============================================
 # NOTE: This section is intentionally placed AFTER all network-dependent
 # operations (Docker, Go, ipset, pip, MOTD, UFW rules, swap, BBR, opt.7z).
@@ -5216,31 +5216,42 @@ fi
 # on systems where the resolver depends on IPv6 upstream DNS.
 # By running this last, we avoid the need for fragile DNS recovery hacks.
 
-# Configure sysctl.conf
+# Configure sysctl
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-    print_message "Configuring system parameters (sysctl.conf)..."
+    print_message "Configuring system parameters (sysctl)..."
 
-    # Backup original sysctl.conf
-    if [ -f /etc/sysctl.conf ]; then
-        cp /etc/sysctl.conf "/etc/sysctl.conf.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Original sysctl.conf backed up"
+    SYSCTL_MAIN_FILE="/etc/sysctl.conf"
+    SYSCTL_TARGET_FILE="$SYSCTL_MAIN_FILE"
+
+    # Ubuntu 26.04 images may omit /etc/sysctl.conf. In that case keep all
+    # script-managed parameters in a dedicated sysctl.d drop-in.
+    if [ "$OS" = "ubuntu" ] && [ "$VERSION" = "26.04" ] && [ ! -f "$SYSCTL_MAIN_FILE" ]; then
+        mkdir -p /etc/sysctl.d
+        SYSCTL_TARGET_FILE="/etc/sysctl.d/99-system-setup.conf"
+        print_message "Ubuntu 26.04 without ${SYSCTL_MAIN_FILE}; using ${SYSCTL_TARGET_FILE}"
+    fi
+
+    # Backup original sysctl configuration file
+    if [ -f "$SYSCTL_TARGET_FILE" ]; then
+        cp "$SYSCTL_TARGET_FILE" "${SYSCTL_TARGET_FILE}.backup.$(date +%Y%m%d-%H%M%S)~"
+        print_message "Original ${SYSCTL_TARGET_FILE} backed up"
     fi
 
     # Preserve the existing file and replace only our managed block.
     SYSCTL_TMP=$(mktemp)
-    if [ -f /etc/sysctl.conf ]; then
+    if [ -f "$SYSCTL_TARGET_FILE" ]; then
         awk '
             /^# BEGIN system-setup.sh managed sysctl$/ { skip=1; next }
             /^# END system-setup.sh managed sysctl$/ { skip=0; next }
             !skip { print }
-        ' /etc/sysctl.conf > "$SYSCTL_TMP"
+        ' "$SYSCTL_TARGET_FILE" > "$SYSCTL_TMP"
     else
         : > "$SYSCTL_TMP"
     fi
 
     SYSCTL_MANAGED_BLOCK=""
 
-    # Mode 1 (basic): static parameters written directly to sysctl.conf
+    # Mode 1 (basic): static parameters written directly to the selected sysctl file
     # Mode 2 (full): bbr.sh handles all sysctl tuning (no params written here)
     if [ "$SYSCTL_MODE" = "2" ]; then
         # === Full mode: bbr.sh manages all network/sysctl parameters ===
@@ -5315,19 +5326,19 @@ net.ipv4.ip_forward = 1
             printf '%s\n' "$SYSCTL_MANAGED_BLOCK"
             printf '%s\n' "# END system-setup.sh managed sysctl"
         fi
-    } > /etc/sysctl.conf.new
+    } > "${SYSCTL_TARGET_FILE}.new"
     rm -f "$SYSCTL_TMP"
-    mv /etc/sysctl.conf.new /etc/sysctl.conf
-    print_message "sysctl.conf configured (mode: $([ "$SYSCTL_MODE" = "2" ] && echo "full/BBR" || echo "basic/static"))"
+    mv "${SYSCTL_TARGET_FILE}.new" "$SYSCTL_TARGET_FILE"
+    print_message "sysctl configuration written to ${SYSCTL_TARGET_FILE} (mode: $([ "$SYSCTL_MODE" = "2" ] && echo "full/BBR" || echo "basic/static"))"
 
     # Apply sysctl settings (|| true to prevent set -e exit on unsupported params)
-    print_message "Applying sysctl settings..."
-    sysctl -p || print_warning "Some sysctl parameters may not be supported by the current kernel"
+    print_message "Applying sysctl settings from ${SYSCTL_TARGET_FILE}..."
+    sysctl -p "$SYSCTL_TARGET_FILE" || print_warning "Some sysctl parameters may not be supported by the current kernel"
 
     # Install systemd service for sysctl enforcement on boot
     if [ "$INSTALL_SYSCTL_SERVICE" = "y" ] || [ "$INSTALL_SYSCTL_SERVICE" = "Y" ]; then
         print_message "Installing sysctl enforcement service (disable-ipv6.service)..."
-        cat > /etc/systemd/system/disable-ipv6.service << 'EOF'
+        cat > /etc/systemd/system/disable-ipv6.service << EOF
 [Unit]
 Description=Apply sysctl settings
 After=network-online.target
@@ -5335,7 +5346,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/sysctl -p
+ExecStart=/sbin/sysctl -p ${SYSCTL_TARGET_FILE}
 RemainAfterExit=yes
 
 [Install]
@@ -6082,10 +6093,11 @@ fi
 
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     if [ "$SYSCTL_MODE" = "2" ]; then
-        print_message "- sysctl.conf: Full optimization (Linux NetworkOptimizer / bbr.sh)"
+        print_message "- sysctl: Full optimization (Linux NetworkOptimizer / bbr.sh)"
     else
-        print_message "- sysctl.conf: Basic optimization (static parameters)"
+        print_message "- sysctl: Basic optimization (static parameters)"
     fi
+    print_message "  sysctl config file: ${SYSCTL_TARGET_FILE:-/etc/sysctl.conf}"
     if [ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ]; then
         print_message "  IP forwarding: ENABLED"
     else
@@ -6320,7 +6332,7 @@ print_message ""
 if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] || [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ] || [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ] || [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] || [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ] || { { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; } || [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
     print_message "Backup files saved with timestamp (format: filename.backup.YYYYMMDD-HHMMSS~):"
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
-        print_message "- /etc/sysctl.conf.backup.*~"
+        print_message "- ${SYSCTL_TARGET_FILE:-/etc/sysctl.conf}.backup.*~ (if original file existed)"
     fi
     if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
         if [ "$OS" = "debian" ]; then
@@ -6454,7 +6466,7 @@ print_message ""
 print_message "Useful commands:"
 print_message "sudo ufw status verbose"
 print_message "sudo ufw status numbered"
-print_message "sudo nano /etc/sysctl.conf"
+print_message "sudo nano ${SYSCTL_TARGET_FILE:-/etc/sysctl.conf}"
 print_message "sudo nano /etc/apt/sources.list"
 if [ "$OS" = "ubuntu" ]; then
     print_message "sudo nano /etc/apt/sources.list.d/ubuntu.sources"
