@@ -21,13 +21,15 @@
 
 ### Вариант 1: Прямая загрузка и запуск (рекомендуется)
 ```bash
-bash <(curl -4fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
+if ! command -v curl >/dev/null 2>&1; then apt-get update && apt-get install -y curl ca-certificates; fi && bash <(curl -4fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
 ```
 
 Или с помощью wget:
 ```bash
 bash <(wget -4 -qO- https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)
 ```
+
+> Если в минимальной системе нет ни `curl`, ни `wget`, используйте первый вариант: он сначала установит `curl`, затем запустит installer. Команда `bash <(curl ...)` не может запустить `install.sh`, если локальный `curl` отсутствует.
 
 **Что делает install.sh:**
 - Скачивает `system-setup.sh`
