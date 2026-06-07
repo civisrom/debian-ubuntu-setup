@@ -3828,40 +3828,73 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
 
         # Upgrade pip first (disable set -e to prevent script termination on pip failures)
         set +e
-        pip install --upgrade pip
+        PIP_TIMEOUT_BIN=""
+        if command -v timeout &>/dev/null; then
+            PIP_TIMEOUT_BIN="timeout"
+        fi
+
+        PIP_COMMON_ARGS=(
+            --disable-pip-version-check
+            --no-input
+            --timeout 15
+            --retries 2
+            --prefer-binary
+        )
+
+        if [ -n "$PIP_TIMEOUT_BIN" ]; then
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$PIP_TIMEOUT_BIN" 180 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade pip
+            PIP_UPGRADE_EXIT_CODE=$?
+        else
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade pip
+            PIP_UPGRADE_EXIT_CODE=$?
+        fi
+
+        if [ "$PIP_UPGRADE_EXIT_CODE" -ne 0 ]; then
+            print_warning "pip upgrade failed or timed out (exit code: $PIP_UPGRADE_EXIT_CODE); continuing with package install"
+        fi
 
         # Install packages
-        pip install --upgrade \
-            requests \
-            psutil \
-            pytz \
-            uvloop \
-            ipaddress \
-            pathlib \
-            python-telegram-bot \
-            nest_asyncio \
-            aiohttp \
-            charset-normalizer \
-            maxminddb \
-            geoipsets \
-            setuptools \
-            wheel \
-            pip \
-            passlib \
-            bcrypt \
-            tqdm \
-            colorama \
-            humanize \
-            termcolor \
-            rich \
-            "python-telegram-bot[job-queue]" \
-            urllib3 \
+        PIP_PACKAGES=(
+            requests
+            psutil
+            pytz
+            uvloop
+            ipaddress
+            pathlib
+            python-telegram-bot
+            nest_asyncio
+            aiohttp
+            charset-normalizer
+            maxminddb
+            geoipsets
+            setuptools
+            wheel
+            pip
+            passlib
+            bcrypt
+            tqdm
+            colorama
+            humanize
+            termcolor
+            rich
+            "python-telegram-bot[job-queue]"
+            urllib3
             chardet
-        PIP_EXIT_CODE=$?
+        )
+
+        if [ -n "$PIP_TIMEOUT_BIN" ]; then
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$PIP_TIMEOUT_BIN" 600 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade "${PIP_PACKAGES[@]}"
+            PIP_EXIT_CODE=$?
+        else
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade "${PIP_PACKAGES[@]}"
+            PIP_EXIT_CODE=$?
+        fi
         set -e
 
         if [ $PIP_EXIT_CODE -eq 0 ]; then
             print_message "Python packages installed successfully"
+        elif [ $PIP_EXIT_CODE -eq 124 ]; then
+            print_warning "Python package installation timed out; continuing setup"
         else
             print_warning "Some Python packages may have failed to install (exit code: $PIP_EXIT_CODE)"
         fi
