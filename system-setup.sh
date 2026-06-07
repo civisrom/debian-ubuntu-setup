@@ -5056,12 +5056,13 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
         print_message "Installed to $SWAP_INSTALL_PATH for future use"
 
         # Run swap-setup.sh based on selected mode
+        SWAP_SETUP_EXIT_CODE=0
         if [ "$SWAP_INTERACTIVE" = true ]; then
             print_message "Starting swap interactive wizard..."
-            bash "$SWAP_SCRIPT_PATH" || print_warning "Swap setup encountered an error"
+            bash "$SWAP_SCRIPT_PATH" || SWAP_SETUP_EXIT_CODE=$?
         else
             print_message "Running swap auto-detect mode..."
-            bash "$SWAP_SCRIPT_PATH" --yes || print_warning "Swap setup encountered an error"
+            bash "$SWAP_SCRIPT_PATH" --yes || SWAP_SETUP_EXIT_CODE=$?
         fi
 
         # Cleanup temp file
@@ -5069,7 +5070,12 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
 
         echo ""
         print_header "═══════════════════════════════════════════════════"
-        print_message "Swap configuration completed"
+        if [ "$SWAP_SETUP_EXIT_CODE" -eq 0 ]; then
+            print_message "Swap configuration completed"
+        else
+            print_warning "Swap setup encountered an error (exit code: $SWAP_SETUP_EXIT_CODE)"
+            print_warning "Swap configuration may be incomplete; check status before relying on it"
+        fi
         print_message "You can manage swap later: sudo swap-setup.sh --status"
         print_header "═══════════════════════════════════════════════════"
         echo ""
