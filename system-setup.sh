@@ -6072,6 +6072,7 @@ if [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
                     print_message "Processing: $f"
                     cp "$f" "${f}.backup.${NETPLAN_TS}~"
 
+                    set +e
                     python3 - "$f" <<'PYEOF'
 import sys
 import yaml
@@ -6176,12 +6177,16 @@ else:
     sys.exit(0)
 PYEOF
                     rc=$?
+                    set -e
                     if [ "$rc" -eq 10 ]; then
                         NETPLAN_CHANGED_FILES+=("$f")
                         # netplan since 0.106 (Ubuntu 23.10+) requires 0600 on YAML
                         chmod 600 "$f"
                     elif [ "$rc" -eq 2 ]; then
                         print_error "  YAML parse failed for $f — restoring backup"
+                        cp "${f}.backup.${NETPLAN_TS}~" "$f"
+                    elif [ "$rc" -ne 0 ]; then
+                        print_error "  netplan edit helper failed for $f (exit code: $rc) — restoring backup"
                         cp "${f}.backup.${NETPLAN_TS}~" "$f"
                     fi
                 done
