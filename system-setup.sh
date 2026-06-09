@@ -7,7 +7,10 @@
 # Supported: Debian 12, 13 | Ubuntu 24.04 LTS, 25.10, 26.04 LTS
 #############################################
 
-set -e
+# Do not use global errexit: several helper tools legitimately return
+# non-zero status codes to signal "changed" or "skipped". Critical failures
+# are handled with explicit exit calls at the relevant decision points.
+set -o pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -19,17 +22,34 @@ NC='\033[0m' # No Color
 # Script version
 SCRIPT_VERSION="2.0"
 
+SETUP_WARNINGS=()
+SETUP_ERRORS=()
+SETUP_ROLLBACKS=()
+
+record_maybe_rollback() {
+    local message="$1"
+
+    if [[ "$message" =~ [Rr]estor|[Rr]ollback|[Оо]ткат ]]; then
+        SETUP_ROLLBACKS+=("$message")
+    fi
+}
+
 # Function to print colored messages
 print_message() {
     echo -e "${GREEN}[INFO]${NC} $1"
+    record_maybe_rollback "$1"
 }
 
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+    SETUP_ERRORS+=("$1")
+    record_maybe_rollback "$1"
 }
 
 print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
+    SETUP_WARNINGS+=("$1")
+    record_maybe_rollback "$1"
 }
 
 print_header() {
@@ -38,6 +58,19 @@ print_header() {
 
 print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_recorded_items() {
+    local title="$1"
+    shift
+
+    [ "$#" -gt 0 ] || return 0
+
+    echo -e "${GREEN}[INFO]${NC} $title"
+    local item
+    for item in "$@"; do
+        printf '  - %s\n' "$item"
+    done
 }
 
 ensure_downloader_available() {
@@ -2530,59 +2563,70 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     RUSTDESK_COMPOSE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/docker-compose.yml"
     RUSTDESK_SERVICE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/rustdesk-compose.service"
     RUSTDESK_SERVICE_PATH="/etc/systemd/system/rustdesk-compose.service"
+    RUSTDESK_OK=true
 
     # Create rustdesk directory
     print_message "Creating directory: $RUSTDESK_DIR..."
     if mkdir -p "$RUSTDESK_DIR"; then
         print_message "Directory created successfully"
     else
-        print_error "CRITICAL: Failed to create directory $RUSTDESK_DIR"
-        print_error "Installation cannot continue"
-        exit 1
+        print_error "Failed to create directory $RUSTDESK_DIR"
+        print_warning "RustDesk installation will be skipped; setup will continue"
+        RUSTDESK_OK=false
     fi
 
     # Download docker-compose.yml
-    print_message "Downloading docker-compose.yml..."
-    if download_url_ipv4 "$RUSTDESK_COMPOSE_URL" "${RUSTDESK_DIR}/docker-compose.yml"; then
-        print_message "docker-compose.yml downloaded successfully"
-    else
-        print_error "CRITICAL: Failed to download docker-compose.yml"
-        print_error "Installation cannot continue"
-        exit 1
+    if [ "$RUSTDESK_OK" = true ]; then
+        print_message "Downloading docker-compose.yml..."
+        if download_url_ipv4 "$RUSTDESK_COMPOSE_URL" "${RUSTDESK_DIR}/docker-compose.yml"; then
+            print_message "docker-compose.yml downloaded successfully"
+        else
+            print_error "Failed to download docker-compose.yml"
+            print_warning "RustDesk installation will be skipped; setup will continue"
+            RUSTDESK_OK=false
+        fi
     fi
 
     # Download systemd service file
-    print_message "Downloading systemd service file..."
-    if download_url_ipv4 "$RUSTDESK_SERVICE_URL" "$RUSTDESK_SERVICE_PATH"; then
-        print_message "Service file downloaded successfully"
-    else
-        print_error "CRITICAL: Failed to download service file"
-        print_error "Installation cannot continue"
-        exit 1
+    if [ "$RUSTDESK_OK" = true ]; then
+        print_message "Downloading systemd service file..."
+        if download_url_ipv4 "$RUSTDESK_SERVICE_URL" "$RUSTDESK_SERVICE_PATH"; then
+            print_message "Service file downloaded successfully"
+        else
+            print_error "Failed to download service file"
+            print_warning "RustDesk installation will be skipped; setup will continue"
+            RUSTDESK_OK=false
+        fi
     fi
 
     # Reload systemd daemon
-    print_message "Reloading systemd daemon..."
-    if systemctl daemon-reload; then
-        print_message "Systemd daemon reloaded successfully"
-    else
-        print_error "CRITICAL: Failed to reload systemd daemon"
-        print_error "Installation cannot continue"
-        exit 1
+    if [ "$RUSTDESK_OK" = true ]; then
+        print_message "Reloading systemd daemon..."
+        if systemctl daemon-reload; then
+            print_message "Systemd daemon reloaded successfully"
+        else
+            print_error "Failed to reload systemd daemon for RustDesk"
+            print_warning "RustDesk service will not be enabled; setup will continue"
+            RUSTDESK_OK=false
+        fi
     fi
 
     # Enable rustdesk service
-    print_message "Enabling rustdesk-compose service..."
-    if systemctl enable rustdesk-compose.service; then
-        print_message "Service enabled successfully"
-    else
-        print_error "CRITICAL: Failed to enable rustdesk-compose service"
-        print_error "Installation cannot continue"
-        exit 1
+    if [ "$RUSTDESK_OK" = true ]; then
+        print_message "Enabling rustdesk-compose service..."
+        if systemctl enable rustdesk-compose.service; then
+            print_message "Service enabled successfully"
+        else
+            print_error "Failed to enable rustdesk-compose service"
+            print_warning "RustDesk service will not start automatically; setup will continue"
+            RUSTDESK_OK=false
+        fi
     fi
 
     # Check if Docker is installed and running (needed to start the service)
-    if command -v docker &> /dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+    if [ "$RUSTDESK_OK" != true ]; then
+        print_warning "Skipping RustDesk container start because installation did not complete"
+    elif command -v docker &> /dev/null && systemctl is-active --quiet docker 2>/dev/null; then
         print_message "Docker is running, starting RustDesk containers..."
 
         # Pull images first to avoid timeout on slow connections
@@ -2617,7 +2661,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     fi
 
     # --- Weekly auto-update timer (optional) ---
-    if [ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ]; then
+    if [ "$RUSTDESK_OK" = true ] && { [ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ]; }; then
         echo ""
         print_message "Installing RustDesk weekly auto-update timer..."
 
@@ -3840,7 +3884,10 @@ if [ "$INSTALL_IPSET" = "y" ] || [ "$INSTALL_IPSET" = "Y" ]; then
             if [ -d "${IPSET_TMP_DIR}/${IPSET_DIR}" ]; then
                 # Build in subshell to avoid changing working directory
                 (
-                    cd "${IPSET_TMP_DIR}/${IPSET_DIR}"
+                    if ! cd "${IPSET_TMP_DIR}/${IPSET_DIR}"; then
+                        print_error "Failed to enter ipset source directory: ${IPSET_TMP_DIR}/${IPSET_DIR}"
+                        exit 0
+                    fi
 
                     # Configure with proper kernel source
                     print_message "Configuring ipset with kernel headers..."
@@ -3960,7 +4007,7 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
         print_message "Installing Python packages..."
         source "$VENV_PATH/bin/activate"
 
-        # Upgrade pip first (disable set -e to prevent script termination on pip failures)
+        # Upgrade pip first without letting pip failures stop the whole setup.
         set +e
         PIP_TIMEOUT_BIN=""
         if command -v timeout &>/dev/null; then
@@ -4023,7 +4070,7 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
             PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade "${PIP_PACKAGES[@]}"
             PIP_EXIT_CODE=$?
         fi
-        set -e
+        set +e
 
         if [ $PIP_EXIT_CODE -eq 0 ]; then
             print_message "Python packages installed successfully"
@@ -4424,6 +4471,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
     else
         # Install from password-protected archive
         print_message "Installing from password-protected archive..."
+        UFW_ARCHIVE_READY=true
 
         # Check if p7zip is installed, install if needed
         if ! command -v 7z &> /dev/null; then
@@ -4431,16 +4479,17 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
             if apt-get install -y p7zip-full || apt-get install -y 7zip; then
                 print_message "7z installed successfully"
             else
-                print_error "CRITICAL: Failed to install 7z archive tool"
-                print_error "Installation cannot continue"
-                exit 1
+                print_error "Failed to install 7z archive tool"
+                print_warning "Custom UFW Docker rules archive installation will be skipped; setup will continue"
+                UFW_ARCHIVE_READY=false
             fi
         fi
 
-        UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
-        UFW_TMP_DIR=$(create_temp_dir "ufw-docker-rules") || UFW_TMP_DIR=""
-        UFW_ARCHIVE_FILE="${UFW_TMP_DIR}/ufw-docker-rules-v4.7z"
-        UFW_EXTRACT_DIR="${UFW_TMP_DIR}/extract"
+        if [ "$UFW_ARCHIVE_READY" = true ]; then
+            UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
+            UFW_TMP_DIR=$(create_temp_dir "ufw-docker-rules") || UFW_TMP_DIR=""
+            UFW_ARCHIVE_FILE="${UFW_TMP_DIR}/ufw-docker-rules-v4.7z"
+            UFW_EXTRACT_DIR="${UFW_TMP_DIR}/extract"
 
         print_message "Downloading custom UFW rules archive..."
         if [ -n "$UFW_TMP_DIR" ] && download_url_ipv4 "$UFW_ARCHIVE_URL" "$UFW_ARCHIVE_FILE" 900; then
@@ -4524,6 +4573,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
             fi
         else
             print_error "Failed to download custom UFW rules archive"
+        fi
         fi
     fi
 
@@ -5277,7 +5327,7 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
             bash "$SWAP_SCRIPT_PATH" --yes
             SWAP_SETUP_EXIT_CODE=$?
         fi
-        set -e
+        set +e
 
         case "$SWAP_SETUP_EXIT_CODE" in
             130|143)
@@ -6177,7 +6227,7 @@ else:
     sys.exit(0)
 PYEOF
                     rc=$?
-                    set -e
+                    set +e
                     if [ "$rc" -eq 10 ]; then
                         NETPLAN_CHANGED_FILES+=("$f")
                         # netplan since 0.106 (Ubuntu 23.10+) requires 0600 on YAML
@@ -6601,6 +6651,18 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     fi
     print_message ""
 fi
+
+print_message "Execution log:"
+if [ "${#SETUP_WARNINGS[@]}" -eq 0 ] && \
+   [ "${#SETUP_ERRORS[@]}" -eq 0 ] && \
+   [ "${#SETUP_ROLLBACKS[@]}" -eq 0 ]; then
+    print_message "- No warnings, errors, or rollback events recorded"
+else
+    print_recorded_items "- Warnings:" "${SETUP_WARNINGS[@]}"
+    print_recorded_items "- Errors:" "${SETUP_ERRORS[@]}"
+    print_recorded_items "- Rollbacks/restores:" "${SETUP_ROLLBACKS[@]}"
+fi
+print_message ""
 
 print_warning "Recommended next steps:"
 STEP_NUM=1
