@@ -1861,15 +1861,13 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "Do you want to add additional PPA repositories for Ubuntu?"
         print_message "Available PPAs:"
-        print_message "  1. ppa:ondrej/nginx - Latest Nginx builds"
-        print_message "  2. ppa:ondrej/php - Latest PHP builds"
-        print_message "  3. ppa:git-core/ppa - Latest Git version"
-        print_message "  4. ppa:ubuntu-toolchain-r/test - Latest GCC toolchain"
+        print_message "  1. ppa:ondrej/php - Latest PHP builds"
+        print_message "  2. ppa:git-core/ppa - Latest Git version"
+        print_message "  3. ppa:ubuntu-toolchain-r/test - Latest GCC toolchain"
         read -r -p "Add PPA repositories? (y/N): " ADD_UBUNTU_PPAS
         ADD_UBUNTU_PPAS=${ADD_UBUNTU_PPAS:-n}
         
         # Initialize PPA selection flags
-        ADD_PPA_NGINX="n"
         ADD_PPA_PHP="n"
         ADD_PPA_GIT="n"
         ADD_PPA_TOOLCHAIN="n"
@@ -1880,14 +1878,9 @@ if [ "$INTERACTIVE" = true ]; then
             echo ""
             print_message "Select which PPAs to add:"
             echo ""
-            
-            # Ondrej Nginx PPA
-            print_message "1. ppa:ondrej/nginx - Latest Nginx with HTTP/3, QUIC support"
-            read -r -p "   Add Ondrej Nginx PPA? (y/N): " ADD_PPA_NGINX
-            ADD_PPA_NGINX=${ADD_PPA_NGINX:-n}
-            
+
             # Ondrej PHP PPA
-            print_message "2. ppa:ondrej/php - Latest PHP builds"
+            print_message "1. ppa:ondrej/php - Latest PHP builds"
             read -r -p "   Add Ondrej PHP PPA? (y/N): " ADD_PPA_PHP
             ADD_PPA_PHP=${ADD_PPA_PHP:-n}
 
@@ -1902,19 +1895,18 @@ if [ "$INTERACTIVE" = true ]; then
             fi
 
             # Git Core PPA
-            print_message "3. ppa:git-core/ppa - Latest stable Git releases"
+            print_message "2. ppa:git-core/ppa - Latest stable Git releases"
             read -r -p "   Add Git Core PPA? (y/N): " ADD_PPA_GIT
             ADD_PPA_GIT=${ADD_PPA_GIT:-n}
             
             # Ubuntu Toolchain PPA
-            print_message "4. ppa:ubuntu-toolchain-r/test - Latest GCC, G++, and toolchain"
+            print_message "3. ppa:ubuntu-toolchain-r/test - Latest GCC, G++, and toolchain"
             read -r -p "   Add Ubuntu Toolchain PPA? (y/N): " ADD_PPA_TOOLCHAIN
             ADD_PPA_TOOLCHAIN=${ADD_PPA_TOOLCHAIN:-n}
         fi
         
     else
         ADD_UBUNTU_PPAS="n"
-        ADD_PPA_NGINX="n"
         ADD_PPA_PHP="n"
         ADD_PPA_GIT="n"
         ADD_PPA_TOOLCHAIN="n"
@@ -2064,7 +2056,6 @@ else
     CUSTOM_PORTS=""
     INSTALL_UFW_DOCKER="n"
     ADD_UBUNTU_PPAS="n"
-    ADD_PPA_NGINX="n"
     ADD_PPA_PHP="n"
     ADD_PPA_GIT="n"
     ADD_PPA_TOOLCHAIN="n"
@@ -2207,9 +2198,6 @@ fi
 print_message "  Repositories configuration: $([ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ] && echo "YES" || echo "NO")"
 if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; }; then
     print_message "  Ubuntu PPA repositories:"
-    if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
-        print_message "    - Ondrej Nginx: YES"
-    fi
     if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
         print_message "    - Ondrej PHP: YES"
         print_message "      - php-cli: $([ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ] && echo "YES" || echo "NO")"
@@ -2985,21 +2973,6 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         print_message "Installing software-properties-common..."
         apt-get install -y software-properties-common
     fi
-    
-    # Add Ondrej Nginx PPA
-    if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
-        print_message "Adding ppa:ondrej/nginx..."
-        print_warning "Press ENTER when prompted to confirm the PPA addition"
-        echo ""
-        
-        # Use -y flag to auto-accept
-        if add-apt-repository -y ppa:ondrej/nginx 2>&1; then
-            print_success "Ondrej Nginx PPA added successfully"
-        else
-            print_warning "Failed to add Ondrej Nginx PPA, continuing..."
-        fi
-        echo ""
-    fi
 
     # Add Ondrej PHP PPA
     if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
@@ -3053,9 +3026,6 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         
         # Show added PPAs
         print_message "Added PPA repositories:"
-        if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
-            print_message "  ✓ ppa:ondrej/nginx"
-        fi
         if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
             print_message "  ✓ ppa:ondrej/php"
         fi
@@ -6399,9 +6369,6 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
         print_message "- Ubuntu repositories configured (main, restricted, universe, multiverse)"
         if [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS" = "Y" ]; then
             print_message "- Ubuntu PPA repositories:"
-            if [ "$ADD_PPA_NGINX" = "y" ] || [ "$ADD_PPA_NGINX" = "Y" ]; then
-                print_message "  ✓ ppa:ondrej/nginx (Latest Nginx)"
-            fi
             if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
                 print_message "  ✓ ppa:ondrej/php (Latest PHP)"
                 if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
