@@ -198,25 +198,183 @@ ensure_sshd_include_first() {
     print_message "Ensured 'Include /etc/ssh/sshd_config.d/*.conf' is the first active directive in $sshd_config"
 }
 
-# Disable systemd socket activation for sshd if active. Required before changing
-# the SSH port via sshd_config, because ssh.socket overrides the Port directive
-# (the listen port is taken from ListenStream= in the socket unit instead).
+# Ubuntu 24.04+ uses ssh.socket by default and reads Port/ListenAddress from
+# sshd_config through sshd-socket-generator during systemctl daemon-reload.
+# Keep socket activation where it works; fall back to persistent ssh.service
+# only if the requested port is not actually listening.
+SSH_SOCKET_ACTIVATION_DISABLED=false
+
+systemd_unit_exists() {
+    local unit="$1"
+
+    systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q . || \
+        systemctl cat "$unit" >/dev/null 2>&1
+}
+
+backup_and_remove_systemd_file() {
+    local file="$1"
+    local backup
+
+    [ -f "$file" ] || return 0
+
+    backup="${file}.backup.system-setup.$(date +%Y%m%d-%H%M%S)~"
+    if mv "$file" "$backup"; then
+        print_message "Moved $file to $backup"
+    else
+        print_warning "Failed to move $file; persistent SSH service may stay tied to socket activation"
+    fi
+}
+
 disable_ssh_socket_if_active() {
     local unit
+    local disabled_socket=false
 
     for unit in ssh.socket sshd.socket; do
+        systemd_unit_exists "$unit" || continue
+
         if systemctl is-active --quiet "$unit" 2>/dev/null; then
             print_warning "$unit is active; it would override the Port directive in sshd_config"
             print_message "Disabling $unit so the configured SSH port takes effect"
-            systemctl disable --now "$unit" 2>/dev/null || \
+            if systemctl disable --now "$unit" 2>/dev/null; then
+                disabled_socket=true
+            else
                 print_warning "Failed to disable $unit; SSH port change may not take effect"
+            fi
         elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
             print_message "Disabling $unit (enabled but not active)"
-            systemctl disable "$unit" 2>/dev/null || true
+            if systemctl disable "$unit" 2>/dev/null; then
+                disabled_socket=true
+            else
+                print_warning "Failed to disable $unit; SSH port change may not persist"
+            fi
         fi
     done
 
+    if [ "$disabled_socket" = true ]; then
+        SSH_SOCKET_ACTIVATION_DISABLED=true
+        print_message "SSH socket activation disabled; persistent SSH service will be enabled"
+    fi
+
+    # Some Ubuntu releases used a drop-in that keeps ssh.service tied to
+    # ssh.socket. Back it up before persistent daemon fallback.
+    backup_and_remove_systemd_file "/etc/systemd/system/ssh.service.d/00-socket.conf"
+    backup_and_remove_systemd_file "/etc/systemd/system/sshd.service.d/00-socket.conf"
+    systemctl daemon-reload 2>/dev/null || true
+
     return 0
+}
+
+ssh_port_is_listening() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .
+        return $?
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v p=":${port}" '$4 ~ p "$" { found=1 } END { exit found ? 0 : 1 }'
+        return $?
+    fi
+
+    return 1
+}
+
+restart_ssh_daemon_service() {
+    local unit
+
+    for unit in ssh.service sshd.service; do
+        systemd_unit_exists "$unit" || continue
+
+        print_message "Enabling persistent SSH service: $unit"
+        systemctl enable "$unit" 2>/dev/null || \
+            print_warning "Failed to enable $unit; SSH may not survive reboot"
+
+        if systemctl restart "$unit" 2>/dev/null || systemctl start "$unit" 2>/dev/null; then
+            print_message "SSH service started/restarted ($unit)"
+            return 0
+        fi
+
+        print_warning "Failed to start/restart $unit"
+    done
+
+    if service ssh restart 2>/dev/null; then
+        print_message "SSH service restarted (service ssh)"
+        return 0
+    fi
+
+    if service sshd restart 2>/dev/null; then
+        print_message "SSH service restarted (service sshd)"
+        return 0
+    fi
+
+    return 1
+}
+
+restart_ssh_listener() {
+    local port="${1:-22}"
+    local unit
+    local socket_handled=false
+
+    systemctl daemon-reload 2>/dev/null || true
+
+    if [ "${SSH_SOCKET_ACTIVATION_DISABLED:-false}" = true ]; then
+        print_message "Starting SSH through persistent daemon mode"
+        if restart_ssh_daemon_service; then
+            if ssh_port_is_listening "$port"; then
+                print_success "SSH is listening on port $port"
+            else
+                print_warning "SSH service restarted, but port $port is not listening yet"
+                print_warning "Check on the server: systemctl status ssh.service sshd.service; journalctl -u ssh.service -u sshd.service"
+            fi
+            return 0
+        fi
+
+        return 1
+    fi
+
+    # Ubuntu 24.04/26.04 commonly uses ssh.socket as the primary listener.
+    for unit in ssh.socket sshd.socket; do
+        systemd_unit_exists "$unit" || continue
+
+        if systemctl is-active --quiet "$unit" 2>/dev/null || \
+           systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+            socket_handled=true
+            print_message "Restarting SSH socket listener: $unit"
+            if systemctl enable "$unit" 2>/dev/null; then
+                :
+            else
+                print_warning "Failed to enable $unit"
+            fi
+
+            if systemctl restart "$unit" 2>/dev/null || systemctl start "$unit" 2>/dev/null; then
+                print_message "SSH socket restarted ($unit)"
+                if ssh_port_is_listening "$port"; then
+                    print_success "SSH socket is listening on port $port"
+                    return 0
+                fi
+            else
+                print_warning "Failed to restart $unit"
+            fi
+        fi
+    done
+
+    if [ "$socket_handled" = true ]; then
+        print_warning "SSH socket was handled, but port $port is not listening; falling back to persistent SSH service"
+        disable_ssh_socket_if_active
+    fi
+
+    if restart_ssh_daemon_service; then
+        if ssh_port_is_listening "$port"; then
+            print_success "SSH is listening on port $port"
+        else
+            print_warning "SSH service restarted, but port $port is not listening yet"
+            print_warning "Check on the server: systemctl status ssh.service sshd.service ssh.socket sshd.socket"
+        fi
+        return 0
+    fi
+
+    return 1
 }
 
 # Warn if any sshd_config.d drop-in that is lexicographically earlier than ours
@@ -3059,9 +3217,9 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
 
         # Change SSH port
         if [ ! -z "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
-            # On systems using socket activation (Ubuntu 22.10+, recent Debian),
-            # ssh.socket dictates the listen port and Port in sshd_config is ignored.
-            disable_ssh_socket_if_active
+            # Ubuntu 24.04+ reads this Port via sshd-socket-generator when
+            # systemctl daemon-reload runs. restart_ssh_listener verifies that
+            # ssh.socket or ssh.service is actually listening afterward.
             append_ssh_parameter "Port" "$SSH_PORT"
         fi
 
@@ -3110,17 +3268,10 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         if sshd -t; then
             print_message "SSH configuration is valid"
 
-            # Restart SSH service
-            print_message "Restarting SSH service..."
-            if systemctl restart sshd 2>/dev/null; then
-                print_message "SSH service restarted (sshd)"
-            elif systemctl restart ssh 2>/dev/null; then
-                print_message "SSH service restarted (ssh)"
-            elif service ssh restart 2>/dev/null; then
-                print_message "SSH service restarted (service ssh)"
-            elif service sshd restart 2>/dev/null; then
-                print_message "SSH service restarted (service sshd)"
-            else
+            # Restart the listener and verify the selected port. On Ubuntu
+            # 24.04/26.04, ssh.socket may be the unit that owns the port.
+            print_message "Restarting SSH listener..."
+            if ! restart_ssh_listener "$SSH_PORT"; then
                 print_error "Failed to restart SSH service"
                 print_warning "Please restart SSH manually: sudo systemctl restart ssh"
             fi
@@ -5146,13 +5297,24 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
 
         # Run swap-setup.sh based on selected mode
         SWAP_SETUP_EXIT_CODE=0
+        set +e
         if [ "$SWAP_INTERACTIVE" = true ]; then
             print_message "Starting swap interactive wizard..."
-            bash "$SWAP_SCRIPT_PATH" || SWAP_SETUP_EXIT_CODE=$?
+            bash "$SWAP_SCRIPT_PATH"
+            SWAP_SETUP_EXIT_CODE=$?
         else
             print_message "Running swap auto-detect mode..."
-            bash "$SWAP_SCRIPT_PATH" --yes || SWAP_SETUP_EXIT_CODE=$?
+            bash "$SWAP_SCRIPT_PATH" --yes
+            SWAP_SETUP_EXIT_CODE=$?
         fi
+        set -e
+
+        case "$SWAP_SETUP_EXIT_CODE" in
+            130|143)
+                print_error "Swap setup was interrupted (exit code: $SWAP_SETUP_EXIT_CODE)"
+                exit "$SWAP_SETUP_EXIT_CODE"
+                ;;
+        esac
 
         # Cleanup temp file
         rm -f "$SWAP_SCRIPT_PATH"
