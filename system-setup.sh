@@ -3166,9 +3166,28 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                 echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$OS $NGINX_CODENAME nginx" \
                     > /etc/apt/sources.list.d/nginx.list
 
-                # Pin nginx.org so its packages are preferred over the distro's
-                printf 'Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n' \
-                    > /etc/apt/preferences.d/99nginx
+                # Pin nginx.org so its packages are always preferred over the
+                # distro's, preventing an accidental switch back to the distro
+                # nginx on "apt update && apt upgrade".
+                #   * Priority 900 > 500 (default distro): nginx.org always wins
+                #     as the candidate regardless of the distro version number,
+                #     so nginx is never silently replaced by the distro build.
+                #   * Priority stays < 1000 on purpose: this forbids forced
+                #     downgrades — apt will only ever move to a NEWER nginx.org
+                #     version (security updates), never replace it with another.
+                # Two separate stanzas are used (apt honours only the first
+                # "Pin:" line within a single stanza) so the pin matches both by
+                # site (origin nginx.org) and by signed Release metadata
+                # (release o=nginx), surviving mirrors/redirects.
+                cat > /etc/apt/preferences.d/99nginx <<'NGINX_PIN'
+Package: *
+Pin: origin nginx.org
+Pin-Priority: 900
+
+Package: *
+Pin: release o=nginx
+Pin-Priority: 900
+NGINX_PIN
 
                 print_success "Official nginx.org repository added"
             else
@@ -3192,7 +3211,12 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                 echo "deb [arch=$NGINX_ARCH signed-by=/etc/apt/keyrings/deb.myguard.nl.gpg] https://deb.myguard.nl/apt/nginx/$NGINX_CODENAME $NGINX_CODENAME main" \
                     > /etc/apt/sources.list.d/myguard-nginx.list
 
-                # Pin deb.myguard.nl (matches the upstream myguard.deb pinning)
+                # Pin deb.myguard.nl (matches the upstream myguard.deb pinning).
+                # Priority 901 > 500 (distro) keeps nginx sourced from this repo
+                # on every "apt update && apt upgrade"; staying < 1000 forbids
+                # forced downgrades so the version is never silently replaced.
+                # Only nginx is served from this source list, so "Package: *"
+                # affects nginx alone.
                 printf 'Package: *\nPin: origin deb.myguard.nl\nPin-Priority: 901\n' \
                     > /etc/apt/preferences.d/99myguard
 
@@ -3213,6 +3237,15 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
             fi
             if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
                 print_message "  ✓ deb.myguard.nl (third-party nginx)"
+            fi
+
+            # Verify the pinning: show which repository nginx now resolves to.
+            # The "Candidate" line must point at nginx.org / deb.myguard.nl
+            # (priority 900/901), confirming apt upgrade will not switch nginx
+            # back to the distro version.
+            if command -v apt-cache >/dev/null 2>&1; then
+                print_message "Verifying nginx package source (apt-cache policy nginx):"
+                apt-cache policy nginx 2>/dev/null || print_warning "Could not query nginx policy"
             fi
         else
             print_warning "Failed to update package lists after adding Nginx repositories"
