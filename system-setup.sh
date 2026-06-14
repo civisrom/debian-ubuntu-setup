@@ -2007,9 +2007,37 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "  7) custom (install only the package names you list below)"
                 read -r -p "Preset [1-7]: " NGINX_INSTALL_VARIANT
 
-                echo ""
-                print_message "Optionally add extra package names to the install (space-separated), or leave empty."
-                read -r -p "Extra packages: " NGINX_CUSTOM_PKGS
+                if [ "$NGINX_INSTALL_VARIANT" = "7" ]; then
+                    # Show a copy-paste catalogue of packages available from the
+                    # repositories that were enabled. Plain echo (no [INFO] prefix
+                    # / colour) keeps the lines clean to copy and paste.
+                    echo ""
+                    print_message "Available nginx packages (copy/paste the ones you want into the prompt below):"
+                    if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+                        echo "  # nginx.org core:"
+                        echo "    nginx nginx-dbg nginx-nr-agent"
+                        echo "  # nginx.org dynamic modules:"
+                        echo "    nginx-module-njs nginx-module-geoip nginx-module-image-filter nginx-module-xslt nginx-module-perl nginx-module-otel nginx-module-acme"
+                    fi
+                    if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
+                        echo "  # nginx-modules.com (Blendbyte) dynamic modules:"
+                        echo "    nginx-module-brotli nginx-module-brotli-static nginx-module-cache-purge nginx-module-dav-ext nginx-module-fancyindex nginx-module-geoip2 nginx-module-headers-more nginx-module-modsecurity nginx-module-stream-geoip2 nginx-module-substitutions nginx-module-zstd nginx-module-zstd-static"
+                    fi
+                    if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+                        echo "  # deb.myguard.nl metapackages:"
+                        echo "    nginx nginx-common nginx-core nginx-full nginx-light nginx-extras nginx-minimal"
+                        echo "  # deb.myguard.nl also ships ~130 libnginx-mod-* modules; after setup list them with:"
+                        echo "    apt-cache search '^libnginx-mod-'"
+                    fi
+                    echo ""
+                    print_message "Enter packages separated by spaces OR commas"
+                    print_message "  (e.g. 'nginx, nginx-module-njs nginx-module-brotli')."
+                    read -r -p "Packages to install: " NGINX_CUSTOM_PKGS
+                else
+                    echo ""
+                    print_message "Optionally add extra packages (space- or comma-separated), or leave empty."
+                    read -r -p "Extra packages: " NGINX_CUSTOM_PKGS
+                fi
             fi
         fi
     else
@@ -3425,8 +3453,8 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
         NGINX_PKGS="$NGINX_PKGS $NGINX_CUSTOM_PKGS"
     fi
 
-    # Trim whitespace
-    NGINX_PKGS="$(echo "$NGINX_PKGS" | xargs 2>/dev/null)"
+    # Normalise separators (allow commas as well as spaces) and trim
+    NGINX_PKGS="$(echo "$NGINX_PKGS" | tr ',' ' ' | xargs 2>/dev/null)"
 
     if [ "$NGINX_VARIANT_OK" != "y" ]; then
         print_warning "Selected nginx preset '$NGINX_INSTALL_VARIANT' requires a repository that was not enabled; skipping nginx installation."
