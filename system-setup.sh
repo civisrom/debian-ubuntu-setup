@@ -2038,6 +2038,24 @@ if [ "$INTERACTIVE" = true ]; then
                     print_message "Optionally add extra packages (space- or comma-separated), or leave empty."
                     read -r -p "Extra packages: " NGINX_CUSTOM_PKGS
                 fi
+
+                # If nginx is already installed (e.g. from the distro repos), offer
+                # a safe, backed-up migration to the selected repository.
+                MIGRATE_NGINX="n"
+                if command -v nginx >/dev/null 2>&1 || \
+                   dpkg-query -W -f='${Status}' nginx 2>/dev/null | grep -q "install ok installed"; then
+                    echo ""
+                    print_warning "An existing nginx installation was detected: $(nginx -v 2>&1 | sed 's#.*/##' || echo unknown)"
+                    print_warning "Migrating changes the package source. For nginx.org (presets 1-4) this:"
+                    print_warning "  - removes distro nginx-common/nginx-core and all distro libnginx-mod-*;"
+                    print_warning "  - switches layout (no sites-enabled/modules-enabled; modules via load_module)."
+                    print_warning "deb.myguard.nl (presets 5-6) is Debian-style and upgrades mostly in place."
+                    print_message "Before any change the script backs up /etc/nginx and the package list to"
+                    print_message "/var/backups, stops nginx, swaps packages (keeping your configs), runs"
+                    print_message "'nginx -t', and only starts nginx if the config test passes."
+                    read -r -p "Migrate existing nginx to the selected repository? (y/N): " MIGRATE_NGINX
+                    MIGRATE_NGINX=${MIGRATE_NGINX:-n}
+                fi
             fi
         fi
     else
@@ -2047,6 +2065,7 @@ if [ "$INTERACTIVE" = true ]; then
         INSTALL_NGINX="n"
         NGINX_INSTALL_VARIANT=""
         NGINX_CUSTOM_PKGS=""
+        MIGRATE_NGINX="n"
     fi
 
     # Ask about disabling IPv6 in /etc/network/interfaces
@@ -2202,6 +2221,7 @@ else
     INSTALL_NGINX="n"
     NGINX_INSTALL_VARIANT=""
     NGINX_CUSTOM_PKGS=""
+    MIGRATE_NGINX="n"
     COMMENT_IPV6_INTERFACES="n"
     DISABLE_IPV6_NETPLAN="n"
     INSTALL_GO="n"
@@ -2365,6 +2385,9 @@ if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
     fi
     if [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; then
         print_message "  Install nginx now:                          YES (preset ${NGINX_INSTALL_VARIANT:-?})"
+        if [ "$MIGRATE_NGINX" = "y" ] || [ "$MIGRATE_NGINX" = "Y" ]; then
+            print_message "  Migrate existing nginx (backup + swap):     YES"
+        fi
     fi
 fi
 print_message "  Comment IPv6 in /etc/network/interfaces: $([ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ] && echo "YES" || echo "NO")"
@@ -3468,41 +3491,132 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
            { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
             print_warning "Both nginx.org and deb.myguard.nl are enabled: the 'nginx' package resolves to deb.myguard.nl (pin 901)."
         fi
-        print_message "Installing nginx packages: $NGINX_PKGS"
 
-        # Dry-run first to catch a temporary dynamic-module version skew. Both
-        # nginx.org modules (Depends: nginx-r<ver>) and Blendbyte modules
-        # (Depends: nginx (= <ver>)) pin nginx to one exact version. Right after
-        # a new nginx stable release nginx.org bumps immediately while the
-        # third-party repo can lag (~24h), making a combined preset (3/4) briefly
-        # unsatisfiable. Report that clearly instead of a cryptic apt failure.
-        if ! apt-get install -s $NGINX_PKGS >/dev/null 2>&1; then
-            print_warning "Dependency resolution failed for the selected nginx package set."
-            print_warning "Possible causes:"
-            print_warning "  - a package is not available for this distribution codename or architecture;"
-            print_warning "  - a temporary nginx version skew between repos (presets 3/4): nginx.org modules"
-            print_warning "    need 'nginx-r<ver>' while third-party modules pin 'nginx (= <ver>)', and the"
-            print_warning "    third-party repo may lag (~24h) right after a new nginx stable release."
-            print_warning "Options: re-run later, or install nginx with modules from only ONE repo."
-            print_message "apt resolver output (tail):"
-            apt-get install -s $NGINX_PKGS 2>&1 | tail -n 15
-            print_warning "Skipping nginx installation."
-        elif apt-get install -y $NGINX_PKGS; then
-            print_success "nginx installed successfully"
-            echo ""
-            if command -v nginx >/dev/null 2>&1; then
-                print_message "Installed nginx version and build configuration:"
-                nginx -v 2>&1 || true
+        # Detect a pre-existing nginx (typically installed from the distro repos).
+        NGINX_PREEXISTING="n"
+        if dpkg-query -W -f='${Status}' nginx 2>/dev/null | grep -q "install ok installed"; then
+            NGINX_PREEXISTING="y"
+        fi
+
+        NGINX_DO_INSTALL="y"
+        NGINX_BK=""
+        if [ "$NGINX_PREEXISTING" = "y" ] && \
+           [ "$MIGRATE_NGINX" != "y" ] && [ "$MIGRATE_NGINX" != "Y" ]; then
+            NGINX_DO_INSTALL="n"
+            print_warning "Existing nginx detected but migration was not confirmed; skipping nginx installation to avoid breaking it."
+        fi
+
+        if [ "$NGINX_DO_INSTALL" = "y" ]; then
+            # ---- Safe migration from an existing (distro) nginx ----
+            if [ "$NGINX_PREEXISTING" = "y" ]; then
+                NGINX_BK="/var/backups/nginx-migration-$(date +%Y%m%d-%H%M%S)"
+                mkdir -p "$NGINX_BK"
+                print_message "Backing up current nginx setup to $NGINX_BK ..."
+                if [ -d /etc/nginx ]; then
+                    if tar czf "$NGINX_BK/etc-nginx.tar.gz" -C / etc/nginx 2>/dev/null; then
+                        print_success "Saved $NGINX_BK/etc-nginx.tar.gz"
+                    else
+                        print_warning "Could not archive /etc/nginx"
+                    fi
+                fi
+                dpkg-query -W -f='${Package} ${Version}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
+                    > "$NGINX_BK/packages.txt" || true
+                nginx -v 2> "$NGINX_BK/nginx-version.txt" || true
+
+                # Stop the running service before swapping packages
+                if command -v systemctl >/dev/null 2>&1; then
+                    systemctl stop nginx 2>/dev/null || true
+                fi
+
+                # Presets 1-4 target nginx.org, whose 'nginx' Conflicts/Replaces the
+                # distro nginx-common/nginx-core and uses a different layout (no
+                # modules-enabled). Remove the distro stack for a clean switch.
+                # myguard (5/6) is Debian-style and upgrades in place via the pin.
+                case "$NGINX_INSTALL_VARIANT" in
+                    1|2|3|4)
+                        DISTRO_NGINX_PKGS="$(dpkg-query -W -f='${Package} ${Status}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
+                            | awk '/ install ok installed$/{print $1}' | sort -u | tr '\n' ' ')"
+                        DISTRO_NGINX_PKGS="$(echo "$DISTRO_NGINX_PKGS" | xargs 2>/dev/null)"
+                        if [ -n "$DISTRO_NGINX_PKGS" ]; then
+                            print_message "Removing distro nginx packages for the nginx.org switch: $DISTRO_NGINX_PKGS"
+                            apt-get remove -y $DISTRO_NGINX_PKGS || print_warning "Some distro nginx packages could not be removed"
+                        fi
+                        # Distro modules-enabled/*.conf load .so files that no longer
+                        # exist after removal; move them aside so nginx.org can start.
+                        if [ -d /etc/nginx/modules-enabled ] && ls /etc/nginx/modules-enabled/*.conf >/dev/null 2>&1; then
+                            mkdir -p "$NGINX_BK/modules-enabled"
+                            mv /etc/nginx/modules-enabled/*.conf "$NGINX_BK/modules-enabled/" 2>/dev/null || true
+                            print_message "Moved distro modules-enabled/*.conf to backup (nginx.org loads modules via nginx.conf)."
+                        fi
+                        ;;
+                esac
             fi
-            if command -v apt-cache >/dev/null 2>&1; then
-                print_message "nginx package source after install (apt-cache policy nginx):"
-                apt-cache policy nginx 2>/dev/null || true
+
+            print_message "Installing nginx packages: $NGINX_PKGS"
+
+            # Dry-run first to catch a temporary dynamic-module version skew. Both
+            # nginx.org modules (Depends: nginx-r<ver>) and Blendbyte modules
+            # (Depends: nginx (= <ver>)) pin nginx to one exact version. Right after
+            # a new nginx stable release nginx.org bumps immediately while the
+            # third-party repo can lag (~24h), making a combined preset (3/4) briefly
+            # unsatisfiable. Report that clearly instead of a cryptic apt failure.
+            if ! apt-get install -s $NGINX_PKGS >/dev/null 2>&1; then
+                print_warning "Dependency resolution failed for the selected nginx package set."
+                print_warning "Possible causes:"
+                print_warning "  - a package is not available for this distribution codename or architecture;"
+                print_warning "  - a temporary nginx version skew between repos (presets 3/4): nginx.org modules"
+                print_warning "    need 'nginx-r<ver>' while third-party modules pin 'nginx (= <ver>)', and the"
+                print_warning "    third-party repo may lag (~24h) right after a new nginx stable release."
+                print_warning "Options: re-run later, or install nginx with modules from only ONE repo."
+                print_message "apt resolver output (tail):"
+                apt-get install -s $NGINX_PKGS 2>&1 | tail -n 15
+                print_warning "Skipping nginx installation."
+                [ -n "$NGINX_BK" ] && print_warning "Your previous nginx setup is backed up in: $NGINX_BK"
+            # Keep existing conffiles on a conflict (preserves the migrated config);
+            # confdef/confold make the install non-interactive and predictable.
+            elif apt-get install -y \
+                    -o Dpkg::Options::=--force-confold \
+                    -o Dpkg::Options::=--force-confdef \
+                    $NGINX_PKGS; then
+                print_success "nginx installed successfully"
+                echo ""
+                if command -v nginx >/dev/null 2>&1; then
+                    print_message "Installed nginx version:"
+                    nginx -v 2>&1 || true
+                fi
+                if command -v apt-cache >/dev/null 2>&1; then
+                    print_message "nginx package source after install (apt-cache policy nginx):"
+                    apt-cache policy nginx 2>/dev/null || true
+                fi
+
+                # Validate config before (re)starting so a broken migration does
+                # not take the service down.
+                if command -v nginx >/dev/null 2>&1 && nginx -t 2>&1; then
+                    print_success "nginx configuration test passed"
+                    if command -v systemctl >/dev/null 2>&1; then
+                        systemctl enable --now nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+                        if systemctl is-active --quiet nginx; then
+                            print_success "nginx is running"
+                        else
+                            print_warning "nginx is not active; check 'systemctl status nginx'"
+                        fi
+                    fi
+                else
+                    print_warning "nginx -t reported a problem; NOT starting nginx to avoid serving a broken config."
+                    [ -n "$NGINX_BK" ] && print_warning "Restore the previous setup from: $NGINX_BK (etc-nginx.tar.gz, packages.txt)."
+                fi
+
+                if [ -n "$NGINX_BK" ]; then
+                    print_message "Migration backup kept at: $NGINX_BK"
+                    print_warning "Old site configs are preserved in /etc/nginx; new package configs (if any) were saved as *.dpkg-dist."
+                fi
+                print_warning "Dynamic modules are installed but NOT auto-enabled."
+                print_warning "Add the matching 'load_module .../modules/<name>.so;' lines to the top of /etc/nginx/nginx.conf,"
+                print_warning "then run 'nginx -t && systemctl reload nginx'. Installed *.so live under /etc/nginx/modules/ or /usr/lib/nginx/modules/."
+            else
+                print_warning "Failed to install one or more nginx packages: $NGINX_PKGS"
+                [ -n "$NGINX_BK" ] && print_warning "Your previous nginx setup is backed up in: $NGINX_BK"
             fi
-            print_warning "Dynamic modules are installed but NOT auto-enabled."
-            print_warning "Add the matching 'load_module .../modules/<name>.so;' lines to the top of /etc/nginx/nginx.conf,"
-            print_warning "then run 'nginx -t && systemctl reload nginx'. Installed *.so live under /etc/nginx/modules/ or /usr/lib/nginx/modules/."
-        else
-            print_warning "Failed to install one or more nginx packages: $NGINX_PKGS"
         fi
         echo ""
     fi
