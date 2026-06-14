@@ -3549,6 +3549,22 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                             print_message "Moved distro modules-enabled/*.conf to backup (nginx.org loads modules via nginx.conf)."
                         fi
                         ;;
+                    5|6)
+                        # myguard uses Debian-style package names, so the upgrade is
+                        # in place (no removal). myguard's nginx pulls NEW libs
+                        # (libssl-nginx, libz-ng2), so a plain "apt upgrade" would
+                        # hold it back; an explicit install handles that. Add every
+                        # currently installed nginx package to the set so they all
+                        # move to the myguard version together and no distro module
+                        # is left orphaned against the new ABI.
+                        MG_INSTALLED="$(dpkg-query -W -f='${Package} ${Status}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
+                            | awk '/ install ok installed$/{print $1}' | sort -u | tr '\n' ' ')"
+                        MG_INSTALLED="$(echo "$MG_INSTALLED" | xargs 2>/dev/null)"
+                        if [ -n "$MG_INSTALLED" ]; then
+                            print_message "Upgrading existing nginx packages in place to deb.myguard.nl: $MG_INSTALLED"
+                            NGINX_PKGS="$(echo "$NGINX_PKGS $MG_INSTALLED" | tr ',' ' ' | xargs 2>/dev/null)"
+                        fi
+                        ;;
                 esac
             fi
 
