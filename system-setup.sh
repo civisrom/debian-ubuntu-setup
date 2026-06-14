@@ -3605,25 +3605,26 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     apt-cache policy nginx 2>/dev/null || true
                 fi
 
-                # myguard ships NDK (ngx_devel_kit) as a SEPARATE dynamic module
-                # that several modules link against (array-var, set-misc, lua, ...);
-                # it must load FIRST. myguard numbers every module "50-", so
-                # "50-mod-http-array-var.conf" sorts before "50-mod-http-ndk.conf"
-                # and fails with "undefined symbol: ndk_set_var_value". Force NDK
-                # to load first by giving it the lowest prefix.
+                # myguard ships base modules (NDK, stream, mail) as SEPARATE
+                # dynamic modules that many others link against, but numbers every
+                # conf "50-". Since modules-enabled/*.conf load in alphabetical
+                # order, a dependent like 50-mod-http-array-var.conf or
+                # 50-mod-http-keyval.conf can sort before 50-mod-http-ndk.conf /
+                # 50-mod-stream.conf and fail with "undefined symbol"
+                # (ndk_set_var_value, ngx_stream_add_variable, ...). Force the base
+                # modules to load first via low numeric prefixes (00-,01-,02-).
                 if [ -d /etc/nginx/modules-enabled ]; then
-                    for _ndk in /etc/nginx/modules-enabled/*mod-http-ndk.conf; do
-                        [ -e "$_ndk" ] || continue
-                        case "$_ndk" in
-                            */00-mod-http-ndk.conf) ;;  # already first
-                            *)
-                                _ndk_tgt="$(readlink -f "$_ndk" 2>/dev/null)"
-                                [ -n "$_ndk_tgt" ] || _ndk_tgt="/usr/share/nginx/modules-available/mod-http-ndk.conf"
-                                rm -f "$_ndk"
-                                ln -sf "$_ndk_tgt" /etc/nginx/modules-enabled/00-mod-http-ndk.conf
-                                print_message "Reordered NDK module to load first (00-mod-http-ndk.conf)."
-                                ;;
-                        esac
+                    _bm_i=0
+                    for _bm in mod-http-ndk mod-stream mod-mail; do
+                        for _cur in /etc/nginx/modules-enabled/*"$_bm".conf; do
+                            [ -e "$_cur" ] || continue
+                            _bm_tgt="$(readlink -f "$_cur" 2>/dev/null)"
+                            [ -n "$_bm_tgt" ] || _bm_tgt="/usr/share/nginx/modules-available/$_bm.conf"
+                            rm -f "$_cur"
+                            ln -sf "$_bm_tgt" "/etc/nginx/modules-enabled/0${_bm_i}-${_bm}.conf"
+                            print_message "Reordered base module $_bm to load early (0${_bm_i}-${_bm}.conf)."
+                        done
+                        _bm_i=$((_bm_i + 1))
                     done
                 fi
 
