@@ -1952,9 +1952,10 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "Do you want to add an upstream Nginx repository?"
         print_message "Available Nginx repositories (Debian & Ubuntu):"
-        print_message "  1. nginx.org      - Official Nginx stable packages (https://nginx.org/en/linux_packages.html)"
-        print_message "  2. deb.myguard.nl - Third-party Nginx builds (https://deb.myguard.nl/)"
-        print_warning "Enable only ONE of them to avoid conflicting nginx packages."
+        print_message "  1. nginx.org         - Official Nginx stable packages (https://nginx.org/en/linux_packages.html)"
+        print_message "  2. deb.myguard.nl    - Third-party Nginx builds (https://deb.myguard.nl/)"
+        print_message "  3. nginx-modules.com - Dynamic modules for Nginx stable (https://www.nginx-modules.com/)"
+        print_warning "Pick only ONE Nginx package source (1 or 2); option 3 only adds modules and pairs with the official nginx.org repo."
 
         # Official nginx.org repository
         read -r -p "   Add official nginx.org repository? (y/N): " ADD_NGINX_ORG
@@ -1964,13 +1965,22 @@ if [ "$INTERACTIVE" = true ]; then
         read -r -p "   Add third-party deb.myguard.nl Nginx repository? (y/N): " ADD_NGINX_MYGUARD
         ADD_NGINX_MYGUARD=${ADD_NGINX_MYGUARD:-n}
 
+        # nginx-modules.com (Blendbyte) dynamic modules repository
+        read -r -p "   Add nginx-modules.com (Blendbyte) modules repository? (y/N): " ADD_NGINX_MODULES
+        ADD_NGINX_MODULES=${ADD_NGINX_MODULES:-n}
+
         if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
            { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
-            print_warning "Both Nginx repositories selected: deb.myguard.nl has the higher APT pin priority and will win."
+            print_warning "Both Nginx package repositories selected: deb.myguard.nl has the higher APT pin priority and will win."
+        fi
+        if { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; } && \
+           { [ "$ADD_NGINX_ORG" != "y" ] && [ "$ADD_NGINX_ORG" != "Y" ]; }; then
+            print_warning "nginx-modules.com modules are built for the official nginx.org build; enabling nginx.org (option 1) too is recommended."
         fi
     else
         ADD_NGINX_ORG="n"
         ADD_NGINX_MYGUARD="n"
+        ADD_NGINX_MODULES="n"
     fi
 
     # Ask about disabling IPv6 in /etc/network/interfaces
@@ -2122,6 +2132,7 @@ else
     INSTALL_PHP_EXTENSIONS="n"
     ADD_NGINX_ORG="n"
     ADD_NGINX_MYGUARD="n"
+    ADD_NGINX_MODULES="n"
     COMMENT_IPV6_INTERFACES="n"
     DISABLE_IPV6_NETPLAN="n"
     INSTALL_GO="n"
@@ -2279,6 +2290,9 @@ if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
     fi
     if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
         print_message "  Third-party deb.myguard.nl Nginx repo:      YES"
+    fi
+    if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
+        print_message "  nginx-modules.com (Blendbyte) modules repo: YES"
     fi
 fi
 print_message "  Comment IPv6 in /etc/network/interfaces: $([ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ] && echo "YES" || echo "NO")"
@@ -3128,7 +3142,8 @@ fi
 
 if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
    { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ] || \
-     [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
+     [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ] || \
+     [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; }; then
     print_message "Adding upstream Nginx repositories..."
     echo ""
 
@@ -3227,6 +3242,43 @@ NGINX_PIN
             echo ""
         fi
 
+        # ---- nginx-modules.com (Blendbyte) dynamic modules repository ----
+        if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
+            print_message "Adding nginx-modules.com (Blendbyte) repository ($NGINX_CODENAME)..."
+
+            install -d -m 0755 /etc/apt/keyrings
+
+            # Import the Blendbyte signing key into a dedicated keyring
+            if curl -fsSL https://apt.blendbyte.net/nginx/blendbyte-archive-keyring.gpg \
+                -o /etc/apt/keyrings/blendbyte.gpg 2>/dev/null; then
+                chmod 0644 /etc/apt/keyrings/blendbyte.gpg
+
+                # Modules repository source for this codename
+                echo "deb [arch=$NGINX_ARCH signed-by=/etc/apt/keyrings/blendbyte.gpg] https://apt.blendbyte.net/nginx $NGINX_CODENAME main" \
+                    > /etc/apt/sources.list.d/blendbyte.list
+
+                # Pin Blendbyte so its nginx-module-* packages are preferred and
+                # stay sourced from this repo on upgrades. Same safe range as the
+                # other Nginx repos: > 500 beats the distro, < 1000 forbids
+                # forced downgrades. Two stanzas match by site and by signed
+                # Release metadata (Origin: Blendbyte).
+                cat > /etc/apt/preferences.d/99blendbyte <<'BLENDBYTE_PIN'
+Package: *
+Pin: origin apt.blendbyte.net
+Pin-Priority: 900
+
+Package: *
+Pin: release o=Blendbyte
+Pin-Priority: 900
+BLENDBYTE_PIN
+
+                print_success "nginx-modules.com (Blendbyte) repository added"
+            else
+                print_warning "Failed to import Blendbyte signing key, skipping modules repository"
+            fi
+            echo ""
+        fi
+
         # Refresh package lists with the new repositories
         print_message "Updating package lists with new Nginx repositories..."
         if apt-get update; then
@@ -3237,6 +3289,9 @@ NGINX_PIN
             fi
             if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
                 print_message "  ✓ deb.myguard.nl (third-party nginx)"
+            fi
+            if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
+                print_message "  ✓ nginx-modules.com (Blendbyte modules)"
             fi
 
             # Verify the pinning: show which repository nginx now resolves to.
@@ -6617,6 +6672,9 @@ if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
     fi
     if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
         print_message "- Third-party deb.myguard.nl Nginx repository added"
+    fi
+    if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
+        print_message "- nginx-modules.com (Blendbyte) modules repository added"
     fi
 fi
 
