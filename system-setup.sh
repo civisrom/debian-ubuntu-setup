@@ -3466,7 +3466,23 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
             print_warning "Both nginx.org and deb.myguard.nl are enabled: the 'nginx' package resolves to deb.myguard.nl (pin 901)."
         fi
         print_message "Installing nginx packages: $NGINX_PKGS"
-        if apt-get install -y $NGINX_PKGS; then
+
+        # Dry-run first to catch a temporary dynamic-module version skew. Both
+        # nginx.org modules (Depends: nginx-r<ver>) and Blendbyte modules
+        # (Depends: nginx (= <ver>)) pin nginx to one exact version. Right after
+        # a new nginx stable release nginx.org bumps immediately while the
+        # third-party repo can lag (~24h), making a combined preset (3/4) briefly
+        # unsatisfiable. Report that clearly instead of a cryptic apt failure.
+        if ! apt-get install -s $NGINX_PKGS >/dev/null 2>&1; then
+            print_warning "Dependency resolution failed for the selected nginx package set."
+            print_warning "Likely a temporary nginx version skew between repositories:"
+            print_warning "  nginx.org modules need 'nginx-r<ver>'; third-party modules pin 'nginx (= <ver>)'."
+            print_warning "  Just after a new nginx stable release the third-party repo may lag (~24h)."
+            print_warning "Options: re-run later, or install nginx with modules from only ONE repo."
+            print_message "apt resolver output (tail):"
+            apt-get install -s $NGINX_PKGS 2>&1 | tail -n 15
+            print_warning "Skipping nginx installation."
+        elif apt-get install -y $NGINX_PKGS; then
             print_success "nginx installed successfully"
             echo ""
             if command -v nginx >/dev/null 2>&1; then
