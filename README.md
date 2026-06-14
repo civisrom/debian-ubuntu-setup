@@ -96,6 +96,7 @@ sudo ./system-setup.sh
 | **4** | **ВСЁ**: `nginx` + официальные модули + все модули Blendbyte | nginx.org + nginx-modules.com |
 | **5** | `nginx-full` | deb.myguard.nl |
 | **6** | `nginx-extras` (максимальный набор) | deb.myguard.nl |
+| **8** | **curated lean**: `nginx` + stream, stream-geoip2, http-upstream-fair, http-subs-filter, http-geoip2, http-echo, http-dav-ext, http-auth-pam (эквивалент дистрибутивного `nginx-full`, готов для x-ui-pro, без «зоопарка» из ~110 модулей) | deb.myguard.nl |
 | **7** | **custom** — только перечисленные вами пакеты | любой включённый |
 
 Дополнительно есть поле **Extra packages** — любые пакеты, дописываемые к любому

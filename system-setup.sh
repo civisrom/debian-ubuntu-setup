@@ -2003,9 +2003,12 @@ if [ "$INTERACTIVE" = true ]; then
                 if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
                     print_message "  5) deb.myguard.nl: nginx-full"
                     print_message "  6) deb.myguard.nl: nginx-extras (maximal module set)"
+                    print_message "  8) deb.myguard.nl: nginx + curated lean modules (stream, stream-geoip2,"
+                    print_message "       http-upstream-fair, http-subs-filter, http-geoip2, http-echo,"
+                    print_message "       http-dav-ext, http-auth-pam) — distro-nginx-full equivalent, x-ui-pro ready"
                 fi
                 print_message "  7) custom (install only the package names you list below)"
-                read -r -p "Preset [1-7]: " NGINX_INSTALL_VARIANT
+                read -r -p "Preset [1-8]: " NGINX_INSTALL_VARIANT
 
                 if [ "$NGINX_INSTALL_VARIANT" = "7" ]; then
                     # Show a copy-paste catalogue of packages available from the
@@ -3424,6 +3427,10 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
     # Dynamic-module package sets, kept in sync with each repository's catalogue
     NGINX_ORG_MODULES="nginx-module-njs nginx-module-geoip nginx-module-image-filter nginx-module-xslt nginx-module-perl nginx-module-otel nginx-module-acme"
     BLENDBYTE_MODULES="nginx-module-brotli nginx-module-brotli-static nginx-module-cache-purge nginx-module-dav-ext nginx-module-fancyindex nginx-module-geoip2 nginx-module-headers-more nginx-module-modsecurity nginx-module-stream-geoip2 nginx-module-substitutions nginx-module-zstd nginx-module-zstd-static"
+    # Lean myguard module set (Debian-style libnginx-mod-* names) — equivalent to
+    # the distro nginx-full subset commonly used (e.g. by x-ui-pro), without the
+    # ~110-module zoo that exceeds nginx's module limit.
+    MYGUARD_CURATED_MODULES="libnginx-mod-stream libnginx-mod-stream-geoip2 libnginx-mod-http-upstream-fair libnginx-mod-http-subs-filter libnginx-mod-http-geoip2 libnginx-mod-http-echo libnginx-mod-http-dav-ext libnginx-mod-http-auth-pam"
 
     NGINX_PKGS=""
     NGINX_VARIANT_OK="y"
@@ -3475,6 +3482,13 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
             ;;
         7)  # custom: only the packages the user listed
             NGINX_PKGS=""
+            ;;
+        8)  # deb.myguard.nl: nginx + curated lean module set
+            if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+                NGINX_PKGS="nginx nginx-common $MYGUARD_CURATED_MODULES"
+            else
+                NGINX_VARIANT_OK="n"
+            fi
             ;;
         *)
             NGINX_VARIANT_OK="n"
@@ -3570,6 +3584,21 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                         if [ -n "$MG_INSTALLED" ]; then
                             print_message "Upgrading existing nginx packages in place to deb.myguard.nl: $MG_INSTALLED"
                             NGINX_PKGS="$(echo "$NGINX_PKGS $MG_INSTALLED" | tr ',' ' ' | xargs 2>/dev/null)"
+                        fi
+                        ;;
+                    8)
+                        # Lean myguard preset: keep ONLY the curated module set.
+                        # Remove the distro nginx stack first so the distro
+                        # nginx-full metapackage (and its module zoo) is gone and
+                        # is not dragged back in; the curated myguard packages are
+                        # then installed fresh. modules-enabled is left in place
+                        # (myguard is Debian-style and re-creates the needed links).
+                        DISTRO_NGINX_PKGS="$(dpkg-query -W -f='${Package} ${Status}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
+                            | awk '/ install ok installed$/{print $1}' | sort -u | tr '\n' ' ')"
+                        DISTRO_NGINX_PKGS="$(echo "$DISTRO_NGINX_PKGS" | xargs 2>/dev/null)"
+                        if [ -n "$DISTRO_NGINX_PKGS" ]; then
+                            print_message "Removing existing nginx packages for the lean myguard install: $DISTRO_NGINX_PKGS"
+                            apt-get remove -y $DISTRO_NGINX_PKGS || print_warning "Some nginx packages could not be removed"
                         fi
                         ;;
                 esac
