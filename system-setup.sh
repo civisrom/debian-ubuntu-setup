@@ -3278,6 +3278,9 @@ NGINX_PIN
 
                 print_success "Official nginx.org repository added"
             else
+                # gpg --dearmor -o creates the target before reading stdin, so a
+                # failed download can leave an empty keyring; remove it.
+                rm -f /usr/share/keyrings/nginx-archive-keyring.gpg
                 print_warning "Failed to import nginx.org signing key, skipping official repository"
             fi
             echo ""
@@ -3475,9 +3478,11 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
         # unsatisfiable. Report that clearly instead of a cryptic apt failure.
         if ! apt-get install -s $NGINX_PKGS >/dev/null 2>&1; then
             print_warning "Dependency resolution failed for the selected nginx package set."
-            print_warning "Likely a temporary nginx version skew between repositories:"
-            print_warning "  nginx.org modules need 'nginx-r<ver>'; third-party modules pin 'nginx (= <ver>)'."
-            print_warning "  Just after a new nginx stable release the third-party repo may lag (~24h)."
+            print_warning "Possible causes:"
+            print_warning "  - a package is not available for this distribution codename or architecture;"
+            print_warning "  - a temporary nginx version skew between repos (presets 3/4): nginx.org modules"
+            print_warning "    need 'nginx-r<ver>' while third-party modules pin 'nginx (= <ver>)', and the"
+            print_warning "    third-party repo may lag (~24h) right after a new nginx stable release."
             print_warning "Options: re-run later, or install nginx with modules from only ONE repo."
             print_message "apt resolver output (tail):"
             apt-get install -s $NGINX_PKGS 2>&1 | tail -n 15
