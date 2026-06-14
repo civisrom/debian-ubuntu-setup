@@ -2024,10 +2024,17 @@ if [ "$INTERACTIVE" = true ]; then
                         echo "    nginx-module-brotli nginx-module-brotli-static nginx-module-cache-purge nginx-module-dav-ext nginx-module-fancyindex nginx-module-geoip2 nginx-module-headers-more nginx-module-modsecurity nginx-module-stream-geoip2 nginx-module-substitutions nginx-module-zstd nginx-module-zstd-static"
                     fi
                     if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-                        echo "  # deb.myguard.nl metapackages:"
-                        echo "    nginx nginx-common nginx-core nginx-full nginx-light nginx-extras nginx-minimal"
-                        echo "  # deb.myguard.nl also ships ~130 libnginx-mod-* modules; after setup list them with:"
-                        echo "    apt-cache search '^libnginx-mod-'"
+                        echo "  # deb.myguard.nl base (always include these two):"
+                        echo "    nginx nginx-common"
+                        echo "  # deb.myguard.nl modules are named libnginx-mod-* (Debian-style). Common picks:"
+                        echo "    libnginx-mod-stream libnginx-mod-stream-geoip2 libnginx-mod-http-geoip2"
+                        echo "    libnginx-mod-http-headers-more-filter libnginx-mod-http-brotli libnginx-mod-http-modsecurity"
+                        echo "    libnginx-mod-http-cache-purge libnginx-mod-http-fancyindex libnginx-mod-http-dav-ext"
+                        echo "    libnginx-mod-http-subs-filter libnginx-mod-http-lua libnginx-mod-http-ndk"
+                        echo "    libnginx-mod-http-upstream-fair libnginx-mod-mail"
+                        echo "  # TIP: use 'nginx' + only the libnginx-mod-* you need — NOT nginx-full"
+                        echo "  #      (its ~110 modules exceed nginx's module limit and break nginx -t)."
+                        echo "  # Full list of available modules after setup:  apt-cache search '^libnginx-mod-'"
                     fi
                     echo ""
                     print_message "Enter packages separated by spaces OR commas"
