@@ -3605,6 +3605,28 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     apt-cache policy nginx 2>/dev/null || true
                 fi
 
+                # myguard ships NDK (ngx_devel_kit) as a SEPARATE dynamic module
+                # that several modules link against (array-var, set-misc, lua, ...);
+                # it must load FIRST. myguard numbers every module "50-", so
+                # "50-mod-http-array-var.conf" sorts before "50-mod-http-ndk.conf"
+                # and fails with "undefined symbol: ndk_set_var_value". Force NDK
+                # to load first by giving it the lowest prefix.
+                if [ -d /etc/nginx/modules-enabled ]; then
+                    for _ndk in /etc/nginx/modules-enabled/*mod-http-ndk.conf; do
+                        [ -e "$_ndk" ] || continue
+                        case "$_ndk" in
+                            */00-mod-http-ndk.conf) ;;  # already first
+                            *)
+                                _ndk_tgt="$(readlink -f "$_ndk" 2>/dev/null)"
+                                [ -n "$_ndk_tgt" ] || _ndk_tgt="/usr/share/nginx/modules-available/mod-http-ndk.conf"
+                                rm -f "$_ndk"
+                                ln -sf "$_ndk_tgt" /etc/nginx/modules-enabled/00-mod-http-ndk.conf
+                                print_message "Reordered NDK module to load first (00-mod-http-ndk.conf)."
+                                ;;
+                        esac
+                    done
+                fi
+
                 # Validate config before (re)starting so a broken migration does
                 # not take the service down.
                 if command -v nginx >/dev/null 2>&1 && nginx -t 2>&1; then
