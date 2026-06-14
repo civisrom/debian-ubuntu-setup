@@ -1977,10 +1977,48 @@ if [ "$INTERACTIVE" = true ]; then
            { [ "$ADD_NGINX_ORG" != "y" ] && [ "$ADD_NGINX_ORG" != "Y" ]; }; then
             print_warning "nginx-modules.com modules are built for the official nginx.org build; enabling nginx.org (option 1) too is recommended."
         fi
+
+        # Offer to install nginx now, with a flexible choice of module set.
+        INSTALL_NGINX="n"
+        NGINX_INSTALL_VARIANT=""
+        NGINX_CUSTOM_PKGS=""
+        if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } || \
+           { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
+            echo ""
+            read -r -p "Install nginx now from the selected repository? (y/N): " INSTALL_NGINX
+            INSTALL_NGINX=${INSTALL_NGINX:-n}
+
+            if [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; then
+                echo ""
+                print_message "Choose an nginx install preset (only presets for the repos you enabled are valid):"
+                if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+                    print_message "  1) nginx.org: nginx only (standard built-in modules)"
+                    print_message "  2) nginx.org: nginx + official dynamic modules (njs, geoip, image-filter, xslt, perl, otel, acme)"
+                fi
+                if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
+                   { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; }; then
+                    print_message "  3) nginx.org + ALL Blendbyte modules (brotli, modsecurity, headers-more, zstd, geoip2, ...)"
+                    print_message "  4) nginx.org: EVERYTHING (nginx + official modules + ALL Blendbyte modules)"
+                fi
+                if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+                    print_message "  5) deb.myguard.nl: nginx-full"
+                    print_message "  6) deb.myguard.nl: nginx-extras (maximal module set)"
+                fi
+                print_message "  7) custom (install only the package names you list below)"
+                read -r -p "Preset [1-7]: " NGINX_INSTALL_VARIANT
+
+                echo ""
+                print_message "Optionally add extra package names to the install (space-separated), or leave empty."
+                read -r -p "Extra packages: " NGINX_CUSTOM_PKGS
+            fi
+        fi
     else
         ADD_NGINX_ORG="n"
         ADD_NGINX_MYGUARD="n"
         ADD_NGINX_MODULES="n"
+        INSTALL_NGINX="n"
+        NGINX_INSTALL_VARIANT=""
+        NGINX_CUSTOM_PKGS=""
     fi
 
     # Ask about disabling IPv6 in /etc/network/interfaces
@@ -2133,6 +2171,9 @@ else
     ADD_NGINX_ORG="n"
     ADD_NGINX_MYGUARD="n"
     ADD_NGINX_MODULES="n"
+    INSTALL_NGINX="n"
+    NGINX_INSTALL_VARIANT=""
+    NGINX_CUSTOM_PKGS=""
     COMMENT_IPV6_INTERFACES="n"
     DISABLE_IPV6_NETPLAN="n"
     INSTALL_GO="n"
@@ -2293,6 +2334,9 @@ if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
     fi
     if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
         print_message "  nginx-modules.com (Blendbyte) modules repo: YES"
+    fi
+    if [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; then
+        print_message "  Install nginx now:                          YES (preset ${NGINX_INSTALL_VARIANT:-?})"
     fi
 fi
 print_message "  Comment IPv6 in /etc/network/interfaces: $([ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ] && echo "YES" || echo "NO")"
@@ -3304,6 +3348,112 @@ BLENDBYTE_PIN
             fi
         else
             print_warning "Failed to update package lists after adding Nginx repositories"
+        fi
+        echo ""
+    fi
+fi
+
+# ============================================
+# INSTALL NGINX (with selectable module set)
+# ============================================
+
+if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
+   { [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; }; then
+
+    # Dynamic-module package sets, kept in sync with each repository's catalogue
+    NGINX_ORG_MODULES="nginx-module-njs nginx-module-geoip nginx-module-image-filter nginx-module-xslt nginx-module-perl nginx-module-otel nginx-module-acme"
+    BLENDBYTE_MODULES="nginx-module-brotli nginx-module-brotli-static nginx-module-cache-purge nginx-module-dav-ext nginx-module-fancyindex nginx-module-geoip2 nginx-module-headers-more nginx-module-modsecurity nginx-module-stream-geoip2 nginx-module-substitutions nginx-module-zstd nginx-module-zstd-static"
+
+    NGINX_PKGS=""
+    NGINX_VARIANT_OK="y"
+
+    case "$NGINX_INSTALL_VARIANT" in
+        1)  # nginx.org: nginx only
+            if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+                NGINX_PKGS="nginx"
+            else
+                NGINX_VARIANT_OK="n"
+            fi
+            ;;
+        2)  # nginx.org: nginx + official dynamic modules
+            if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+                NGINX_PKGS="nginx $NGINX_ORG_MODULES"
+            else
+                NGINX_VARIANT_OK="n"
+            fi
+            ;;
+        3)  # nginx.org + ALL Blendbyte modules
+            if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
+               { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; }; then
+                NGINX_PKGS="nginx $BLENDBYTE_MODULES"
+            else
+                NGINX_VARIANT_OK="n"
+            fi
+            ;;
+        4)  # nginx.org: EVERYTHING (nginx + official modules + all Blendbyte modules)
+            if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
+               { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; }; then
+                NGINX_PKGS="nginx $NGINX_ORG_MODULES $BLENDBYTE_MODULES"
+            else
+                NGINX_VARIANT_OK="n"
+            fi
+            ;;
+        5)  # deb.myguard.nl: nginx-full
+            if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+                NGINX_PKGS="nginx-full"
+            else
+                NGINX_VARIANT_OK="n"
+            fi
+            ;;
+        6)  # deb.myguard.nl: nginx-extras (maximal module set)
+            if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+                NGINX_PKGS="nginx-extras"
+            else
+                NGINX_VARIANT_OK="n"
+            fi
+            ;;
+        7)  # custom: only the packages the user listed
+            NGINX_PKGS=""
+            ;;
+        *)
+            NGINX_VARIANT_OK="n"
+            ;;
+    esac
+
+    # Always honour any extra packages the user specified
+    if [ -n "$NGINX_CUSTOM_PKGS" ]; then
+        NGINX_PKGS="$NGINX_PKGS $NGINX_CUSTOM_PKGS"
+    fi
+
+    # Trim whitespace
+    NGINX_PKGS="$(echo "$NGINX_PKGS" | xargs 2>/dev/null)"
+
+    if [ "$NGINX_VARIANT_OK" != "y" ]; then
+        print_warning "Selected nginx preset '$NGINX_INSTALL_VARIANT' requires a repository that was not enabled; skipping nginx installation."
+    elif [ -z "$NGINX_PKGS" ]; then
+        print_warning "No nginx packages resolved for the chosen preset; skipping nginx installation."
+    else
+        if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
+           { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
+            print_warning "Both nginx.org and deb.myguard.nl are enabled: the 'nginx' package resolves to deb.myguard.nl (pin 901)."
+        fi
+        print_message "Installing nginx packages: $NGINX_PKGS"
+        if apt-get install -y $NGINX_PKGS; then
+            print_success "nginx installed successfully"
+            echo ""
+            if command -v nginx >/dev/null 2>&1; then
+                print_message "Installed nginx version and build configuration:"
+                nginx -v 2>&1 || true
+            fi
+            if command -v apt-cache >/dev/null 2>&1; then
+                print_message "nginx package source after install (apt-cache policy nginx):"
+                apt-cache policy nginx 2>/dev/null || true
+            fi
+            print_warning "Dynamic modules are installed but NOT auto-enabled."
+            print_warning "Add the matching 'load_module .../modules/<name>.so;' lines to the top of /etc/nginx/nginx.conf,"
+            print_warning "then run 'nginx -t && systemctl reload nginx'. Installed *.so live under /etc/nginx/modules/ or /usr/lib/nginx/modules/."
+        else
+            print_warning "Failed to install one or more nginx packages: $NGINX_PKGS"
         fi
         echo ""
     fi
@@ -6675,6 +6825,10 @@ if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
     fi
     if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
         print_message "- nginx-modules.com (Blendbyte) modules repository added"
+    fi
+    if { [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; } && command -v nginx >/dev/null 2>&1; then
+        print_message "- nginx installed ($(nginx -v 2>&1 | sed 's#.*/##'))"
+        print_message "  Remember to enable dynamic modules via load_module in /etc/nginx/nginx.conf"
     fi
 fi
 
