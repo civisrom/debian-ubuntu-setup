@@ -1946,7 +1946,33 @@ if [ "$INTERACTIVE" = true ]; then
         INSTALL_PHP_CLI="n"
         INSTALL_PHP_EXTENSIONS="n"
     fi
-    
+
+    # Ask about upstream Nginx repositories (available for both Debian and Ubuntu)
+    if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+        echo ""
+        print_message "Do you want to add an upstream Nginx repository?"
+        print_message "Available Nginx repositories (Debian & Ubuntu):"
+        print_message "  1. nginx.org      - Official Nginx stable packages (https://nginx.org/en/linux_packages.html)"
+        print_message "  2. deb.myguard.nl - Third-party Nginx builds (https://deb.myguard.nl/)"
+        print_warning "Enable only ONE of them to avoid conflicting nginx packages."
+
+        # Official nginx.org repository
+        read -r -p "   Add official nginx.org repository? (y/N): " ADD_NGINX_ORG
+        ADD_NGINX_ORG=${ADD_NGINX_ORG:-n}
+
+        # Third-party deb.myguard.nl repository
+        read -r -p "   Add third-party deb.myguard.nl Nginx repository? (y/N): " ADD_NGINX_MYGUARD
+        ADD_NGINX_MYGUARD=${ADD_NGINX_MYGUARD:-n}
+
+        if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
+           { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
+            print_warning "Both Nginx repositories selected: deb.myguard.nl has the higher APT pin priority and will win."
+        fi
+    else
+        ADD_NGINX_ORG="n"
+        ADD_NGINX_MYGUARD="n"
+    fi
+
     # Ask about disabling IPv6 in /etc/network/interfaces
     print_header "───────────────────────────────────────────────"
     print_header "   Miscellaneous"
@@ -2094,6 +2120,8 @@ else
     ADD_PPA_TOOLCHAIN="n"
     INSTALL_PHP_CLI="n"
     INSTALL_PHP_EXTENSIONS="n"
+    ADD_NGINX_ORG="n"
+    ADD_NGINX_MYGUARD="n"
     COMMENT_IPV6_INTERFACES="n"
     DISABLE_IPV6_NETPLAN="n"
     INSTALL_GO="n"
@@ -2243,6 +2271,14 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
     fi
     if [ "$ADD_PPA_TOOLCHAIN" = "y" ] || [ "$ADD_PPA_TOOLCHAIN" = "Y" ]; then
         print_message "    - Ubuntu Toolchain: YES"
+    fi
+fi
+if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+        print_message "  Official nginx.org repository:               YES"
+    fi
+    if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+        print_message "  Third-party deb.myguard.nl Nginx repo:      YES"
     fi
 fi
 print_message "  Comment IPv6 in /etc/network/interfaces: $([ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ] && echo "YES" || echo "NO")"
@@ -3082,8 +3118,107 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
     else
         print_warning "Failed to update package lists after adding PPAs"
     fi
-    
+
     echo ""
+fi
+
+# ============================================
+# ADD UPSTREAM NGINX REPOSITORIES (Debian & Ubuntu)
+# ============================================
+
+if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
+   { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ] || \
+     [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
+    print_message "Adding upstream Nginx repositories..."
+    echo ""
+
+    # Ensure prerequisites for fetching keys and resolving the distro codename
+    NGINX_REPO_PREREQS=""
+    command -v curl >/dev/null 2>&1 || NGINX_REPO_PREREQS="$NGINX_REPO_PREREQS curl"
+    command -v gpg >/dev/null 2>&1  || NGINX_REPO_PREREQS="$NGINX_REPO_PREREQS gnupg2"
+    command -v lsb_release >/dev/null 2>&1 || NGINX_REPO_PREREQS="$NGINX_REPO_PREREQS lsb-release"
+    [ -e /etc/ssl/certs/ca-certificates.crt ] || NGINX_REPO_PREREQS="$NGINX_REPO_PREREQS ca-certificates"
+    if [ -n "$NGINX_REPO_PREREQS" ]; then
+        print_message "Installing prerequisites:$NGINX_REPO_PREREQS"
+        apt-get install -y $NGINX_REPO_PREREQS || print_warning "Failed to install some prerequisites, continuing..."
+    fi
+
+    # Resolve the distribution codename (e.g. bookworm, jammy, noble) and architecture
+    NGINX_CODENAME="$(lsb_release -cs 2>/dev/null)"
+    if [ -z "$NGINX_CODENAME" ] && [ -r /etc/os-release ]; then
+        NGINX_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-$UBUNTU_CODENAME}")"
+    fi
+    NGINX_ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+
+    if [ -z "$NGINX_CODENAME" ]; then
+        print_warning "Could not determine distribution codename; skipping Nginx repositories"
+    else
+        # ---- Official nginx.org repository ----
+        if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+            print_message "Adding official nginx.org repository ($OS $NGINX_CODENAME)..."
+
+            # Import the official nginx signing key into a dedicated keyring
+            if curl -fsSL https://nginx.org/keys/nginx_signing.key \
+                | gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg 2>/dev/null; then
+                chmod 0644 /usr/share/keyrings/nginx-archive-keyring.gpg
+
+                # Stable repository source (path differs per OS: ubuntu vs debian)
+                echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$OS $NGINX_CODENAME nginx" \
+                    > /etc/apt/sources.list.d/nginx.list
+
+                # Pin nginx.org so its packages are preferred over the distro's
+                printf 'Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n' \
+                    > /etc/apt/preferences.d/99nginx
+
+                print_success "Official nginx.org repository added"
+            else
+                print_warning "Failed to import nginx.org signing key, skipping official repository"
+            fi
+            echo ""
+        fi
+
+        # ---- Third-party deb.myguard.nl repository (nginx) ----
+        if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+            print_message "Adding third-party deb.myguard.nl Nginx repository ($NGINX_CODENAME, $NGINX_ARCH)..."
+
+            install -d -m 0755 /etc/apt/keyrings
+
+            # Import the deb.myguard.nl signing key into a dedicated keyring
+            if curl -fsSL https://deb.myguard.nl/deb.myguard.nl.gpg \
+                -o /etc/apt/keyrings/deb.myguard.nl.gpg 2>/dev/null; then
+                chmod 0644 /etc/apt/keyrings/deb.myguard.nl.gpg
+
+                # Nginx-only repository source for this codename
+                echo "deb [arch=$NGINX_ARCH signed-by=/etc/apt/keyrings/deb.myguard.nl.gpg] https://deb.myguard.nl/apt/nginx/$NGINX_CODENAME $NGINX_CODENAME main" \
+                    > /etc/apt/sources.list.d/myguard-nginx.list
+
+                # Pin deb.myguard.nl (matches the upstream myguard.deb pinning)
+                printf 'Package: *\nPin: origin deb.myguard.nl\nPin-Priority: 901\n' \
+                    > /etc/apt/preferences.d/99myguard
+
+                print_success "Third-party deb.myguard.nl Nginx repository added"
+            else
+                print_warning "Failed to import deb.myguard.nl signing key, skipping third-party repository"
+            fi
+            echo ""
+        fi
+
+        # Refresh package lists with the new repositories
+        print_message "Updating package lists with new Nginx repositories..."
+        if apt-get update; then
+            print_success "Package lists updated successfully"
+            print_message "Added Nginx repositories:"
+            if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+                print_message "  ✓ nginx.org (official, https://nginx.org/packages/$OS)"
+            fi
+            if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+                print_message "  ✓ deb.myguard.nl (third-party nginx)"
+            fi
+        else
+            print_warning "Failed to update package lists after adding Nginx repositories"
+        fi
+        echo ""
+    fi
 fi
 
 # ============================================
@@ -6440,6 +6575,15 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
                 print_message "  ✓ ppa:ubuntu-toolchain-r/test (Latest GCC)"
             fi
         fi
+    fi
+fi
+
+if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
+        print_message "- Official nginx.org repository added (https://nginx.org/packages/$OS)"
+    fi
+    if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
+        print_message "- Third-party deb.myguard.nl Nginx repository added"
     fi
 fi
 
