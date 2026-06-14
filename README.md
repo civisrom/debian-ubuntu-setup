@@ -167,6 +167,29 @@ apt-cache search '^libnginx-mod-'
 > `tar xzf /var/backups/nginx-migration-<дата>/etc-nginx.tar.gz -C /` и
 > переустановить пакеты из `packages.txt`.
 
+### Полное удаление nginx
+
+Если nginx уже установлен, скрипт **первым делом** предлагает его полностью удалить
+(пункт взаимоисключающий с установкой). При подтверждении выполняется:
+
+1. **Бэкап** `/etc/nginx` → `/var/backups/nginx-removal-<дата>/etc-nginx.tar.gz`
+   + список пакетов (`packages.txt`).
+2. Остановка и отключение службы (`systemctl stop/disable`, `pkill`).
+3. **Purge** всех пакетов `nginx*` и `libnginx-mod-*` (только реально установленных,
+   определяются через `dpkg-query`).
+4. `apt-get autoremove --purge` — удаление ненужных больше зависимостей.
+5. Удаление остатков: бинарников (`/usr/sbin/nginx`, `/usr/bin/nginx`), каталогов
+   (`/etc/nginx`, `/usr/share/nginx`, `/usr/lib/nginx`, `/var/log/nginx`,
+   `/var/lib/nginx`), systemd-юнитов и symlink-ов.
+6. Удаление добавленных скриптом репозиториев, пинов и ключей (nginx.org,
+   deb.myguard.nl, Blendbyte).
+7. `systemctl daemon-reload`, сброс хэша шелла и проверка, что бинаря не осталось.
+
+> ⚠️ Операция деструктивная, по умолчанию выключена (в т.ч. в неинтерактивном
+> режиме). Бэкап `/etc/nginx` делается **до** любых изменений. Откат:
+> `sudo tar xzf /var/backups/nginx-removal-<дата>/etc-nginx.tar.gz -C /` и
+> переустановка пакетов из `packages.txt`.
+
 ### Включение динамических модулей
 
 Динамические модули устанавливаются как `.so`, но **не включаются автоматически**.

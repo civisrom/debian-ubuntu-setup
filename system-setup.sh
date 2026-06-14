@@ -1949,6 +1949,25 @@ if [ "$INTERACTIVE" = true ]; then
 
     # Ask about upstream Nginx repositories (available for both Debian and Ubuntu)
     if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+        # Offer COMPLETE removal of an existing nginx first (mutually exclusive
+        # with installing). Only asked when nginx is actually present.
+        REMOVE_NGINX="n"
+        if command -v nginx >/dev/null 2>&1 || \
+           dpkg-query -W -f='${Status}' nginx 2>/dev/null | grep -q "install ok installed"; then
+            echo ""
+            print_warning "An existing nginx installation was detected."
+            print_message "Complete removal will back up /etc/nginx, then PURGE all nginx"
+            print_message "packages and modules and delete configs, binaries, unused"
+            print_message "dependencies, module symlinks and leftover directories."
+            read -r -p "Completely REMOVE nginx (purge everything)? (y/N): " REMOVE_NGINX
+            REMOVE_NGINX=${REMOVE_NGINX:-n}
+        fi
+
+        if [ "$REMOVE_NGINX" = "y" ] || [ "$REMOVE_NGINX" = "Y" ]; then
+            # Removal mode — skip all repo/install questions.
+            ADD_NGINX_ORG="n"; ADD_NGINX_MYGUARD="n"; ADD_NGINX_MODULES="n"
+            INSTALL_NGINX="n"; NGINX_INSTALL_VARIANT=""; NGINX_CUSTOM_PKGS=""; MIGRATE_NGINX="n"
+        else
         echo ""
         print_message "Do you want to add an upstream Nginx repository?"
         print_message "Available Nginx repositories (Debian & Ubuntu):"
@@ -2068,7 +2087,9 @@ if [ "$INTERACTIVE" = true ]; then
                 fi
             fi
         fi
+        fi
     else
+        REMOVE_NGINX="n"
         ADD_NGINX_ORG="n"
         ADD_NGINX_MYGUARD="n"
         ADD_NGINX_MODULES="n"
@@ -2232,6 +2253,7 @@ else
     NGINX_INSTALL_VARIANT=""
     NGINX_CUSTOM_PKGS=""
     MIGRATE_NGINX="n"
+    REMOVE_NGINX="n"
     COMMENT_IPV6_INTERFACES="n"
     DISABLE_IPV6_NETPLAN="n"
     INSTALL_GO="n"
@@ -2384,6 +2406,9 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
     fi
 fi
 if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    if [ "$REMOVE_NGINX" = "y" ] || [ "$REMOVE_NGINX" = "Y" ]; then
+        print_message "  Completely REMOVE nginx:                    YES (backup /etc/nginx + purge all)"
+    fi
     if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
         print_message "  Official nginx.org repository:               YES"
     fi
@@ -3238,6 +3263,79 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         print_warning "Failed to update package lists after adding PPAs"
     fi
 
+    echo ""
+fi
+
+# ============================================
+# REMOVE NGINX COMPLETELY (Debian & Ubuntu)
+# ============================================
+
+if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
+   { [ "$REMOVE_NGINX" = "y" ] || [ "$REMOVE_NGINX" = "Y" ]; }; then
+    print_message "Completely removing nginx (packages, modules, configs, binaries, deps, symlinks)..."
+
+    # 1. Back up /etc/nginx first
+    NGINX_RM_BK=""
+    if [ -d /etc/nginx ]; then
+        NGINX_RM_BK="/var/backups/nginx-removal-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$NGINX_RM_BK"
+        if tar czf "$NGINX_RM_BK/etc-nginx.tar.gz" -C / etc/nginx 2>/dev/null; then
+            print_success "Backed up /etc/nginx to $NGINX_RM_BK/etc-nginx.tar.gz"
+        else
+            print_warning "Could not archive /etc/nginx"
+        fi
+        dpkg-query -W -f='${Package} ${Version}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
+            > "$NGINX_RM_BK/packages.txt" || true
+    fi
+
+    # 2. Stop and disable the service
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop nginx 2>/dev/null || true
+        systemctl disable nginx 2>/dev/null || true
+    fi
+    pkill -x nginx 2>/dev/null || true
+
+    # 3. Purge all nginx packages and dynamic modules
+    NGINX_RM_PKGS="$(dpkg-query -W -f='${Package} ${Status}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
+        | awk '/ install ok installed$/{print $1}' | sort -u | tr '\n' ' ')"
+    NGINX_RM_PKGS="$(echo "$NGINX_RM_PKGS" | xargs 2>/dev/null)"
+    if [ -n "$NGINX_RM_PKGS" ]; then
+        print_message "Purging packages: $NGINX_RM_PKGS"
+        apt-get purge -y $NGINX_RM_PKGS || print_warning "Some packages could not be purged"
+    else
+        print_message "No nginx packages registered with dpkg."
+    fi
+
+    # 4. Remove dependencies that are no longer required
+    apt-get autoremove -y --purge || true
+
+    # 5. Remove leftover files, dirs, orphan binaries and module symlinks
+    rm -f /usr/sbin/nginx /usr/bin/nginx
+    rm -rf /etc/nginx /usr/share/nginx /usr/lib/nginx /var/log/nginx /var/lib/nginx /run/nginx.pid
+    rm -f /lib/systemd/system/nginx.service /usr/lib/systemd/system/nginx.service \
+          /etc/systemd/system/nginx.service /etc/systemd/system/multi-user.target.wants/nginx.service
+    rm -rf /etc/systemd/system/nginx.service.d
+
+    # 6. Remove upstream repo definitions, pins and keys added by this script
+    rm -f /etc/apt/sources.list.d/nginx.list \
+          /etc/apt/sources.list.d/myguard-nginx.list \
+          /etc/apt/sources.list.d/blendbyte.list
+    rm -f /etc/apt/preferences.d/99nginx \
+          /etc/apt/preferences.d/99myguard \
+          /etc/apt/preferences.d/99blendbyte
+    rm -f /usr/share/keyrings/nginx-archive-keyring.gpg \
+          /etc/apt/keyrings/deb.myguard.nl.gpg \
+          /etc/apt/keyrings/blendbyte.gpg
+
+    # 7. Reload systemd, clear shell hash, verify
+    command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+    hash -r 2>/dev/null || true
+    if [ -e /usr/sbin/nginx ] || command -v nginx >/dev/null 2>&1; then
+        print_warning "An nginx binary may still be present; inspect manually with: command -v nginx"
+    else
+        print_success "nginx fully removed."
+    fi
+    [ -n "$NGINX_RM_BK" ] && print_message "Config backup kept at: $NGINX_RM_BK"
     echo ""
 fi
 
@@ -7070,6 +7168,14 @@ if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
 fi
 
 if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    if [ "$REMOVE_NGINX" = "y" ] || [ "$REMOVE_NGINX" = "Y" ]; then
+        if [ -e /usr/sbin/nginx ] || command -v nginx >/dev/null 2>&1; then
+            print_warning "- nginx removal requested but a binary may remain — check 'command -v nginx'"
+        else
+            print_message "- nginx completely removed (packages, configs, binaries, deps, symlinks)"
+        fi
+        [ -n "${NGINX_RM_BK:-}" ] && print_message "  Config backup: $NGINX_RM_BK"
+    fi
     if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
         print_message "- Official nginx.org repository added (https://nginx.org/packages/$OS)"
     fi
