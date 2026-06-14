@@ -3627,6 +3627,21 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     done
                 fi
 
+                # myguard's large module set occasionally enables a module conf
+                # whose .so is not actually present (or named differently),
+                # causing nginx -t to fail with "cannot open shared object file".
+                # Disable any modules-enabled conf whose referenced .so is missing.
+                if [ -d /etc/nginx/modules-enabled ]; then
+                    for _mc in /etc/nginx/modules-enabled/*.conf; do
+                        [ -e "$_mc" ] || continue
+                        _so="$(sed -n 's/.*load_module[[:space:]]\+modules\/\([^;]*\.so\);.*/\1/p' "$_mc" 2>/dev/null | head -1)"
+                        if [ -n "$_so" ] && [ ! -e "/usr/share/nginx/modules/$_so" ] && [ ! -e "/usr/lib/nginx/modules/$_so" ]; then
+                            print_warning "Disabling $(basename "$_mc"): module file $_so not found."
+                            rm -f "$_mc"
+                        fi
+                    done
+                fi
+
                 # Validate config before (re)starting so a broken migration does
                 # not take the service down.
                 if command -v nginx >/dev/null 2>&1 && nginx -t 2>&1; then
