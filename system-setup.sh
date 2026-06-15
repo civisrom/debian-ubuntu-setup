@@ -60,6 +60,37 @@ print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+# True when the kernel has IPv6 disabled (module absent or sysctl disable_ipv6=1).
+# On such hosts nginx cannot bind "listen [::]:80/443" and aborts on start / -t,
+# which in turn aborts the nginx package install (postinst service start).
+nginx_ipv6_is_disabled() {
+    [ ! -f /proc/net/if_inet6 ] && return 0
+    [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" = "1" ] && return 0
+    return 1
+}
+
+# Strip IPv6 "listen [::]:..." directives shipped in the distro default site /
+# conf.d files. On IPv6-disabled hosts these break "nginx -t" and the service.
+nginx_strip_ipv6_listen() {
+    local f
+    for f in /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default \
+             /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/*.conf; do
+        [ -f "$f" ] || continue
+        sed -i -E '/^[[:space:]]*listen[[:space:]]+\[::\]:/d' "$f"
+    done
+}
+
+# Stop Debian maintainer scripts from (re)starting services during apt, so the
+# nginx postinst cannot abort the install when it fails to bind [::] on an
+# IPv6-disabled host. Paired calls; always unblock afterwards.
+nginx_block_service_autostart() {
+    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+    chmod 0755 /usr/sbin/policy-rc.d
+}
+nginx_unblock_service_autostart() {
+    rm -f /usr/sbin/policy-rc.d
+}
+
 print_recorded_items() {
     local title="$1"
     shift
@@ -3704,6 +3735,17 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
 
             print_message "Installing nginx packages: $NGINX_PKGS"
 
+            # On IPv6-disabled hosts the nginx package ships "listen [::]:80/443"
+            # in its default site; nginx fails to bind it and the postinst aborts
+            # the install. Block service autostart during apt so the install
+            # completes, then strip those directives before the config test.
+            NGINX_IPV6_GUARD="n"
+            if nginx_ipv6_is_disabled; then
+                NGINX_IPV6_GUARD="y"
+                print_message "IPv6 is disabled on this host; guarding nginx install against listen [::] failures."
+                nginx_block_service_autostart
+            fi
+
             # Dry-run first to catch a temporary dynamic-module version skew. Both
             # nginx.org modules (Depends: nginx-r<ver>) and Blendbyte modules
             # (Depends: nginx (= <ver>)) pin nginx to one exact version. Right after
@@ -3730,6 +3772,13 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     $NGINX_PKGS; then
                 print_success "nginx installed successfully"
                 echo ""
+
+                # IPv6-disabled host: remove the [::] listen directives the
+                # package shipped so the upcoming "nginx -t" and service start
+                # do not fail (mirrors the manual "edit config + re-run" fix).
+                if [ "$NGINX_IPV6_GUARD" = "y" ]; then
+                    nginx_strip_ipv6_listen
+                fi
                 if command -v nginx >/dev/null 2>&1; then
                     print_message "Installed nginx version:"
                     nginx -v 2>&1 || true
@@ -3802,8 +3851,25 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                 print_warning "Add the matching 'load_module .../modules/<name>.so;' lines to the top of /etc/nginx/nginx.conf,"
                 print_warning "then run 'nginx -t && systemctl reload nginx'. Installed *.so live under /etc/nginx/modules/ or /usr/lib/nginx/modules/."
             else
-                print_warning "Failed to install one or more nginx packages: $NGINX_PKGS"
-                [ -n "$NGINX_BK" ] && print_warning "Your previous nginx setup is backed up in: $NGINX_BK"
+                # On an IPv6-disabled host a leftover [::] listen can still leave
+                # the install half-configured; strip it and finish the install.
+                if [ "$NGINX_IPV6_GUARD" = "y" ]; then
+                    nginx_strip_ipv6_listen
+                    if dpkg --configure -a 2>/dev/null && apt-get install -y -f; then
+                        print_success "nginx install completed after removing IPv6 listen directives"
+                    else
+                        print_warning "Failed to install one or more nginx packages: $NGINX_PKGS"
+                        [ -n "$NGINX_BK" ] && print_warning "Your previous nginx setup is backed up in: $NGINX_BK"
+                    fi
+                else
+                    print_warning "Failed to install one or more nginx packages: $NGINX_PKGS"
+                    [ -n "$NGINX_BK" ] && print_warning "Your previous nginx setup is backed up in: $NGINX_BK"
+                fi
+            fi
+
+            # Always re-enable service autostart after the nginx package install.
+            if [ "$NGINX_IPV6_GUARD" = "y" ]; then
+                nginx_unblock_service_autostart
             fi
         fi
         echo ""
