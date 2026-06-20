@@ -3965,7 +3965,17 @@ EOF
         else
             print_warning "Failed to download custom .zshrc, using default"
         fi
-        
+
+        # Download custom .zshenv (sets PATH for non-interactive shells too —
+        # .zshrc returns early for those, so ~/.local/bin must come from here)
+        print_message "Downloading custom .zshenv configuration..."
+        if sudo -u "$NEW_USERNAME" curl -fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/refs/heads/main/config/.zshenv -o "$USER_HOME/.zshenv"; then
+            print_message "Custom .zshenv downloaded successfully"
+            sudo -u "$NEW_USERNAME" chmod 644 "$USER_HOME/.zshenv"
+        else
+            print_warning "Failed to download custom .zshenv, using default"
+        fi
+
         # Change default shell to zsh
         print_message "Changing default shell to zsh for $NEW_USERNAME"
         chsh -s "$(which zsh)" "$NEW_USERNAME"

@@ -1,7 +1,10 @@
 # Загружать пользовательские настройки только для интерактивных shell.
 [[ -o interactive ]] || return 0
 # If you come from bash you might have to change your $PATH.
-# export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
+# ~/.local/bin holds user-installed tools (gh, ghx, pipx apps, ...). Keep it on
+# PATH for interactive shells. Non-interactive shells get it from ~/.zshenv
+# (this .zshrc returns early for them — see the guard at the top of the file).
+export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
 
 # Path to your Oh My Zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
