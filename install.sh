@@ -7,11 +7,13 @@
 
 set -euo pipefail
 
-SCRIPT_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh"
-CHECKSUM_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/system-setup.sh.sha256"
+REPOSITORY="civisrom/debian-ubuntu-setup"
+REPOSITORY_REF="main"
+COMMIT_API_URL="https://api.github.com/repos/${REPOSITORY}/commits/${REPOSITORY_REF}"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/system-setup.XXXXXX")"
 TEMP_SCRIPT="${TEMP_DIR}/system-setup.sh"
 TEMP_CHECKSUM="${TEMP_DIR}/system-setup.sha256"
+TEMP_COMMIT_META="${TEMP_DIR}/commit.json"
 
 # Cleanup temporary files on exit (normal, error, or interrupt)
 cleanup() {
@@ -78,8 +80,23 @@ if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
     fi
 fi
 
-# Download script
-print_message "Downloading setup script..."
+# Resolve main exactly once, then fetch both files from that immutable commit.
+print_message "Resolving immutable repository commit..."
+if ! download_file "$COMMIT_API_URL" "$TEMP_COMMIT_META" "repository commit metadata"; then
+    print_error "Failed to resolve repository commit"
+    exit 1
+fi
+RESOLVED_COMMIT=$(sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)",.*$/\1/p' "$TEMP_COMMIT_META" | head -1)
+if ! [[ "$RESOLVED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    print_error "Repository returned an invalid commit identifier"
+    exit 1
+fi
+rm -f "$TEMP_COMMIT_META"
+
+SCRIPT_URL="https://raw.githubusercontent.com/${REPOSITORY}/${RESOLVED_COMMIT}/system-setup.sh"
+CHECKSUM_URL="https://raw.githubusercontent.com/${REPOSITORY}/${RESOLVED_COMMIT}/system-setup.sh.sha256"
+
+print_message "Downloading setup script from commit ${RESOLVED_COMMIT:0:12}..."
 if download_file "$SCRIPT_URL" "$TEMP_SCRIPT" "setup script"; then
     print_message "Download complete"
 else
@@ -121,6 +138,7 @@ chmod +x "$TEMP_SCRIPT"
 
 # Run script (disable set -e to capture exit code properly)
 print_message "Running setup script..."
+export SYSTEM_SETUP_REPOSITORY_COMMIT="$RESOLVED_COMMIT"
 set +e
 if [ -t 0 ]; then
     bash "$TEMP_SCRIPT"

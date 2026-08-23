@@ -1,13 +1,20 @@
 name: Verify checksum integrity
 
-# Pull requests only. On push to main the auto-update workflow keeps the
-# checksum in sync, so running verify there caused a race condition where
-# verify would fail before update-checksum had a chance to commit the fix.
 on:
   pull_request:
     paths:
       - 'system-setup.sh'
       - 'system-setup.sh.sha256'
+  push:
+    branches:
+      - main
+    paths:
+      - 'system-setup.sh'
+      - 'system-setup.sh.sha256'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   verify:
@@ -15,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Verify checksum
         id: verify
@@ -64,4 +71,4 @@ jobs:
           echo "1. Run locally: \`./update-checksum.sh\`" >> $GITHUB_STEP_SUMMARY
           echo "2. Commit and push the updated \`system-setup.sh.sha256\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "On push to \`main\` / \`claude/**\` the auto-update workflow handles this automatically." >> $GITHUB_STEP_SUMMARY
+          echo "Update and commit both files in the same change." >> $GITHUB_STEP_SUMMARY

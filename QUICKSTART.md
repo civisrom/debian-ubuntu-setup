@@ -1,174 +1,65 @@
-# 🚀 Быстрый старт: Редактирование через браузер
+# Быстрый старт для изменений
 
-## ✨ Теперь можно редактировать через GitHub!
+## Локальная работа
 
-**Больше не нужно:**
-- ❌ Клонировать репозиторий
-- ❌ Устанавливать git
-- ❌ Вручную обновлять checksum
-- ❌ Запоминать команды
-
-**Просто редактируйте в браузере!** 🎉
-
----
-
-## 📝 Как редактировать system-setup.sh
-
-### Шаг 1: Откройте файл
-Перейдите на GitHub:
-```
-https://github.com/civisrom/debian-ubuntu-setup/blob/main/system-setup.sh
-```
-
-### Шаг 2: Нажмите "Edit" (карандаш)
-Кнопка справа вверху с иконкой карандаша ✏️
-
-### Шаг 3: Внесите изменения
-Редактируйте как в обычном текстовом редакторе
-
-### Шаг 4: Сохраните
-1. Прокрутите вниз
-2. Добавьте описание изменений (опционально)
-3. Нажмите **"Commit changes"**
-
-### Шаг 5: Подождите ~30 секунд
-GitHub Actions автоматически:
-- ✅ Пересчитает checksum
-- ✅ Обновит файл `.sha256`
-- ✅ Закоммитит изменения
-
-**Готово!** 🎉
-
----
-
-## 🔍 Как проверить статус
-
-### Вариант 1: Страница Actions
-```
-https://github.com/civisrom/debian-ubuntu-setup/actions
-```
-
-Найдите workflow **"Auto-update system-setup.sh checksum"**
-
-### Вариант 2: Коммиты
-Через ~30 секунд появится новый коммит:
-```
-Auto-update checksum for system-setup.sh [skip-checksum]
-```
-
-### Вариант 3: Проверка файла
-Откройте `system-setup.sh.sha256` - checksum должен измениться
-
----
-
-## 🎯 Примеры редактирования
-
-### Изменить версию пакета
-```bash
-# Найдите строку
-LATEST_GO_VERSION="go1.23.4"
-
-# Измените на
-LATEST_GO_VERSION="go1.24.0"
-```
-
-### Добавить новый пакет
-```bash
-# Найдите COMMON_PACKAGES=(
-COMMON_PACKAGES=(
-    htop
-    wget
-    # ... другие пакеты
-    ваш-новый-пакет  # Добавьте здесь
-)
-```
-
-### Изменить SSH порт по умолчанию
-```bash
-# Найдите
-SSH_PORT=${SSH_PORT:-22}
-
-# Измените на
-SSH_PORT=${SSH_PORT:-2222}
-```
-
----
-
-## 🐛 Что если что-то пошло не так?
-
-### Workflow не запустился
-
-**Проверьте:**
-1. Редактировали ли файл `system-setup.sh`? (не другой файл)
-2. На какой ветке? (должна быть `main` или `claude/**`)
-3. Прошло ли 30 секунд?
-
-**Решение:**
-- Зайдите в Actions → найдите workflow → проверьте логи
-
-### Checksum не обновился
-
-**Вручную запустите workflow:**
-1. Actions → "Auto-update system-setup.sh checksum"
-2. "Run workflow" → "Run workflow"
-
-**Или вручную обновите checksum:**
 ```bash
 git clone https://github.com/civisrom/debian-ubuntu-setup.git
 cd debian-ubuntu-setup
+
+# Внесите изменения, затем обновите checksum главного скрипта.
 ./update-checksum.sh
+
+# Минимальные локальные проверки.
+bash -n system-setup.sh install.sh install-nft-docker-watch.sh config/*.sh tests/*.sh
+sha256sum -c system-setup.sh.sha256
+bash tests/regression.sh
+
+git add system-setup.sh system-setup.sh.sha256
+git commit -m "Describe the change"
 git push
 ```
 
-### Ошибка permissions
+Если менялись другие файлы, добавьте их в commit вместе со скриптом и checksum.
+Workflow `Quality checks` дополнительно запускает ShellCheck, проверку Compose и
+systemd units.
 
-В настройках репозитория:
-1. Settings → Actions → General
-2. Workflow permissions
-3. Выберите: **"Read and write permissions"**
-4. Сохраните
+## Редактирование через GitHub
 
----
+Редактировать файл в браузере можно, но checksum больше не обновляется отдельным
+бот-коммитом. Поэтому для изменения `system-setup.sh` рекомендуется создать
+branch/PR, открыть его через `github.dev`, обновить оба файла и дождаться CI:
 
-## 📚 Дополнительная информация
+1. Измените `system-setup.sh`.
+2. В терминале web-редактора выполните `./update-checksum.sh`.
+3. Закоммитьте `system-setup.sh` и `system-setup.sh.sha256` вместе.
+4. Убедитесь, что проверки `Verify system-setup.sh checksum` и `Quality checks`
+   завершились успешно.
 
-Подробная документация:
-- [README.md](README.md) - Основная документация
-- [CHECKSUM-README.md](CHECKSUM-README.md) - Руководство по checksum
-- [.github/workflows/README.md](.github/workflows/README.md) - GitHub Actions
+Если checksum забыта, CI завершится с ошибкой. Исправление:
 
----
-
-## 💡 Подсказки
-
-### Быстрый доступ к редактированию
-Замените `github.com` на `github.dev` в URL для веб-редактора:
-```
-https://github.dev/civisrom/debian-ubuntu-setup/blob/main/system-setup.sh
+```bash
+./update-checksum.sh
+git add system-setup.sh system-setup.sh.sha256
+git commit -m "Update system setup checksum"
+git push
 ```
 
-### Предпросмотр изменений
-GitHub показывает diff перед сохранением - проверьте что все правильно!
+## Запуск установки
 
-### Отмена изменений
-Если что-то пошло не так:
-1. История → найдите предыдущий коммит
-2. "Revert" → подтвердите
+```bash
+sudo bash -c 'if ! command -v curl >/dev/null 2>&1; then apt-get update && apt-get install -y curl ca-certificates; fi; bash <(curl -4fsSL https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/install.sh)'
+```
 
----
+`install.sh` один раз разрешает `main` в commit SHA, затем скачивает главный
+скрипт и его checksum именно из этого commit. Это исключает рассинхронизацию
+двух загрузок при одновременном обновлении ветки. Перед запуском на важном
+сервере всё равно просмотрите `install.sh`: checksum из того же репозитория
+проверяет согласованность, а не независимую подлинность источника.
 
-## ✅ Резюме
+## Диагностика
 
-**Вы можете:**
-- ✅ Редактировать `system-setup.sh` в браузере GitHub
-- ✅ Не беспокоиться о checksum - обновится автоматически
-- ✅ Видеть статус в разделе Actions
-- ✅ Сразу использовать через `install.sh`
-
-**Больше не нужно:**
-- ❌ Локальный git
-- ❌ Команды терминала
-- ❌ Ручное обновление checksum
-- ❌ Специальные знания
-
-**Просто редактируйте и коммитьте!** 🚀
+- Ошибка checksum: выполните `./update-checksum.sh` и закоммитьте оба файла.
+- Красный `Quality checks`: откройте конкретный job и повторите указанную команду
+  локально.
+- Документация checksum: [CHECKSUM-README.md](CHECKSUM-README.md).
+- Описание CI: [.github/workflows/README.md](.github/workflows/README.md).

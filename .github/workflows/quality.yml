@@ -1,0 +1,46 @@
+name: Shell and configuration quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Bash syntax
+        run: |
+          bash -n install.sh system-setup.sh install-nft-docker-watch.sh update-checksum.sh
+          bash -n config/nft-apply.sh config/rustdesk-safe-update.sh tests/regression.sh
+
+      - name: ShellCheck
+        run: |
+          shellcheck --severity=warning install.sh install-nft-docker-watch.sh update-checksum.sh
+          shellcheck --severity=warning config/nft-apply.sh config/rustdesk-safe-update.sh tests/regression.sh
+          timeout 180 shellcheck --severity=error system-setup.sh
+
+      - name: Docker Compose validation
+        run: docker compose -f config/docker-compose.yml config -q
+
+      - name: systemd unit validation
+        run: |
+          cp config/rustdesk-compose.service /tmp/rustdesk-compose.service
+          cp config/rustdesk-update.service /tmp/rustdesk-update.service
+          cp config/rustdesk-update.timer /tmp/rustdesk-update.timer
+          sed -i 's#/usr/local/sbin/rustdesk-safe-update.sh#/bin/true#' /tmp/rustdesk-update.service
+          systemd-analyze verify /tmp/rustdesk-compose.service /tmp/rustdesk-update.service /tmp/rustdesk-update.timer
+
+      - name: Checksum integrity
+        run: sha256sum -c system-setup.sh.sha256
+
+      - name: Regression checks
+        run: bash tests/regression.sh

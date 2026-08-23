@@ -1,7 +1,6 @@
 [Unit]
 Description=Weekly RustDesk Docker Compose Auto-Update
 Documentation=https://github.com/civisrom/debian-ubuntu-setup
-Requires=rustdesk-update.service
 
 [Timer]
 # Fire every Sunday at 04:00 local time

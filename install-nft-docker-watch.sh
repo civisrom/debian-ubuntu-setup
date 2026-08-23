@@ -25,6 +25,10 @@ set -euo pipefail
 readonly NFT_CONF="/etc/nftables.conf"
 readonly NFT_APPLY_SCRIPT="/usr/local/sbin/nft-apply.sh"
 readonly NFT_BACKUP_DIR="/var/backups/nftables"
+readonly NFT_APPLY_SHA256="794165f7d0d93c2aacc457e8a9d7d8d4f9bed12370fe4705fdddcb7a40a4f9dc"
+readonly NFT_APPLY_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/config/nft-apply.sh"
+INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly INSTALLER_DIR
 
 readonly SERVICE_NAME="nftables-after-docker.service"
 readonly SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
@@ -69,7 +73,7 @@ check_root() {
 
 check_dependencies() {
     local missing=()
-    for cmd in nft systemctl docker; do
+    for cmd in nft systemctl docker flock sha256sum; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -107,7 +111,7 @@ do_uninstall() {
         if [[ -f "$f" ]]; then
             rm -f "$f"
             log_info "Удалён: $f"
-            ((removed++))
+            ((++removed))
         fi
     done
 
@@ -137,108 +141,38 @@ stop_existing() {
 
 create_apply_script() {
     log_info "Создаём скрипт применения: $NFT_APPLY_SCRIPT"
+    local source_path="${INSTALLER_DIR}/config/nft-apply.sh"
+    local temp_path=""
 
-    cat <<'SCRIPT' > "$NFT_APPLY_SCRIPT"
-#!/bin/bash
-# nft-apply.sh — валидация, бэкап, применение nftables-правил
-# Вызывается из systemd (nftables-after-docker.service)
-
-set -euo pipefail
-
-NFT_CONF="/etc/nftables.conf"
-NFT_BACKUP_DIR="/var/backups/nftables"
-DOCKER_WAIT_TIMEOUT=60
-DOCKER_SETTLE_DELAY=2
-LOG_TAG="nft-apply"
-
-log() { echo "$1" | systemd-cat -t "$LOG_TAG" -p "${2:-info}"; echo "$1"; }
-
-# ── Шаг 1: Ожидание готовности Docker ────────────────────────────────
-# Docker должен полностью стартовать, чтобы br-* интерфейсы существовали.
-# Без этого правила с iifname "br-..." загрузятся, но не будут матчить
-# трафик до появления интерфейсов (nft матчит по имени в runtime).
-log "Ожидание готовности Docker (таймаут: ${DOCKER_WAIT_TIMEOUT}с)..."
-
-waited=0
-while ! docker info &>/dev/null; do
-    if [[ $waited -ge $DOCKER_WAIT_TIMEOUT ]]; then
-        log "WARN: Docker не ответил за ${DOCKER_WAIT_TIMEOUT}с, применяю правила без ожидания" "warning"
-        break
-    fi
-    sleep 1
-    ((waited++))
-done
-
-if [[ $waited -lt $DOCKER_WAIT_TIMEOUT ]]; then
-    log "Docker готов (${waited}с). Пауза ${DOCKER_SETTLE_DELAY}с для инициализации сетей..."
-    sleep "$DOCKER_SETTLE_DELAY"
-fi
-
-# ── Шаг 2: Валидация синтаксиса ──────────────────────────────────────
-# nft -c = check mode (dry-run), не применяет правила.
-# Ловит синтаксические ошибки и отсутствующие include-файлы ДО flush ruleset.
-log "Валидация: nft -c -f $NFT_CONF"
-if ! nft_err=$(nft -c -f "$NFT_CONF" 2>&1); then
-    log "ОШИБКА валидации nftables! Правила НЕ применены." "err"
-    log "Вывод nft: $nft_err" "err"
-    exit 1
-fi
-log "Валидация пройдена"
-
-# ── Шаг 3: Бэкап текущего ruleset ────────────────────────────────────
-# Сохраняем текущие правила перед flush. При откате — nft -f backup_file.
-mkdir -p "$NFT_BACKUP_DIR"
-
-backup_file="${NFT_BACKUP_DIR}/ruleset-$(date +%Y%m%d-%H%M%S).nft"
-if nft list ruleset > "$backup_file" 2>/dev/null; then
-    log "Бэкап: $backup_file"
-    # Ротация: оставляем последние 10 бэкапов
-    # shellcheck disable=SC2012
-    ls -1t "${NFT_BACKUP_DIR}"/ruleset-*.nft 2>/dev/null | tail -n +11 | xargs -r rm -f
-else
-    log "Бэкап не удался (возможно, ruleset пуст)" "warning"
-fi
-
-# ── Шаг 4: Применение ────────────────────────────────────────────────
-log "Применение: nft -f $NFT_CONF"
-if ! nft_err=$(nft -f "$NFT_CONF" 2>&1); then
-    log "ОШИБКА применения nftables!" "err"
-    log "Вывод nft: $nft_err" "err"
-
-    # Попытка отката из бэкапа
-    if [[ -f "$backup_file" ]] && [[ -s "$backup_file" ]]; then
-        log "Откат из бэкапа: $backup_file" "warning"
-        if nft -f "$backup_file" 2>/dev/null; then
-            log "Откат успешен" "warning"
+    if [[ ! -f "$source_path" ]]; then
+        temp_path=$(mktemp "${TMPDIR:-/tmp}/nft-apply.XXXXXX")
+        if command -v curl >/dev/null 2>&1; then
+            if ! curl --ipv4 -fsSL --connect-timeout 15 --max-time 120 --retry 3 \
+                "$NFT_APPLY_URL" -o "$temp_path"; then
+                rm -f -- "$temp_path"
+                return 1
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if ! wget -4 -q --timeout=30 --tries=3 "$NFT_APPLY_URL" -O "$temp_path"; then
+                rm -f -- "$temp_path"
+                return 1
+            fi
         else
-            log "Откат НЕ удался! Ruleset может быть в неконсистентном состоянии." "crit"
+            log_error "Нужен curl или wget для загрузки $NFT_APPLY_URL"
+            rm -f -- "$temp_path"
+            return 1
         fi
+        source_path="$temp_path"
     fi
-    exit 1
-fi
 
-# ── Шаг 5: Верификация ───────────────────────────────────────────────
-# Проверяем что ключевые таблицы загружены.
-# table ip filter — основной фильтр (INPUT/FORWARD/OUTPUT)
-# table ip dockernat — DNAT/masquerade для контейнеров
-verify_ok=true
-for tbl in "table ip filter" "table ip dockernat" "table ip6 filter"; do
-    if ! nft list ruleset 2>/dev/null | grep -q "$tbl"; then
-        log "WARN: таблица '$tbl' не найдена после применения!" "warning"
-        verify_ok=false
+    if [[ "$(sha256sum "$source_path" | awk '{print $1}')" != "$NFT_APPLY_SHA256" ]]; then
+        log_error "SHA256 не совпадает для nft-apply.sh; установка отменена"
+        [[ -n "$temp_path" ]] && rm -f -- "$temp_path"
+        return 1
     fi
-done
-
-if $verify_ok; then
-    log "Верификация: все таблицы на месте"
-else
-    log "Верификация: некоторые таблицы отсутствуют (см. выше)" "warning"
-fi
-
-log "nftables правила успешно применены"
-SCRIPT
-
-    chmod 755 "$NFT_APPLY_SCRIPT"
+    bash -n "$source_path"
+    install -m 0755 -o root -g root "$source_path" "$NFT_APPLY_SCRIPT"
+    [[ -n "$temp_path" ]] && rm -f -- "$temp_path"
 }
 
 create_service() {
@@ -295,7 +229,7 @@ do_install() {
     fi
 
     # Создаём каталог бэкапов
-    mkdir -p "$NFT_BACKUP_DIR"
+    install -d -m 0700 -o root -g root "$NFT_BACKUP_DIR"
 
     create_apply_script
     create_service
@@ -311,7 +245,8 @@ do_install() {
     if systemctl start "$SERVICE_NAME"; then
         log_ok "Сервис запущен"
     else
-        log_warn "Сервис не запустился. Проверьте: journalctl -u $SERVICE_NAME"
+        log_error "Сервис не запустился. Проверьте: journalctl -u $SERVICE_NAME"
+        return 1
     fi
 
     echo ""
