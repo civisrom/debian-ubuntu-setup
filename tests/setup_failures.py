@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -400,6 +402,75 @@ write_file_atomic() { local temporary; temporary=$(mktemp); cat > "$temporary" &
                 self.assertEqual(main.read_text(), third_party)
                 self.assertIn(f"Suites: {codename} {codename}-updates", target.read_text())
                 self.assertEqual(target.read_text().count("Types: deb"), 2)
+
+    @unittest.skipUnless(shutil.which("flock"), "flock required for APT lock tests")
+    def test_apt_locks_are_waited_for_not_ignored(self):
+        lock = self.root / "lists-lock"
+        lock.touch()
+        body = function("wait_for_apt_locks") + """
+APT_LOCK_FILES=("$1")
+APT_LOCK_WAIT_SECONDS=$2
+wait_for_apt_locks
+"""
+        result = self.shell(body, lock, 600)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Waiting for another package manager", result.stdout)
+
+        # A held lock must fail loudly and name the file, never be skipped.
+        # New session: the lock is held by flock's child, so the whole process
+        # group has to go away before the lock is actually released.
+        holder = subprocess.Popen(
+            ["flock", str(lock), "sleep", "30"], start_new_session=True
+        )
+        release = lambda: os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
+        self.addCleanup(lambda: holder.poll() is None and release())
+        for _ in range(100):
+            if subprocess.run(["flock", "-n", str(lock), "true"]).returncode != 0:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("helper never acquired the lock")
+        result = self.shell(body, lock, 0)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(str(lock), result.stderr)
+
+        release()
+        holder.wait()
+        for _ in range(100):
+            if subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("lock was never released")
+        result = self.shell(body, lock, 600)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        # A lock file that does not exist is not an error.
+        result = self.shell(body, self.root / "absent", 600)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_apt_lock_timeout_is_exported_to_child_processes(self):
+        body = function("configure_apt_lock_timeout") + """
+SYSTEM_SETUP_TEMP_FILES=()
+APT_LOCK_WAIT_SECONDS=$1
+configure_apt_lock_timeout || exit 1
+bash -c 'cat -- "$APT_CONFIG"'
+"""
+        result = self.shell(body, 600)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('DPkg::Lock::Timeout "600";', result.stdout)
+
+        # An APT_CONFIG the caller already set must be kept, not discarded.
+        existing = self.root / "existing.conf"
+        existing.write_text('Acquire::ForceIPv4 "true";\n')
+        result = subprocess.run(
+            ["bash", "-c", "set -o pipefail\n" + LOGGING + body, "test", "600"],
+            text=True, capture_output=True, timeout=30,
+            env={**os.environ, "APT_CONFIG": str(existing)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Acquire::ForceIPv4 "true";', result.stdout)
+        self.assertIn('DPkg::Lock::Timeout "600";', result.stdout)
 
 
 if __name__ == "__main__":

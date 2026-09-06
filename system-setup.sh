@@ -511,6 +511,52 @@ is_yes() {
     [ "$1" = "y" ] || [ "$1" = "Y" ]
 }
 
+# Ubuntu's apt-daily / unattended-upgrades timers take the APT locks a few
+# minutes into a boot. Without a timeout apt aborts immediately ("Could not
+# get lock ... It is held by process N"), which failed unrelated package steps
+# and the installers this script downloads and runs.
+APT_LOCK_WAIT_SECONDS=600
+APT_LOCK_FILES=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
+                /var/lib/apt/lists/lock /var/cache/apt/archives/lock)
+
+# Applies to this script's own apt calls and, because APT_CONFIG is inherited,
+# to child installers too. APT_CONFIG is merged with the system configuration
+# rather than replacing it.
+configure_apt_lock_timeout() {
+    local config
+    config=$(mktemp "${TMPDIR:-/tmp}/system-setup-apt.XXXXXX") || return 1
+    SYSTEM_SETUP_TEMP_FILES+=("$config")
+    if [ -n "${APT_CONFIG:-}" ] && [ -r "$APT_CONFIG" ]; then
+        cat -- "$APT_CONFIG" > "$config" || return 1
+    fi
+    printf 'DPkg::Lock::Timeout "%s";\n' "$APT_LOCK_WAIT_SECONDS" >> "$config" || return 1
+    chmod 0644 "$config" || return 1
+    export APT_CONFIG="$config"
+}
+
+# Block until the locks are free before handing control to a child installer,
+# so a busy package manager is reported instead of looking like a hang.
+wait_for_apt_locks() {
+    local deadline=$((SECONDS + APT_LOCK_WAIT_SECONDS)) lock reported=false
+    command -v flock >/dev/null 2>&1 || return 0
+    for lock in "${APT_LOCK_FILES[@]}"; do
+        [ -e "$lock" ] || continue
+        while ! flock -n "$lock" true 2>/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                print_error "APT lock still held after ${APT_LOCK_WAIT_SECONDS}s: $lock"
+                return 1
+            fi
+            if [ "$reported" = false ]; then
+                print_message "Waiting for another package manager to release the APT locks..."
+                reported=true
+            fi
+            sleep 5
+        done
+    done
+    [ "$reported" = true ] && print_message "APT locks released; continuing"
+    return 0
+}
+
 SYSTEM_SETUP_TEMP_DIRS=()
 SYSTEM_SETUP_CREATED_TEMP_DIR=""
 
@@ -1000,6 +1046,8 @@ if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root"
     exit 1
 fi
+
+configure_apt_lock_timeout || print_warning "Could not set an APT lock timeout; package steps may fail while another package manager runs"
 
 # Detect if running interactively. When launched through a downloader wrapper,
 # stdin can be a pipe even though the user has a real terminal available.
@@ -6544,9 +6592,12 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
         }
         print_message "Installed to $SWAP_INSTALL_PATH for future use"
 
-        # Run swap-setup.sh based on selected mode
+        # swap-setup.sh installs zram-tools, so let any background apt run finish
         SWAP_SETUP_EXIT_CODE=0
-        if [ "$SWAP_INTERACTIVE" = true ]; then
+        wait_for_apt_locks || SWAP_SETUP_EXIT_CODE=1
+        if [ "$SWAP_SETUP_EXIT_CODE" -ne 0 ]; then
+            print_error "Skipping swap setup: the APT locks never became available"
+        elif [ "$SWAP_INTERACTIVE" = true ]; then
             print_message "Starting swap interactive wizard..."
             if bash "$SWAP_SCRIPT_PATH"; then
                 :
@@ -6709,7 +6760,10 @@ EOFWRAPPER
         print_message "Running BBR Network Optimizer with selected options..."
         print_message "Options: Force IPv4: $PARAM1, Full Update: $PARAM2, Fix Hosts: $PARAM3, Fix DNS: $PARAM4"
         echo ""
-        
+
+        # The optimizer runs apt-get update/upgrade of its own.
+        wait_for_apt_locks || print_warning "Continuing with busy APT locks; the optimizer may fail to install packages"
+
         if bash "$BBR_WRAPPER_PATH" "$BBR_SCRIPT_PATH" "$PARAM1" "$PARAM2" "$PARAM3" "$PARAM4"; then
             BBR_OK=true
             echo ""
