@@ -43,4 +43,8 @@ jobs:
         run: sha256sum -c system-setup.sh.sha256
 
       - name: Regression checks
-        run: bash tests/regression.sh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y 7zip openssh-server
+          sudo mkdir -p /run/sshd
+          bash tests/regression.sh

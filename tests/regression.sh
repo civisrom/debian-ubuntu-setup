@@ -62,4 +62,6 @@ if grep -qE '7z[[:space:]]+x[[:space:]]+-p[^[:space:]]' system-setup.sh; then
     fail "archive password is exposed in a 7z command argument"
 fi
 
+python3 tests/setup_failures.py
+
 printf 'Regression checks passed\n'

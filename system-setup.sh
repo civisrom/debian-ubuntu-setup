@@ -67,6 +67,211 @@ print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+prompt_read() {
+    if ! IFS= read "$@"; then
+        print_error "Input ended before configuration was complete; setup cancelled"
+        exit 1
+    fi
+}
+
+report_setup_result() {
+    local label="$1" result="${2:-false}"
+    if [ "$result" = true ]; then
+        print_message "- $label: completed and verified"
+    else
+        print_message "- $label: FAILED, skipped or incomplete; see execution log"
+    fi
+}
+
+install_user_public_key() {
+    local username="$1" key="$2" user_home key_tmp auth
+    user_home=$(getent passwd "$username" | cut -d: -f6)
+    id -u "$username" >/dev/null 2>&1 || return 1
+    [ -n "$user_home" ] && [ -d "$user_home" ] || return 1
+    key_tmp=$(mktemp) || return 1
+    printf '%s\n' "$key" > "$key_tmp"
+    if ! ssh-keygen -l -f "$key_tmp" >/dev/null 2>&1; then
+        rm -f -- "$key_tmp"
+        print_error "Invalid SSH public key for $username"
+        return 1
+    fi
+    rm -f -- "$key_tmp"
+    # Perform writes as the account owner: a symlink in an existing user's
+    # home must not turn this into a root-owned arbitrary file write.
+    sudo -u "$username" mkdir -p "$user_home/.ssh" || return 1
+    sudo -u "$username" chmod 700 "$user_home/.ssh" || return 1
+    auth="$user_home/.ssh/authorized_keys"
+    sudo -u "$username" touch "$auth" || return 1
+    sudo -u "$username" chmod 600 "$auth" || return 1
+    if ! sudo -u "$username" grep -Fxq -- "$key" "$auth"; then
+        sudo -u "$username" cp -p -- "$auth" "${auth}.backup.$(date +%Y%m%d-%H%M%S)~" || return 1
+        printf '%s\n' "$key" | sudo -u "$username" tee -a "$auth" >/dev/null || return 1
+    fi
+}
+
+strip_managed_block() {
+    local source_file="$1" block_name="$2"
+    awk -v begin="# BEGIN system-setup.sh managed $block_name" \
+        -v end="# END system-setup.sh managed $block_name" '
+        $0 == begin { if (skip) exit 2; skip=1; next }
+        $0 == end { if (!skip) exit 2; skip=0; next }
+        !skip { print }
+        END { if (skip) exit 2 }
+    ' "$source_file"
+}
+
+repository_has_release() {
+    local url="$1" codename="$2" metadata
+    metadata=$(mktemp) || return 1
+    if download_url_ipv4 "$url" "$metadata" && grep -Fxq "Codename: $codename" "$metadata"; then
+        rm -f -- "$metadata"
+        return 0
+    fi
+    rm -f -- "$metadata"
+    return 1
+}
+
+prepare_grub_ipv6() {
+    python3 - "$1" <<'PYGRUB'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    lines = stream.read().splitlines(keepends=True)
+names = ("GRUB_CMDLINE_LINUX_DEFAULT", "GRUB_CMDLINE_LINUX")
+seen = set()
+result = []
+for line in lines:
+    key = re.match(r"\s*(GRUB_CMDLINE_LINUX(?:_DEFAULT)?)=", line)
+    if not key:
+        result.append(line)
+        continue
+    name = key[1]
+    value = re.fullmatch(r'''(\s*\w+=)(?:"((?:\\.|[^"\\])*)"|'([^']*)'|([^\s#'"\\]*))([ \t]*(?:#.*)?)\n?''', line)
+    if name in seen or not value:
+        print("Ambiguous GRUB command line; configuration was left unchanged", file=sys.stderr)
+        sys.exit(1)
+    seen.add(name)
+    raw = next(v for v in value.groups()[1:4] if v is not None)
+    # Preserve shell expansions in double quotes and literal single-quoted data.
+    quote = "'" if value[3] is not None else '"'
+    if "ipv6.disable=1" not in raw.split():
+        raw = (raw + " ipv6.disable=1").strip()
+    result.append(value[1] + quote + raw + quote + value[5] + "\n")
+for name in names:
+    if name not in seen:
+        if result and not result[-1].endswith("\n"):
+            result[-1] += "\n"
+        result.append(name + '="ipv6.disable=1"\n')
+sys.stdout.write("".join(result))
+PYGRUB
+}
+
+# Password comes from stdin. A bare -p means an empty password in modern 7z,
+# preventing its normal password prompt from reading the supplied input.
+extract_7z_archive() {
+    local archive="$1" destination="$2" log_file result
+    log_file=$(mktemp) || return 1
+    if 7z x -y -o"$destination" "$archive" >"$log_file" 2>&1; then
+        rm -f -- "$log_file"
+        return 0
+    else
+        result=$?
+    fi
+    print_error "7z extraction failed (exit code: $result)"
+    tail -n 20 "$log_file" >&2
+    rm -f -- "$log_file"
+    return "$result"
+}
+
+# Select version, filename and digest from the same official metadata response.
+select_go_archive() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        releases = json.load(stream)
+    stable = [r for r in releases if r.get("stable") is True
+              and re.fullmatch(r"go\d+\.\d+\.\d+", r["version"])]
+    release = max(stable, key=lambda r: tuple(map(int, r["version"][2:].split("."))))
+    filename = f'{release["version"]}.linux-{sys.argv[2]}.tar.gz'
+    matches = [f for f in release["files"] if f.get("filename") == filename
+               and f.get("os") == "linux" and f.get("arch") == sys.argv[2]
+               and f.get("kind") == "archive"]
+    if len(matches) != 1 or not re.fullmatch(r"[0-9a-fA-F]{64}", matches[0]["sha256"]):
+        raise ValueError("missing or invalid archive checksum")
+    print(release["version"], filename, matches[0]["sha256"].lower())
+except (OSError, ValueError, KeyError, TypeError) as error:
+    print(f"Cannot select a verified Go archive: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+add_supported_ubuntu_ppa() {
+    local ppa="$1" release_file
+    release_file=$(mktemp) || return 1
+    # Do not add an unsupported suite: it would break later apt-get updates,
+    # including the update performed by the swap installer.
+    if ! download_url_ipv4 "https://ppa.launchpadcontent.net/${ppa#ppa:}/ubuntu/dists/${VERSION_CODENAME}/Release" "$release_file" ||
+       ! grep -Fxq "Codename: $VERSION_CODENAME" "$release_file"; then
+        rm -f -- "$release_file"
+        print_warning "Skipping $ppa: no verified Release metadata for $VERSION_CODENAME"
+        print_warning "If this PPA was added by an earlier run, disable its source before running apt-get update"
+        return 1
+    fi
+    rm -f -- "$release_file"
+    if add-apt-repository --no-update -y "$ppa"; then
+        print_success "$ppa added for $VERSION_CODENAME"
+        return 0
+    fi
+    print_error "Failed to add $ppa"
+    return 1
+}
+
+pin_user_git_checkout() {
+    local username="$1" checkout_dir="$2" commit="$3"
+    sudo -u "$username" git -C "$checkout_dir" fetch --depth=1 origin "$commit" &&
+        sudo -u "$username" git -C "$checkout_dir" checkout --detach "$commit"
+}
+
+# Validate global effective values, not just syntax. Earlier drop-ins can
+# otherwise silently override the choices shown in the final summary.
+verify_sshd_parameters() {
+    local managed_file="$1" effective parameter expected actual
+    effective=$(sshd -T) || return 1
+    while read -r parameter expected; do
+        [ -n "$parameter" ] && [[ "$parameter" != \#* ]] || continue
+        actual=$(awk -v key="${parameter,,}" '$1 == key {$1=""; sub(/^ /, ""); print}' <<< "$effective")
+        # sshd may output an accumulating directive on several lines.
+        actual=$(xargs <<< "$actual")
+        if [ "$actual" != "$expected" ]; then
+            print_error "Effective SSH $parameter is '$actual'; requested '$expected'. Resolve conflicting drop-ins or Match settings"
+            return 1
+        fi
+    done < "$managed_file"
+}
+
+remove_sshd_accumulating_parameters() {
+    local config="$1" temporary
+    temporary=$(mktemp) || return 1
+    # Port and AllowUsers accumulate instead of using the first value. Move
+    # selected global settings from the main file into our managed drop-in.
+    if awk -v change_port="${SSH_PORT:-}" -v change_users="${SSH_ALLOW_USERS:-}" '
+        tolower($1) == "match" { in_match=1 }
+        !in_match && tolower($1) == "port" && change_port != "" { next }
+        !in_match && tolower($1) == "allowusers" && change_users != "" { next }
+        { print }
+    ' "$config" > "$temporary" && write_file_atomic "$config" < "$temporary"; then
+        rm -f -- "$temporary"
+        return 0
+    fi
+    rm -f -- "$temporary"
+    return 1
+}
+
 # True when the kernel has IPv6 disabled (module absent or sysctl disable_ipv6=1).
 # On such hosts nginx cannot bind "listen [::]:80/443" and aborts on start / -t,
 # which in turn aborts the nginx package install (postinst service start).
@@ -133,7 +338,7 @@ nginx_restore_migration() {
     fi
     dpkg --configure -a || return 1
     nginx -t || return 1
-    systemctl enable --now nginx 2>/dev/null || return 1
+    systemctl enable nginx 2>/dev/null && systemctl restart nginx 2>/dev/null || return 1
 }
 
 # Stop Debian maintainer scripts from (re)starting services during apt, while
@@ -694,24 +899,17 @@ default_codename_for_release() {
 ensure_dns_works() {
     local caller_context="${1:-unknown}"
     local RESOLV_FILE="/etc/resolv.conf"
-    local resolved_active=false
-    local resolv_managed_by_resolved=false
     local resolv_is_symlink=false
 
     if [ -L "$RESOLV_FILE" ]; then
         resolv_is_symlink=true
-        local resolv_target
-        resolv_target=$(readlink -f "$RESOLV_FILE" 2>/dev/null || true)
-        if [[ "$resolv_target" == /run/systemd/resolve/* ]]; then
-            resolv_managed_by_resolved=true
-        fi
+
     fi
 
     # Step 1: Configure systemd-resolved with IPv4 upstream DNS (if active)
     # Writing to resolv.conf alone is insufficient when systemd-resolved manages it,
     # because resolved ignores resolv.conf and uses its own config for upstream DNS
     if systemctl is-active systemd-resolved &>/dev/null; then
-        resolved_active=true
         local RESOLVED_CONF="/etc/systemd/resolved.conf"
         local RESOLVED_DROP="/etc/systemd/resolved.conf.d"
 
@@ -807,8 +1005,8 @@ fi
 # stdin can be a pipe even though the user has a real terminal available.
 if [ -t 0 ]; then
     INTERACTIVE=true
-elif [ -r /dev/tty ]; then
-    exec < /dev/tty
+elif { exec 9</dev/tty; } 2>/dev/null; then
+    exec 0<&9 9<&-
     INTERACTIVE=true
     print_message "Attached to /dev/tty for interactive prompts"
 else
@@ -829,6 +1027,7 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _SCRI
 validate_nft_profiles_config() {
     local config_file="$1"
     local line stripped value
+    bash -n "$config_file" || return 1
 
     while IFS= read -r line || [ -n "$line" ]; do
         stripped="${line#"${line%%[![:space:]]*}"}"
@@ -844,7 +1043,7 @@ validate_nft_profiles_config() {
 
         if [[ "$stripped" =~ ^\[[0-9]+\]=\"(.*)\"$ ]]; then
             value="${BASH_REMATCH[1]}"
-            if [[ "$value" =~ [\$\`\;\&\|\<\>\\] ]]; then
+            if [[ "$value" =~ [\"\$\`\;\&\|\<\>\\] ]]; then
                 print_warning "Unsafe value in nftables profiles config: $config_file"
                 return 1
             fi
@@ -1030,7 +1229,7 @@ restore_live_nft_ruleset() {
     local live_backup="$1"
     local rollback_file="$2"
 
-    [ -s "$live_backup" ] || return 1
+    [ -f "$live_backup" ] || return 1
     build_nft_transaction "$live_backup" "$rollback_file" || return 1
     nft -c -f "$rollback_file" >/dev/null 2>&1 || return 1
     nft -f "$rollback_file"
@@ -1069,7 +1268,7 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
         echo "  3) Ubuntu 24.04 LTS (Noble)"
         echo "  4) Ubuntu 26.04 LTS (Resolute)"
         echo ""
-        read -r -p "Enter your choice [1-4]: " OS_CHOICE
+        prompt_read -r -p "Enter your choice [1-4]: " OS_CHOICE
         
         case $OS_CHOICE in
             1)
@@ -1122,7 +1321,7 @@ else
         if [ "$VERSION" != "12" ] && [ "$VERSION" != "13" ]; then
             print_warning "Detected Debian version: $VERSION (officially supported: 12, 13)"
             if [ "$INTERACTIVE" = true ]; then
-                read -r -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+                prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
                 CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
                 if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
                     exit 1
@@ -1136,7 +1335,7 @@ else
         if [ "$VERSION" != "24.04" ] && [ "$VERSION" != "26.04" ]; then
             print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04 LTS, 26.04 LTS)"
             if [ "$INTERACTIVE" = true ]; then
-                read -r -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+                prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
                 CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
                 if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
                     exit 1
@@ -1170,7 +1369,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  - Creates /opt/rustdesk with docker-compose.yml"
     print_message "  - Registers systemd service (rustdesk-compose.service)"
     print_message "  - Containers: hbbs (signal) + hbbr (relay)"
-    read -r -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
+    prompt_read -r -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
     INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
 
     # Ask about weekly auto-update timer (only when RustDesk is being installed)
@@ -1180,7 +1379,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  - Creates rustdesk-update.service + rustdesk-update.timer"
         print_message "  - Runs every Sunday at 04:00 (with ±1h random delay)"
         print_message "  - Resolves an immutable image digest, verifies health, and rolls back on failure"
-        read -r -p "Install weekly auto-update timer? (Y/n): " INSTALL_RUSTDESK_UPDATE
+        prompt_read -r -p "Install weekly auto-update timer? (Y/n): " INSTALL_RUSTDESK_UPDATE
         INSTALL_RUSTDESK_UPDATE=${INSTALL_RUSTDESK_UPDATE:-y}
     else
         INSTALL_RUSTDESK_UPDATE="n"
@@ -1196,12 +1395,12 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Extract additional files to /opt?"
     print_message "  - Downloads opt.7z and copies contents to /opt"
     print_message "  - Scripts in 'scripts' subfolder will be made executable"
-    read -r -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
+    prompt_read -r -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
     EXTRACT_OPT_ARCHIVE=${EXTRACT_OPT_ARCHIVE:-n}
 
     if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
         print_message "The archive is password-protected. Please enter the password:"
-        read -r -s -p "Password: " OPT_ARCHIVE_PASSWORD
+        prompt_read -r -s -p "Password: " OPT_ARCHIVE_PASSWORD
         echo ""
         if [ -z "$OPT_ARCHIVE_PASSWORD" ]; then
             print_warning "No password provided. opt.7z will not be extracted."
@@ -1221,25 +1420,25 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Set a password for root user?"
-    read -r -p "Set root password? (y/N): " SET_ROOT_PASSWORD
+    prompt_read -r -p "Set root password? (y/N): " SET_ROOT_PASSWORD
     SET_ROOT_PASSWORD=${SET_ROOT_PASSWORD:-n}
     
     if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
         while true; do
-            read -r -s -p "Enter new root password: " ROOT_PASSWORD
+            prompt_read -r -s -p "Enter new root password: " ROOT_PASSWORD
             echo ""
-            read -r -s -p "Confirm root password: " ROOT_PASSWORD_CONFIRM
+            prompt_read -r -s -p "Confirm root password: " ROOT_PASSWORD_CONFIRM
             echo ""
             
             if [ "$ROOT_PASSWORD" = "$ROOT_PASSWORD_CONFIRM" ]; then
                 if [ -z "$ROOT_PASSWORD" ]; then
-                    print_error "Password cannot be empty"
+                    print_warning "Password cannot be empty"
                     continue
                 fi
                 print_message "Root password will be set"
                 break
             else
-                print_error "Passwords do not match. Please try again."
+                print_warning "Passwords do not match. Please try again."
             fi
         done
     else
@@ -1250,11 +1449,11 @@ if [ "$INTERACTIVE" = true ]; then
     
     # Ask about creating new user
     print_message "Do you want to create a new user?"
-    read -r -p "Create new user? (y/N): " CREATE_USER
+    prompt_read -r -p "Create new user? (y/N): " CREATE_USER
     CREATE_USER=${CREATE_USER:-n}
     
     if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
-        read -r -p "Enter username for new user: " NEW_USERNAME
+        prompt_read -r -p "Enter username for new user: " NEW_USERNAME
         
         if [ -z "$NEW_USERNAME" ]; then
             print_error "Username cannot be empty"
@@ -1268,7 +1467,7 @@ if [ "$INTERACTIVE" = true ]; then
             # Check if user already exists
             if id "$NEW_USERNAME" &>/dev/null; then
                 print_warning "User $NEW_USERNAME already exists"
-                read -r -p "Continue with existing user? (y/N): " USE_EXISTING
+                prompt_read -r -p "Continue with existing user? (y/N): " USE_EXISTING
                 USE_EXISTING=${USE_EXISTING:-n}
                 
                 if [ "$USE_EXISTING" != "y" ] && [ "$USE_EXISTING" != "Y" ]; then
@@ -1279,20 +1478,20 @@ if [ "$INTERACTIVE" = true ]; then
                 fi
             else
                 while true; do
-                    read -r -s -p "Enter password for $NEW_USERNAME: " NEW_USER_PASSWORD
+                    prompt_read -r -s -p "Enter password for $NEW_USERNAME: " NEW_USER_PASSWORD
                     echo ""
-                    read -r -s -p "Confirm password: " NEW_USER_PASSWORD_CONFIRM
+                    prompt_read -r -s -p "Confirm password: " NEW_USER_PASSWORD_CONFIRM
                     echo ""
                     
                     if [ "$NEW_USER_PASSWORD" = "$NEW_USER_PASSWORD_CONFIRM" ]; then
                         if [ -z "$NEW_USER_PASSWORD" ]; then
-                            print_error "Password cannot be empty"
+                            print_warning "Password cannot be empty"
                             continue
                         fi
                         print_message "User $NEW_USERNAME will be created"
                         break
                     else
-                        print_error "Passwords do not match. Please try again."
+                        print_warning "Passwords do not match. Please try again."
                     fi
                 done
             fi
@@ -1307,14 +1506,14 @@ if [ "$INTERACTIVE" = true ]; then
     # Ask about SSH key for new user
     if [ ! -z "$NEW_USERNAME" ]; then
         print_message "Do you want to configure SSH key for $NEW_USERNAME?"
-        read -r -p "Configure SSH key? (y/N): " CONFIGURE_USER_SSH_KEY
+        prompt_read -r -p "Configure SSH key? (y/N): " CONFIGURE_USER_SSH_KEY
         CONFIGURE_USER_SSH_KEY=${CONFIGURE_USER_SSH_KEY:-n}
         
         if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ]; then
             echo ""
             print_message "Enter SSH public key for $NEW_USERNAME"
             print_message "Example: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB..."
-            read -r -p "SSH public key: " USER_SSH_KEY
+            prompt_read -r -p "SSH public key: " USER_SSH_KEY
             
             if [ -z "$USER_SSH_KEY" ]; then
                 print_warning "No SSH key provided, skipping SSH key configuration"
@@ -1333,7 +1532,7 @@ if [ "$INTERACTIVE" = true ]; then
     # Ask about zsh installation for new user
     if [ ! -z "$NEW_USERNAME" ]; then
         print_message "Do you want to install and configure zsh with Oh My Zsh for $NEW_USERNAME?"
-        read -r -p "Install zsh? (y/N): " INSTALL_ZSH
+        prompt_read -r -p "Install zsh? (y/N): " INSTALL_ZSH
         INSTALL_ZSH=${INSTALL_ZSH:-n}
     else
         INSTALL_ZSH="n"
@@ -1343,7 +1542,7 @@ if [ "$INTERACTIVE" = true ]; then
     
     # Ask about crontab configuration
     print_message "Do you want to configure crontab for root?"
-    read -r -p "Configure crontab? (y/N): " CONFIGURE_CRONTAB
+    prompt_read -r -p "Configure crontab? (y/N): " CONFIGURE_CRONTAB
     CONFIGURE_CRONTAB=${CONFIGURE_CRONTAB:-n}
     
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
@@ -1354,7 +1553,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "2) Paste tasks from clipboard (recommended for multiple tasks)"
         print_message "3) Skip adding tasks (only set environment variables)"
         echo ""
-        read -r -p "Choose option [1-3] (default: 3): " CRONTAB_MODE
+        prompt_read -r -p "Choose option [1-3] (default: 3): " CRONTAB_MODE
         CRONTAB_MODE=${CRONTAB_MODE:-3}
         
         case $CRONTAB_MODE in
@@ -1425,12 +1624,12 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Configure SSH (change port, AllowUsers, authentication)?"
-    read -r -p "Configure SSH? (y/N): " CONFIGURE_SSH
+    prompt_read -r -p "Configure SSH? (y/N): " CONFIGURE_SSH
     CONFIGURE_SSH=${CONFIGURE_SSH:-n}
     
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         while true; do
-            read -r -p "Enter new SSH port (default 22): " SSH_PORT
+            prompt_read -r -p "Enter new SSH port (default 22): " SSH_PORT
             SSH_PORT=${SSH_PORT:-22}
 
             # Validate port number
@@ -1438,7 +1637,7 @@ if [ "$INTERACTIVE" = true ]; then
                 # Check if port is already in use
                 if ss -tuln | grep -q ":${SSH_PORT} "; then
                     print_warning "Port $SSH_PORT is already in use by another service"
-                    read -r -p "Continue anyway? (y/N): " CONTINUE_PORT
+                    prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_PORT
                     if [ "$CONTINUE_PORT" = "y" ] || [ "$CONTINUE_PORT" = "Y" ]; then
                         break
                     fi
@@ -1456,13 +1655,13 @@ if [ "$INTERACTIVE" = true ]; then
         if [ ! -z "$NEW_USERNAME" ]; then
             print_message "Suggestion: $NEW_USERNAME"
         fi
-        read -r -p "AllowUsers: " SSH_ALLOW_USERS
+        prompt_read -r -p "AllowUsers: " SSH_ALLOW_USERS
 
         # Validate users exist
         if [ ! -z "$SSH_ALLOW_USERS" ]; then
             INVALID_USERS=""
             for username in $SSH_ALLOW_USERS; do
-                if ! id "$username" &>/dev/null; then
+                if [ "$username" != "$NEW_USERNAME" ] && ! id "$username" &>/dev/null; then
                     INVALID_USERS="$INVALID_USERS $username"
                 fi
             done
@@ -1470,7 +1669,7 @@ if [ "$INTERACTIVE" = true ]; then
             if [ ! -z "$INVALID_USERS" ]; then
                 print_warning "The following users do not exist:$INVALID_USERS"
                 print_warning "Setting AllowUsers with non-existent users may lock you out of SSH!"
-                read -r -p "Continue anyway? (y/N): " CONTINUE_USERS
+                prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_USERS
                 if [ "$CONTINUE_USERS" != "y" ] && [ "$CONTINUE_USERS" != "Y" ]; then
                     SSH_ALLOW_USERS=""
                     print_message "AllowUsers configuration skipped"
@@ -1485,12 +1684,12 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PubkeyAuthentication
         print_message "PubkeyAuthentication - Enable public key authentication"
-        read -r -p "Configure PubkeyAuthentication? (y/N): " CONFIG_PUBKEY
+        prompt_read -r -p "Configure PubkeyAuthentication? (y/N): " CONFIG_PUBKEY
         CONFIG_PUBKEY=${CONFIG_PUBKEY:-n}
         if [ "$CONFIG_PUBKEY" = "y" ] || [ "$CONFIG_PUBKEY" = "Y" ]; then
-            read -r -p "Set PubkeyAuthentication to yes or no? (Y/n): " SSH_PUBKEY_AUTH
+            prompt_read -r -p "Set PubkeyAuthentication to yes or no? (Y/n): " SSH_PUBKEY_AUTH
             SSH_PUBKEY_AUTH=${SSH_PUBKEY_AUTH:-y}
-            if [ "$SSH_PUBKEY_AUTH" = "y" ] || [ "$SSH_PUBKEY_AUTH" = "Y" ]; then
+            if [[ "${SSH_PUBKEY_AUTH,,}" =~ ^(y|yes)$ ]]; then
                 SSH_PUBKEY_AUTH="yes"
             else
                 SSH_PUBKEY_AUTH="no"
@@ -1501,12 +1700,12 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PasswordAuthentication
         print_message "PasswordAuthentication - Enable password authentication"
-        read -r -p "Configure PasswordAuthentication? (y/N): " CONFIG_PASSWORD
+        prompt_read -r -p "Configure PasswordAuthentication? (y/N): " CONFIG_PASSWORD
         CONFIG_PASSWORD=${CONFIG_PASSWORD:-n}
         if [ "$CONFIG_PASSWORD" = "y" ] || [ "$CONFIG_PASSWORD" = "Y" ]; then
-            read -r -p "Set PasswordAuthentication to yes or no? (Y/n): " SSH_PASSWORD_AUTH
+            prompt_read -r -p "Set PasswordAuthentication to yes or no? (Y/n): " SSH_PASSWORD_AUTH
             SSH_PASSWORD_AUTH=${SSH_PASSWORD_AUTH:-y}
-            if [ "$SSH_PASSWORD_AUTH" = "y" ] || [ "$SSH_PASSWORD_AUTH" = "Y" ]; then
+            if [[ "${SSH_PASSWORD_AUTH,,}" =~ ^(y|yes)$ ]]; then
                 SSH_PASSWORD_AUTH="yes"
             else
                 SSH_PASSWORD_AUTH="no"
@@ -1517,7 +1716,7 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PermitEmptyPasswords - ALWAYS set to no, only ask about uncommenting
         print_message "PermitEmptyPasswords - Prevent empty password authentication (ALWAYS set to 'no')"
-        read -r -p "Configure PermitEmptyPasswords? (y/N): " CONFIG_EMPTY_PASS
+        prompt_read -r -p "Configure PermitEmptyPasswords? (y/N): " CONFIG_EMPTY_PASS
         CONFIG_EMPTY_PASS=${CONFIG_EMPTY_PASS:-n}
         if [ "$CONFIG_EMPTY_PASS" = "y" ] || [ "$CONFIG_EMPTY_PASS" = "Y" ]; then
             SSH_EMPTY_PASSWORDS="no"  # ALWAYS no for security
@@ -1527,12 +1726,12 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PermitRootLogin
         print_message "PermitRootLogin - Allow root user to login via SSH"
-        read -r -p "Configure PermitRootLogin? (y/N): " CONFIG_ROOT_LOGIN
+        prompt_read -r -p "Configure PermitRootLogin? (y/N): " CONFIG_ROOT_LOGIN
         CONFIG_ROOT_LOGIN=${CONFIG_ROOT_LOGIN:-n}
         if [ "$CONFIG_ROOT_LOGIN" = "y" ] || [ "$CONFIG_ROOT_LOGIN" = "Y" ]; then
-            read -r -p "Set PermitRootLogin to yes or no? (Y/n): " SSH_ROOT_LOGIN
+            prompt_read -r -p "Set PermitRootLogin to yes or no? (Y/n): " SSH_ROOT_LOGIN
             SSH_ROOT_LOGIN=${SSH_ROOT_LOGIN:-y}
-            if [ "$SSH_ROOT_LOGIN" = "y" ] || [ "$SSH_ROOT_LOGIN" = "Y" ]; then
+            if [[ "${SSH_ROOT_LOGIN,,}" =~ ^(y|yes)$ ]]; then
                 SSH_ROOT_LOGIN="yes"
             else
                 SSH_ROOT_LOGIN="no"
@@ -1543,12 +1742,12 @@ if [ "$INTERACTIVE" = true ]; then
 
         # PrintMotd
         print_message "PrintMotd - Display /etc/motd content on SSH login"
-        read -r -p "Configure PrintMotd? (y/N): " CONFIG_PRINT_MOTD
+        prompt_read -r -p "Configure PrintMotd? (y/N): " CONFIG_PRINT_MOTD
         CONFIG_PRINT_MOTD=${CONFIG_PRINT_MOTD:-n}
         if [ "$CONFIG_PRINT_MOTD" = "y" ] || [ "$CONFIG_PRINT_MOTD" = "Y" ]; then
-            read -r -p "Set PrintMotd to yes or no? (Y/n): " SSH_PRINT_MOTD
+            prompt_read -r -p "Set PrintMotd to yes or no? (Y/n): " SSH_PRINT_MOTD
             SSH_PRINT_MOTD=${SSH_PRINT_MOTD:-y}
-            if [ "$SSH_PRINT_MOTD" = "y" ] || [ "$SSH_PRINT_MOTD" = "Y" ]; then
+            if [[ "${SSH_PRINT_MOTD,,}" =~ ^(y|yes)$ ]]; then
                 SSH_PRINT_MOTD="yes"
             else
                 SSH_PRINT_MOTD="no"
@@ -1575,7 +1774,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  - Installs OpenSSH/FIDO2 support packages"
     print_message "  - Adds sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com key to authorized_keys"
     print_message "  - Enables PubkeyAuthentication in sshd"
-    read -r -p "Configure YubiKey/FIDO2 SSH? (y/N): " CONFIGURE_YUBIKEY_SSH
+    prompt_read -r -p "Configure YubiKey/FIDO2 SSH? (y/N): " CONFIGURE_YUBIKEY_SSH
     CONFIGURE_YUBIKEY_SSH=${CONFIGURE_YUBIKEY_SSH:-n}
 
     if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
@@ -1587,7 +1786,7 @@ if [ "$INTERACTIVE" = true ]; then
             YUBIKEY_SSH_DEFAULT_USER="root"
         fi
 
-        read -r -p "Target user for YubiKey SSH (default: ${YUBIKEY_SSH_DEFAULT_USER}): " YUBIKEY_SSH_USER
+        prompt_read -r -p "Target user for YubiKey SSH (default: ${YUBIKEY_SSH_DEFAULT_USER}): " YUBIKEY_SSH_USER
         YUBIKEY_SSH_USER=${YUBIKEY_SSH_USER:-$YUBIKEY_SSH_DEFAULT_USER}
 
         echo ""
@@ -1597,13 +1796,13 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Fallback for older YubiKey firmware:"
         print_message "  ssh-keygen -t ecdsa-sk -O resident -O verify-required -C \"${YUBIKEY_SSH_USER}@$(hostname -f 2>/dev/null || hostname)\""
         print_message "Leave empty to install/configure server-side FIDO2 support without adding a key."
-        read -r -p "YubiKey SSH public key: " YUBIKEY_SSH_PUBLIC_KEY
+        prompt_read -r -p "YubiKey SSH public key: " YUBIKEY_SSH_PUBLIC_KEY
 
         if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ] && \
            ! [[ "$YUBIKEY_SSH_PUBLIC_KEY" =~ ^(sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|sk-ssh-ed25519-cert-v01@openssh\.com|sk-ecdsa-sha2-nistp256-cert-v01@openssh\.com)[[:space:]] ]]; then
             print_warning "The provided key does not look like an OpenSSH FIDO2/YubiKey public key"
             print_warning "Expected key type: sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com"
-            read -r -p "Continue anyway? (y/N): " YUBIKEY_SSH_CONTINUE_INVALID_KEY
+            prompt_read -r -p "Continue anyway? (y/N): " YUBIKEY_SSH_CONTINUE_INVALID_KEY
             YUBIKEY_SSH_CONTINUE_INVALID_KEY=${YUBIKEY_SSH_CONTINUE_INVALID_KEY:-n}
             if [ "$YUBIKEY_SSH_CONTINUE_INVALID_KEY" != "y" ] && [ "$YUBIKEY_SSH_CONTINUE_INVALID_KEY" != "Y" ]; then
                 YUBIKEY_SSH_PUBLIC_KEY=""
@@ -1614,7 +1813,7 @@ if [ "$INTERACTIVE" = true ]; then
             echo ""
             print_message "Disable password authentication after configuring YubiKey SSH?"
             print_warning "Only choose YES after verifying you have another working SSH session/key path."
-            read -r -p "Disable SSH password authentication? (y/N): " YUBIKEY_SSH_DISABLE_PASSWORD_AUTH
+            prompt_read -r -p "Disable SSH password authentication? (y/N): " YUBIKEY_SSH_DISABLE_PASSWORD_AUTH
             YUBIKEY_SSH_DISABLE_PASSWORD_AUTH=${YUBIKEY_SSH_DISABLE_PASSWORD_AUTH:-n}
         else
             YUBIKEY_SSH_DISABLE_PASSWORD_AUTH="n"
@@ -1631,11 +1830,11 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Create Python virtual environment?"
-    read -r -p "Create Python venv? (y/N): " CREATE_VENV
+    prompt_read -r -p "Create Python venv? (y/N): " CREATE_VENV
     CREATE_VENV=${CREATE_VENV:-n}
 
     if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
-        read -r -p "Enter path for virtual environment (default: /root/skripts): " VENV_PATH
+        prompt_read -r -p "Enter path for virtual environment (default: /root/skripts): " VENV_PATH
         VENV_PATH=${VENV_PATH:-/root/skripts}
     else
         VENV_PATH=""
@@ -1645,7 +1844,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     # Ask about Docker installation
     print_message "Install Docker (container runtime)?"
-    read -r -p "Install Docker? (y/N): " INSTALL_DOCKER
+    prompt_read -r -p "Install Docker? (y/N): " INSTALL_DOCKER
     INSTALL_DOCKER=${INSTALL_DOCKER:-n}
 
     if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
@@ -1656,7 +1855,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Recommended when using nftables or external firewall"
         print_message "  Docker will NOT create any iptables/nat rules"
         print_message "  userland-proxy=false uses iptables hairpin NAT (faster)"
-        read -r -p "Disable Docker iptables? (y/N): " DOCKER_DISABLE_IPTABLES
+        prompt_read -r -p "Disable Docker iptables? (y/N): " DOCKER_DISABLE_IPTABLES
         DOCKER_DISABLE_IPTABLES=${DOCKER_DISABLE_IPTABLES:-n}
     else
         DOCKER_DISABLE_IPTABLES="n"
@@ -1669,13 +1868,13 @@ if [ "$INTERACTIVE" = true ]; then
     else
         print_message "  Note: Go installation requires a user to be created"
     fi
-    read -r -p "Install Go? (y/N): " INSTALL_GO
+    prompt_read -r -p "Install Go? (y/N): " INSTALL_GO
     INSTALL_GO=${INSTALL_GO:-n}
     
     # Ask about ipset installation
     echo ""
     print_message "Install ipset from the distribution repository?"
-    read -r -p "Install ipset? (y/N): " INSTALL_IPSET
+    prompt_read -r -p "Install ipset? (y/N): " INSTALL_IPSET
     INSTALL_IPSET=${INSTALL_IPSET:-n}
 
     echo ""
@@ -1684,7 +1883,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Install rclone (cloud storage sync tool)?"
     print_message "  Supports: S3, Google Drive, Dropbox, SFTP, and 70+ backends"
     print_message "  Installed from the distribution repository"
-    read -r -p "Install rclone? (y/N): " INSTALL_RCLONE
+    prompt_read -r -p "Install rclone? (y/N): " INSTALL_RCLONE
     INSTALL_RCLONE=${INSTALL_RCLONE:-n}
 
     echo ""
@@ -1698,7 +1897,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  1) nftables — replace iptables/UFW with nftables"
     print_message "  2) UFW      — configure UFW firewall"
     print_message "  3) none     — skip firewall configuration"
-    read -r -p "Firewall backend [1-3] (default: 2): " FIREWALL_BACKEND_CHOICE
+    prompt_read -r -p "Firewall backend [1-3] (default: 2): " FIREWALL_BACKEND_CHOICE
     FIREWALL_BACKEND_CHOICE=${FIREWALL_BACKEND_CHOICE:-2}
 
     case "$FIREWALL_BACKEND_CHOICE" in
@@ -1731,7 +1930,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     print_message "Install ufw-docker (UFW integration for Docker)?"
     print_message "  Note: Can be installed even without Docker"
-    read -r -p "Install ufw-docker? (y/N): " INSTALL_UFW_DOCKER
+    prompt_read -r -p "Install ufw-docker? (y/N): " INSTALL_UFW_DOCKER
     INSTALL_UFW_DOCKER=${INSTALL_UFW_DOCKER:-n}
 
     # Ask about ICMP blocking (only if UFW is enabled)
@@ -1739,7 +1938,7 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "Block ICMP (ping) requests?"
         print_message "  Note: Server will not respond to ping"
-        read -r -p "Block ICMP? (y/N): " BLOCK_ICMP
+        prompt_read -r -p "Block ICMP? (y/N): " BLOCK_ICMP
         BLOCK_ICMP=${BLOCK_ICMP:-n}
         
         # Ask about custom UFW Docker rules
@@ -1751,7 +1950,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Both versions support custom SSH port configuration"
         print_message "Both versions available from archive or repository"
         print_message "Note: The script will run AFTER all other installations complete"
-        read -r -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
+        prompt_read -r -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
         INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
 
         if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
@@ -1759,7 +1958,7 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "Select version:"
             print_message "  4 - Standard version"
             print_message "  6 - Enhanced version with RustDesk support (recommended)"
-            read -r -p "Enter version (4 or 6, default: 6): " UFW_RULES_VERSION
+            prompt_read -r -p "Enter version (4 or 6, default: 6): " UFW_RULES_VERSION
             UFW_RULES_VERSION=${UFW_RULES_VERSION:-6}
 
             if [ "$UFW_RULES_VERSION" != "4" ] && [ "$UFW_RULES_VERSION" != "6" ]; then
@@ -1775,13 +1974,13 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "  1 - Install from password-protected archive (ufw-docker-rules-v4.7z)"
             print_message "      Archive contains both v4 and v6 scripts"
             print_message "  2 - Install from public repository (https://raw.githubusercontent.com/civisrom/ufw-rules-docker/...)"
-            read -r -p "Choose source (1 or 2, default: 1): " UFW_INSTALL_SOURCE
+            prompt_read -r -p "Choose source (1 or 2, default: 1): " UFW_INSTALL_SOURCE
             UFW_INSTALL_SOURCE=${UFW_INSTALL_SOURCE:-1}
 
             if [ "$UFW_INSTALL_SOURCE" = "1" ]; then
                 echo ""
                 print_message "The archive is password-protected. Please enter the password:"
-                read -r -s -p "Password: " UFW_CUSTOM_RULES_PASSWORD
+                prompt_read -r -s -p "Password: " UFW_CUSTOM_RULES_PASSWORD
                 echo ""
                 if [ -z "$UFW_CUSTOM_RULES_PASSWORD" ]; then
                     print_warning "No password provided. Custom UFW rules will not be installed."
@@ -1791,7 +1990,7 @@ if [ "$INTERACTIVE" = true ]; then
                     echo ""
                     print_message "Enter SSH port for UFW rules:"
                     print_message "This port will be used instead of the default in the script"
-                    read -r -p "SSH Port (default: 22): " UFW_SSH_PORT
+                    prompt_read -r -p "SSH Port (default: 22): " UFW_SSH_PORT
                     UFW_SSH_PORT=${UFW_SSH_PORT:-22}
 
                     if ! [[ "$UFW_SSH_PORT" =~ ^[0-9]+$ ]] || [ "$UFW_SSH_PORT" -lt 1 ] || [ "$UFW_SSH_PORT" -gt 65535 ]; then
@@ -1811,7 +2010,7 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "Enter SSH port for UFW rules:"
                 print_message "This port will be used instead of the default in the script"
                 print_message "Note: This keeps your actual SSH port private"
-                read -r -p "SSH Port (default: 22): " UFW_SSH_PORT
+                prompt_read -r -p "SSH Port (default: 22): " UFW_SSH_PORT
                 UFW_SSH_PORT=${UFW_SSH_PORT:-22}
 
                 # Validate port number
@@ -1904,17 +2103,17 @@ if [ "$INTERACTIVE" = true ]; then
         done
         unset _i _prev_group
         echo ""
-        read -r -p "Install nftables config profile? (y/N): " INSTALL_NFTABLES_CONF
+        prompt_read -r -p "Install nftables config profile? (y/N): " INSTALL_NFTABLES_CONF
         INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
 
         if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
-            read -r -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
+            prompt_read -r -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
             NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-$NFT_DEFAULT_PROFILE}
 
             # Validate selection: must be numeric AND within defined profile range.
             # Non-numeric input would be evaluated as bash arithmetic when used as an
             # array subscript, which can produce noisy errors under `set -e`.
-            if ! [[ "$NFTABLES_PROFILE_NUM" =~ ^[0-9]+$ ]] \
+            if ! [[ "$NFTABLES_PROFILE_NUM" =~ ^[1-9][0-9]{0,2}$ ]] \
                || [ "$NFTABLES_PROFILE_NUM" -lt 1 ] \
                || [ "$NFTABLES_PROFILE_NUM" -gt "$NFT_PROFILES_COUNT" ] \
                || [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
@@ -1934,7 +2133,7 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "Install nftables logging script for '${NFTABLES_PROFILE}' profile?"
                 print_message "  Script: ${NFTABLES_LOG_SCRIPT}"
                 print_message "  Configures rsyslog/journald rules for nftables log messages"
-                read -r -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
+                prompt_read -r -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
                 INSTALL_NFTABLES_LOGGING=${INSTALL_NFTABLES_LOGGING:-y}
             else
                 INSTALL_NFTABLES_LOGGING="n"
@@ -1957,7 +2156,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Applies nftables rules after Docker starts and on every Docker restart"
         print_message "  Creates systemd service + drop-in trigger for docker.service"
         print_message "  Includes: validation, backup, rollback, verification"
-        read -r -p "Install nft-docker-watch? (Y/n): " INSTALL_NFT_DOCKER_WATCH
+        prompt_read -r -p "Install nft-docker-watch? (Y/n): " INSTALL_NFT_DOCKER_WATCH
         INSTALL_NFT_DOCKER_WATCH=${INSTALL_NFT_DOCKER_WATCH:-y}
     else
         INSTALL_NFT_DOCKER_WATCH="n"
@@ -1980,7 +2179,7 @@ if [ "$INTERACTIVE" = true ]; then
     echo ""
     print_message "Optimize system parameters (sysctl)?"
     print_message "Includes: IPv6 disable, network tuning, BBR congestion control"
-    read -r -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
+    prompt_read -r -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
     CONFIGURE_SYSCTL=${CONFIGURE_SYSCTL:-y}
 
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
@@ -1988,7 +2187,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Choose sysctl configuration mode:"
         print_message "  1) Basic — static parameters (IPv6 disable, BBR, TCP/UDP tuning, security)"
         print_message "  2) Full  — run Linux NetworkOptimizer (bbr.sh) with adaptive RAM-based profiles"
-        read -r -p "Select mode [1/2] (default: 1): " SYSCTL_MODE
+        prompt_read -r -p "Select mode [1/2] (default: 1): " SYSCTL_MODE
         SYSCTL_MODE=${SYSCTL_MODE:-1}
 
         # Validate input
@@ -2013,17 +2212,17 @@ if [ "$INTERACTIVE" = true ]; then
 
             # Force IPv4 for APT
             print_message "1. Force IPv4 for APT (recommended for IPv6 connectivity issues)"
-            read -r -p "   Enable force_ipv4_apt? (Y/n): " BBR_FORCE_IPV4
+            prompt_read -r -p "   Enable force_ipv4_apt? (Y/n): " BBR_FORCE_IPV4
             BBR_FORCE_IPV4=${BBR_FORCE_IPV4:-y}
 
             # Full system update
             print_message "2. Full system update and upgrade (apt update && upgrade)"
-            read -r -p "   Enable full_update_upgrade? (Y/n): " BBR_FULL_UPDATE
+            prompt_read -r -p "   Enable full_update_upgrade? (Y/n): " BBR_FULL_UPDATE
             BBR_FULL_UPDATE=${BBR_FULL_UPDATE:-y}
 
             # Fix /etc/hosts
             print_message "3. Fix /etc/hosts file (add hostname loopback entry 127.0.1.1)"
-            read -r -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
+            prompt_read -r -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
             BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
 
             # Fix DNS (skip if systemd-resolved is configured separately)
@@ -2032,7 +2231,7 @@ if [ "$INTERACTIVE" = true ]; then
                 BBR_FIX_DNS="n"
             else
                 print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
-                read -r -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
+                prompt_read -r -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
                 BBR_FIX_DNS=${BBR_FIX_DNS:-y}
             fi
 
@@ -2050,7 +2249,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Enable IP forwarding (net.ipv4.ip_forward = 1)?"
         print_message "Required for: Docker networks, NAT, VPN, routing between interfaces"
         print_message "If unsure — choose Y (recommended for servers with Docker)"
-        read -r -p "Enable IP forwarding? (Y/n): " ENABLE_IP_FORWARD
+        prompt_read -r -p "Enable IP forwarding? (Y/n): " ENABLE_IP_FORWARD
         ENABLE_IP_FORWARD=${ENABLE_IP_FORWARD:-y}
 
         # Systemd service for sysctl enforcement
@@ -2058,7 +2257,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Install systemd service for sysctl enforcement?"
         print_message "Creates disable-ipv6.service that reapplies the selected sysctl file after network is online"
         print_message "Ensures sysctl settings are always applied on boot"
-        read -r -p "Install sysctl enforcement service? (Y/n): " INSTALL_SYSCTL_SERVICE
+        prompt_read -r -p "Install sysctl enforcement service? (Y/n): " INSTALL_SYSCTL_SERVICE
         INSTALL_SYSCTL_SERVICE=${INSTALL_SYSCTL_SERVICE:-y}
     else
         SYSCTL_MODE=""
@@ -2078,7 +2277,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  - Configures /etc/systemd/resolved.conf"
     print_message "  - Creates symlink /etc/resolv.conf -> /run/systemd/resolve/resolv.conf"
     print_message "  - Enables and starts systemd-resolved service"
-    read -r -p "Configure systemd-resolved? (y/N): " CONFIGURE_RESOLVED
+    prompt_read -r -p "Configure systemd-resolved? (y/N): " CONFIGURE_RESOLVED
     CONFIGURE_RESOLVED=${CONFIGURE_RESOLVED:-n}
 
     if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
@@ -2088,21 +2287,21 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  8.8.8.8   — Google"
         print_message "  9.9.9.9   — Quad9"
         print_message "  127.0.0.1 — local DNS resolver (only if one is already installed)"
-        read -r -p "DNS server (default: 1.1.1.1): " RESOLVED_DNS
+        prompt_read -r -p "DNS server (default: 1.1.1.1): " RESOLVED_DNS
         RESOLVED_DNS=${RESOLVED_DNS:-1.1.1.1}
 
         echo ""
         print_message "Disable DNS stub listener (DNSStubListener=no)?"
         print_message "  Recommended when using a local DNS resolver on port 53"
         print_message "  Frees port 53 for your local resolver (unbound, pihole, etc.)"
-        read -r -p "Disable DNSStubListener? (Y/n): " RESOLVED_STUB_LISTENER_OFF
+        prompt_read -r -p "Disable DNSStubListener? (Y/n): " RESOLVED_STUB_LISTENER_OFF
         RESOLVED_STUB_LISTENER_OFF=${RESOLVED_STUB_LISTENER_OFF:-y}
 
         echo ""
         print_message "Enable DNS over TLS (DoT)?"
         print_message "  Encrypts DNS queries to upstream resolver"
         print_message "  Note: Upstream DNS server must support DoT"
-        read -r -p "Enable DNSOverTLS? (y/N): " RESOLVED_DNS_OVER_TLS
+        prompt_read -r -p "Enable DNSOverTLS? (y/N): " RESOLVED_DNS_OVER_TLS
         RESOLVED_DNS_OVER_TLS=${RESOLVED_DNS_OVER_TLS:-n}
     else
         RESOLVED_DNS=""
@@ -2123,7 +2322,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Adds 'ipv6.disable=1' to BOTH GRUB_CMDLINE_LINUX_DEFAULT"
         print_message "and GRUB_CMDLINE_LINUX (so recovery boot is also covered)."
         print_message "Note: This is in addition to sysctl IPv6 disable and requires reboot"
-        read -r -p "Disable IPv6 via GRUB? (y/N): " DISABLE_IPV6_GRUB
+        prompt_read -r -p "Disable IPv6 via GRUB? (y/N): " DISABLE_IPV6_GRUB
         DISABLE_IPV6_GRUB=${DISABLE_IPV6_GRUB:-n}
     else
         DISABLE_IPV6_GRUB="n"
@@ -2132,7 +2331,7 @@ if [ "$INTERACTIVE" = true ]; then
     # Ask about repository configuration
     if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
         print_message "Do you want to configure ${OS^} repositories?"
-        read -r -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
+        prompt_read -r -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
     fi
     
@@ -2144,7 +2343,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  1. ppa:ondrej/php - Latest PHP builds"
         print_message "  2. ppa:git-core/ppa - Latest Git version"
         print_message "  3. ppa:ubuntu-toolchain-r/test - Latest GCC toolchain"
-        read -r -p "Add PPA repositories? (y/N): " ADD_UBUNTU_PPAS
+        prompt_read -r -p "Add PPA repositories? (y/N): " ADD_UBUNTU_PPAS
         ADD_UBUNTU_PPAS=${ADD_UBUNTU_PPAS:-n}
         
         # Initialize PPA selection flags
@@ -2161,27 +2360,27 @@ if [ "$INTERACTIVE" = true ]; then
 
             # Ondrej PHP PPA
             print_message "1. ppa:ondrej/php - Latest PHP builds"
-            read -r -p "   Add Ondrej PHP PPA? (y/N): " ADD_PPA_PHP
+            prompt_read -r -p "   Add Ondrej PHP PPA? (y/N): " ADD_PPA_PHP
             ADD_PPA_PHP=${ADD_PPA_PHP:-n}
 
             if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
-                read -r -p "   Install PHP CLI (php-cli)? (y/N): " INSTALL_PHP_CLI
+                prompt_read -r -p "   Install PHP CLI (php-cli)? (y/N): " INSTALL_PHP_CLI
                 INSTALL_PHP_CLI=${INSTALL_PHP_CLI:-n}
 
                 if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
-                    read -r -p "   Install PHP extensions (mbstring, xml, curl, mysql)? (y/N): " INSTALL_PHP_EXTENSIONS
+                    prompt_read -r -p "   Install PHP extensions (mbstring, xml, curl, mysql)? (y/N): " INSTALL_PHP_EXTENSIONS
                     INSTALL_PHP_EXTENSIONS=${INSTALL_PHP_EXTENSIONS:-n}
                 fi
             fi
 
             # Git Core PPA
             print_message "2. ppa:git-core/ppa - Latest stable Git releases"
-            read -r -p "   Add Git Core PPA? (y/N): " ADD_PPA_GIT
+            prompt_read -r -p "   Add Git Core PPA? (y/N): " ADD_PPA_GIT
             ADD_PPA_GIT=${ADD_PPA_GIT:-n}
             
             # Ubuntu Toolchain PPA
             print_message "3. ppa:ubuntu-toolchain-r/test - Latest GCC, G++, and toolchain"
-            read -r -p "   Add Ubuntu Toolchain PPA? (y/N): " ADD_PPA_TOOLCHAIN
+            prompt_read -r -p "   Add Ubuntu Toolchain PPA? (y/N): " ADD_PPA_TOOLCHAIN
             ADD_PPA_TOOLCHAIN=${ADD_PPA_TOOLCHAIN:-n}
         fi
         
@@ -2206,7 +2405,7 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "Complete removal will back up /etc/nginx, then PURGE all nginx"
             print_message "packages and modules and delete configs, binaries, unused"
             print_message "dependencies, module symlinks and leftover directories."
-            read -r -p "Completely REMOVE nginx (purge everything)? (y/N): " REMOVE_NGINX
+            prompt_read -r -p "Completely REMOVE nginx (purge everything)? (y/N): " REMOVE_NGINX
             REMOVE_NGINX=${REMOVE_NGINX:-n}
         fi
 
@@ -2224,15 +2423,15 @@ if [ "$INTERACTIVE" = true ]; then
         print_warning "Pick only ONE Nginx package source (1 or 2); option 3 only adds modules and pairs with the official nginx.org repo."
 
         # Official nginx.org repository
-        read -r -p "   Add official nginx.org repository? (y/N): " ADD_NGINX_ORG
+        prompt_read -r -p "   Add official nginx.org repository? (y/N): " ADD_NGINX_ORG
         ADD_NGINX_ORG=${ADD_NGINX_ORG:-n}
 
         # Third-party deb.myguard.nl repository
-        read -r -p "   Add third-party deb.myguard.nl Nginx repository? (y/N): " ADD_NGINX_MYGUARD
+        prompt_read -r -p "   Add third-party deb.myguard.nl Nginx repository? (y/N): " ADD_NGINX_MYGUARD
         ADD_NGINX_MYGUARD=${ADD_NGINX_MYGUARD:-n}
 
         # nginx-modules.com (Blendbyte) dynamic modules repository
-        read -r -p "   Add nginx-modules.com (Blendbyte) modules repository? (y/N): " ADD_NGINX_MODULES
+        prompt_read -r -p "   Add nginx-modules.com (Blendbyte) modules repository? (y/N): " ADD_NGINX_MODULES
         ADD_NGINX_MODULES=${ADD_NGINX_MODULES:-n}
 
         if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
@@ -2251,7 +2450,7 @@ if [ "$INTERACTIVE" = true ]; then
         if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } || \
            { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
             echo ""
-            read -r -p "Install nginx now from the selected repository? (y/N): " INSTALL_NGINX
+            prompt_read -r -p "Install nginx now from the selected repository? (y/N): " INSTALL_NGINX
             INSTALL_NGINX=${INSTALL_NGINX:-n}
 
             if [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; then
@@ -2274,7 +2473,7 @@ if [ "$INTERACTIVE" = true ]; then
                     print_message "       http-dav-ext, http-auth-pam) — distro-nginx-full equivalent, x-ui-pro ready"
                 fi
                 print_message "  7) custom (install only the package names you list below)"
-                read -r -p "Preset [1-8]: " NGINX_INSTALL_VARIANT
+                prompt_read -r -p "Preset [1-8]: " NGINX_INSTALL_VARIANT
 
                 if [ "$NGINX_INSTALL_VARIANT" = "7" ]; then
                     # Show a copy-paste catalogue of packages available from the
@@ -2308,11 +2507,11 @@ if [ "$INTERACTIVE" = true ]; then
                     echo ""
                     print_message "Enter packages separated by spaces OR commas"
                     print_message "  (e.g. 'nginx, nginx-module-njs nginx-module-brotli')."
-                    read -r -p "Packages to install: " NGINX_CUSTOM_PKGS
+                    prompt_read -r -p "Packages to install: " NGINX_CUSTOM_PKGS
                 else
                     echo ""
                     print_message "Optionally add extra packages (space- or comma-separated), or leave empty."
-                    read -r -p "Extra packages: " NGINX_CUSTOM_PKGS
+                    prompt_read -r -p "Extra packages: " NGINX_CUSTOM_PKGS
                 fi
 
                 # If nginx is already installed (e.g. from the distro repos), offer
@@ -2329,7 +2528,7 @@ if [ "$INTERACTIVE" = true ]; then
                     print_message "Before any change the script backs up /etc/nginx and the package list to"
                     print_message "/var/backups, stops nginx, swaps packages (keeping your configs), runs"
                     print_message "'nginx -t', and only starts nginx if the config test passes."
-                    read -r -p "Migrate existing nginx to the selected repository? (y/N): " MIGRATE_NGINX
+                    prompt_read -r -p "Migrate existing nginx to the selected repository? (y/N): " MIGRATE_NGINX
                     MIGRATE_NGINX=${MIGRATE_NGINX:-n}
                 fi
             fi
@@ -2354,7 +2553,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Disable IPv6 in /etc/network/interfaces?"
     print_message "  Comments out all inet6 configuration lines"
     print_message "  Useful for static network configuration"
-    read -r -p "Comment out IPv6 in /etc/network/interfaces? (y/N): " COMMENT_IPV6_INTERFACES
+    prompt_read -r -p "Comment out IPv6 in /etc/network/interfaces? (y/N): " COMMENT_IPV6_INTERFACES
     COMMENT_IPV6_INTERFACES=${COMMENT_IPV6_INTERFACES:-n}
 
     # Ask about disabling IPv6 in netplan (Ubuntu default, also possible on Debian)
@@ -2368,7 +2567,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Validates with 'netplan generate' before keeping changes"
         print_warning "  Will NOT auto-apply — run 'sudo netplan apply' yourself when ready"
         print_warning "  (avoids losing SSH if IPv6 connectivity was active)"
-        read -r -p "Disable IPv6 in netplan? (y/N): " DISABLE_IPV6_NETPLAN
+        prompt_read -r -p "Disable IPv6 in netplan? (y/N): " DISABLE_IPV6_NETPLAN
         DISABLE_IPV6_NETPLAN=${DISABLE_IPV6_NETPLAN:-n}
     else
         DISABLE_IPV6_NETPLAN="n"
@@ -2378,7 +2577,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     # Ask about MOTD installation
     print_message "Install custom MOTD (Message of the Day)?"
-    read -r -p "Install MOTD? (y/N): " INSTALL_MOTD
+    prompt_read -r -p "Install MOTD? (y/N): " INSTALL_MOTD
     INSTALL_MOTD=${INSTALL_MOTD:-n}
 
     # Ask for UFW ports (if UFW is enabled)
@@ -2396,7 +2595,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Multiple ports:  8080,8443,9000"
         print_message "  Mixed:           8080/tcp,53/udp,3000"
         echo ""
-        read -r -p "Enter additional ports (comma-separated, press Enter to skip): " CUSTOM_PORTS
+        prompt_read -r -p "Enter additional ports (comma-separated, press Enter to skip): " CUSTOM_PORTS
 
         if [ ! -z "$CUSTOM_PORTS" ]; then
             print_message "Custom ports will be configured: $CUSTOM_PORTS"
@@ -2416,7 +2615,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Detected RAM: ${TOTAL_RAM_MB} MB (~${TOTAL_RAM_GB} GB)"
     print_message "This will configure hybrid swap: swapfile (disk) + zram (compressed RAM)"
     print_message "Recommended for VPS with limited memory"
-    read -r -p "Configure Swap? (y/N): " CONFIGURE_SWAP
+    prompt_read -r -p "Configure Swap? (y/N): " CONFIGURE_SWAP
     CONFIGURE_SWAP=${CONFIGURE_SWAP:-n}
 
     if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
@@ -2425,7 +2624,7 @@ if [ "$INTERACTIVE" = true ]; then
         echo "  1) Auto-detect (choose template based on RAM size)"
         echo "  2) Interactive wizard (full control over settings)"
         echo ""
-        read -r -p "Select mode [1-2] (default: 1): " SWAP_MODE
+        prompt_read -r -p "Select mode [1-2] (default: 1): " SWAP_MODE
         SWAP_MODE=${SWAP_MODE:-1}
 
         if [ "$SWAP_MODE" = "2" ]; then
@@ -2713,7 +2912,7 @@ print_header "══════════════════════
 echo ""
 
 if [ "$INTERACTIVE" = true ]; then
-    read -r -p "Continue with these settings? (Y/n): " CONFIRM
+    prompt_read -r -p "Continue with these settings? (Y/n): " CONFIRM
     CONFIRM=${CONFIRM:-y}
     
     if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
@@ -2730,140 +2929,87 @@ print_message "Starting installation..."
 echo ""
 
 configure_apt_repositories() {
-    if [ "$OS" = "debian" ]; then
-        print_message "Configuring Debian repositories..."
+    local sources_dir=/etc/apt/sources.list.d main=/etc/apt/sources.list
+    local target stage_main stage_sources archive security components suites timestamp
+    local target_existed=false main_existed=false
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    mkdir -p "$sources_dir" || return 1
+    stage_main=$(mktemp) || return 1
+    stage_sources=$(mktemp) || { rm -f -- "$stage_main"; return 1; }
+    target="$sources_dir/$OS.sources"
 
-        # Backup original sources.list
-        if [ -f /etc/apt/sources.list ]; then
-            cp /etc/apt/sources.list "/etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~"
-            print_message "Original sources.list backed up"
-        fi
-
-        # Use detected or selected codename
-        DEBIAN_CODENAME=${VERSION_CODENAME:-bookworm}
-
-        # Write new sources.list based on version
-        if [ "$VERSION" = "13" ] || [ "$DEBIAN_CODENAME" = "trixie" ]; then
-            # Debian 13 (Trixie) configuration - no backports (testing has no backports)
-            cat > /etc/apt/sources.list << EOF
-### Main Debian ${DEBIAN_CODENAME^} repositories
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
-
-### Security updates
-deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
-
-### Release updates
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-EOF
-            print_message "Configured Debian 13 (Trixie) repositories without backports"
-        else
-            # Debian 12 (Bookworm) and older configuration - with backports
-            cat > /etc/apt/sources.list << EOF
-### Main Debian ${DEBIAN_CODENAME^} repositories
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
-
-### Security updates
-deb     http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
-
-### Stable release updates
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
-
-### Backports (newer package versions)
-deb     http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main contrib non-free non-free-firmware
-EOF
-            print_message "Configured Debian ${VERSION} (${DEBIAN_CODENAME^}) repositories with backports"
-        fi
-
-        print_message "Debian repositories configured"
-    elif [ "$OS" = "ubuntu" ]; then
-        print_message "Configuring Ubuntu repositories..."
-
-        # Backup original sources.list if it exists and has content
-        if [ -f /etc/apt/sources.list ] && [ -s /etc/apt/sources.list ]; then
-            cp /etc/apt/sources.list "/etc/apt/sources.list.backup.$(date +%Y%m%d-%H%M%S)~"
-            print_message "Original sources.list backed up"
-
-            # Clear the main sources.list file
-            cat > /etc/apt/sources.list << 'EOF'
-# Ubuntu repositories are now managed in /etc/apt/sources.list.d/
-# See /etc/apt/sources.list.d/ubuntu.sources for repository configuration
-EOF
-            print_message "Main sources.list cleared (repositories moved to sources.list.d)"
-        fi
-
-        # Use detected or selected codename
-        UBUNTU_CODENAME=${VERSION_CODENAME:-noble}
-        UBUNTU_ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-        case "$UBUNTU_ARCH" in
-            amd64|i386)
-                UBUNTU_ARCHIVE_URI="https://archive.ubuntu.com/ubuntu/"
-                UBUNTU_SECURITY_URI="https://security.ubuntu.com/ubuntu/"
-                ;;
-            *)
-                UBUNTU_ARCHIVE_URI="https://ports.ubuntu.com/ubuntu-ports/"
-                UBUNTU_SECURITY_URI="$UBUNTU_ARCHIVE_URI"
-                ;;
-        esac
-
-        # Use ubuntu.sources (new DEB822 format) instead of ubuntu.list
-        UBUNTU_SOURCES_FILE="/etc/apt/sources.list.d/ubuntu.sources"
-
-        # Backup if exists
-        if [ -f "$UBUNTU_SOURCES_FILE" ]; then
-            cp "$UBUNTU_SOURCES_FILE" "/etc/apt/sources.list.d/ubuntu.sources.backup.$(date +%Y%m%d-%H%M%S)~"
-            print_message "Existing ubuntu.sources backed up"
-        fi
-
-        # Write new ubuntu.sources in DEB822 format
-        cat > "$UBUNTU_SOURCES_FILE" << EOF
-## Ubuntu Main Repositories
-Types: deb
-URIs: ${UBUNTU_ARCHIVE_URI}
-Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-## Ubuntu Security Updates
-Types: deb
-URIs: ${UBUNTU_SECURITY_URI}
-Suites: ${UBUNTU_CODENAME}-security
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-## Ubuntu Sources (optional - uncomment to enable)
-# Types: deb-src
-# URIs: ${UBUNTU_ARCHIVE_URI}
-# Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
-# Components: main restricted universe multiverse
-# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-# Types: deb-src
-# URIs: ${UBUNTU_SECURITY_URI}
-# Suites: ${UBUNTU_CODENAME}-security
-# Components: main restricted universe multiverse
-# Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-EOF
-
-        print_message "Ubuntu repositories configured in: $UBUNTU_SOURCES_FILE"
-        print_message "Format: DEB822 (ubuntu.sources)"
-        print_message "Codename: ${UBUNTU_CODENAME^}"
-        print_message "Architecture: ${UBUNTU_ARCH} (${UBUNTU_ARCHIVE_URI})"
-        print_message "Repositories enabled: main, restricted, universe, multiverse"
+    if [ -e "$target" ]; then
+        cp -p -- "$target" "$target.backup.$timestamp~" || return 1
+        target_existed=true
     fi
+    if [ -e "$main" ]; then
+        cp -p -- "$main" "$main.backup.$timestamp~" || return 1
+        main_existed=true
+        # Keep unrelated repositories and comments in the main sources.list.
+        # Remove only distro entries replaced by the new DEB822 definition.
+        awk -v os="$OS" '
+            /^[[:space:]]*deb(-src)?[[:space:]]/ {
+                if (os == "debian" && /https?:\/\/(deb|security|ftp([.][a-z]+)?)\.debian\.org\//) next
+                if (os == "ubuntu" && /https?:\/\/(([a-z]+\.)?archive|security|ports)\.ubuntu\.com\//) next
+            }
+            { print }
+        ' "$main" > "$stage_main" || return 1
+    fi
+
+    case "$OS" in
+        debian)
+            archive=https://deb.debian.org/debian
+            security=https://deb.debian.org/debian-security
+            components='main contrib non-free non-free-firmware'
+            suites="$VERSION_CODENAME $VERSION_CODENAME-updates"
+            [ "$VERSION" = 12 ] && suites="$suites $VERSION_CODENAME-backports"
+            ;;
+        ubuntu)
+            case "$(dpkg --print-architecture)" in
+                amd64|i386) archive=https://archive.ubuntu.com/ubuntu; security=https://security.ubuntu.com/ubuntu ;;
+                *) archive=https://ports.ubuntu.com/ubuntu-ports; security="$archive" ;;
+            esac
+            components='main restricted universe multiverse'
+            suites="$VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports"
+            ;;
+        *) rm -f -- "$stage_main" "$stage_sources"; return 1 ;;
+    esac
+    cat > "$stage_sources" <<REPOS
+Types: deb
+URIs: $archive
+Suites: $suites
+Components: $components
+Signed-By: /usr/share/keyrings/$OS-archive-keyring.gpg
+
+Types: deb
+URIs: $security
+Suites: $VERSION_CODENAME-security
+Components: $components
+Signed-By: /usr/share/keyrings/$OS-archive-keyring.gpg
+REPOS
+    if write_file_atomic "$target" 0644 root:root < "$stage_sources" &&
+       write_file_atomic "$main" 0644 root:root < "$stage_main"; then
+        rm -f -- "$stage_main" "$stage_sources"
+        print_message "Distribution repositories configured in $target; unrelated sources preserved"
+        return 0
+    fi
+    print_error "Failed to write APT sources; restoring backups"
+    if [ "$target_existed" = true ]; then cp -p -- "$target.backup.$timestamp~" "$target"; else rm -f -- "$target"; fi
+    if [ "$main_existed" = true ]; then cp -p -- "$main.backup.$timestamp~" "$main"; else rm -f -- "$main"; fi
+    rm -f -- "$stage_main" "$stage_sources"
+    return 1
 }
+
+if is_yes "$ADD_NGINX_ORG" && is_yes "$ADD_NGINX_MYGUARD"; then
+    print_error "Choose one nginx package source: nginx.org or deb.myguard.nl"
+    exit 1
+fi
 
 # Repository configuration must happen before the first apt update/package
 # install; otherwise minimal or stale systems can fail before the script gets a
 # chance to fix their sources.
 if [ "$CONFIGURE_REPOS" = "y" ] || [ "$CONFIGURE_REPOS" = "Y" ]; then
-    configure_apt_repositories
+    configure_apt_repositories || { print_error "Repository configuration failed"; exit 1; }
     echo ""
 fi
 
@@ -3198,8 +3344,13 @@ fi
 
 if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
     print_message "Setting root password..."
-    printf '%s:%s\n' "root" "$ROOT_PASSWORD" | chpasswd
-    print_message "Root password set successfully"
+    if printf '%s:%s\n' "root" "$ROOT_PASSWORD" | chpasswd; then
+        ROOT_PASSWORD_OK=true
+        print_message "Root password set successfully"
+    else
+        print_error "Failed to set root password"
+    fi
+    unset ROOT_PASSWORD ROOT_PASSWORD_CONFIRM
     echo ""
 fi
 
@@ -3215,15 +3366,19 @@ if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
         print_message "User $NEW_USERNAME created successfully"
         
         # Set password
-        printf '%s:%s\n' "$NEW_USERNAME" "$NEW_USER_PASSWORD" | chpasswd
+        if ! printf '%s:%s\n' "$NEW_USERNAME" "$NEW_USER_PASSWORD" | chpasswd; then
+            print_error "Failed to set password for $NEW_USERNAME; account remains locked"
+            exit 1
+        fi
+        unset NEW_USER_PASSWORD NEW_USER_PASSWORD_CONFIRM
         print_message "Password set for $NEW_USERNAME"
         
         # Add user to sudo group
-        gpasswd -a "$NEW_USERNAME" sudo
+        gpasswd -a "$NEW_USERNAME" sudo || { print_error "Failed to grant sudo access to $NEW_USERNAME"; exit 1; }
         print_message "User $NEW_USERNAME added to sudo group"
     else
         print_error "Failed to create user $NEW_USERNAME"
-        CREATE_USER="n"
+        exit 1
     fi
     echo ""
 elif [ "$CREATE_USER" = "existing" ]; then
@@ -3231,7 +3386,7 @@ elif [ "$CREATE_USER" = "existing" ]; then
     
     # Ensure user is in sudo group
     if ! groups "$NEW_USERNAME" | grep -q "\bsudo\b"; then
-        gpasswd -a "$NEW_USERNAME" sudo
+        gpasswd -a "$NEW_USERNAME" sudo || { print_error "Failed to grant sudo access to $NEW_USERNAME"; exit 1; }
         print_message "User $NEW_USERNAME added to sudo group"
     else
         print_message "User $NEW_USERNAME is already in sudo group"
@@ -3246,30 +3401,13 @@ fi
 if ( [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] ) && [ ! -z "$NEW_USERNAME" ]; then
     print_message "Configuring SSH key for $NEW_USERNAME"
     
-    USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
-    USER_GROUP=$(id -gn "$NEW_USERNAME")
-
-    # Create .ssh directory safely without evaluating user-provided key text.
-    install -d -m 700 -o "$NEW_USERNAME" -g "$USER_GROUP" "$USER_HOME/.ssh"
-    
-    print_message "Created .ssh directory for $NEW_USERNAME"
-    
-    # Add SSH key to authorized_keys without removing existing keys.
-    touch "$USER_HOME/.ssh/authorized_keys"
-    chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.ssh/authorized_keys"
-    chmod 600 "$USER_HOME/.ssh/authorized_keys"
-    if grep -Fxq -- "$USER_SSH_KEY" "$USER_HOME/.ssh/authorized_keys"; then
-        print_message "SSH key already exists in $USER_HOME/.ssh/authorized_keys"
+    if install_user_public_key "$NEW_USERNAME" "$USER_SSH_KEY"; then
+        USER_SSH_KEY_OK=true
+        print_message "SSH key configured successfully for $NEW_USERNAME"
     else
-        USER_AUTH_BACKUP="$USER_HOME/.ssh/authorized_keys.backup.$(date +%Y%m%d-%H%M%S)~"
-        cp "$USER_HOME/.ssh/authorized_keys" "$USER_AUTH_BACKUP"
-        chown "$NEW_USERNAME:$USER_GROUP" "$USER_AUTH_BACKUP"
-        chmod 600 "$USER_AUTH_BACKUP"
-        printf '%s\n' "$USER_SSH_KEY" >> "$USER_HOME/.ssh/authorized_keys"
-        print_message "SSH key added to $USER_HOME/.ssh/authorized_keys"
+        print_error "Failed to install SSH key for $NEW_USERNAME; stopping before SSH authentication changes"
+        exit 1
     fi
-
-    print_message "SSH key configured successfully for $NEW_USERNAME"
     echo ""
 fi
 
@@ -3368,29 +3506,12 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
 
     YUBIKEY_AUTHORIZED_KEYS=""
     if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
-        if id "$YUBIKEY_SSH_USER" &>/dev/null; then
+        if install_user_public_key "$YUBIKEY_SSH_USER" "$YUBIKEY_SSH_PUBLIC_KEY"; then
             YUBIKEY_USER_HOME=$(getent passwd "$YUBIKEY_SSH_USER" | cut -d: -f6)
-            YUBIKEY_USER_GROUP=$(id -gn "$YUBIKEY_SSH_USER")
-
-            if [ -n "$YUBIKEY_USER_HOME" ] && [ -d "$YUBIKEY_USER_HOME" ]; then
-                install -d -m 700 -o "$YUBIKEY_SSH_USER" -g "$YUBIKEY_USER_GROUP" "$YUBIKEY_USER_HOME/.ssh"
-                YUBIKEY_AUTHORIZED_KEYS="$YUBIKEY_USER_HOME/.ssh/authorized_keys"
-                touch "$YUBIKEY_AUTHORIZED_KEYS"
-                chown "$YUBIKEY_SSH_USER:$YUBIKEY_USER_GROUP" "$YUBIKEY_AUTHORIZED_KEYS"
-                chmod 600 "$YUBIKEY_AUTHORIZED_KEYS"
-
-                if grep -Fxq -- "$YUBIKEY_SSH_PUBLIC_KEY" "$YUBIKEY_AUTHORIZED_KEYS"; then
-                    print_message "YubiKey SSH public key already exists in $YUBIKEY_AUTHORIZED_KEYS"
-                else
-                    printf '%s\n' "$YUBIKEY_SSH_PUBLIC_KEY" >> "$YUBIKEY_AUTHORIZED_KEYS"
-                    print_success "YubiKey SSH public key added to $YUBIKEY_AUTHORIZED_KEYS"
-                fi
-            else
-                print_error "Home directory for user '$YUBIKEY_SSH_USER' not found"
-                YUBIKEY_SSH_OK=false
-            fi
+            YUBIKEY_AUTHORIZED_KEYS="$YUBIKEY_USER_HOME/.ssh/authorized_keys"
+            print_success "YubiKey SSH public key installed"
         else
-            print_error "Target user for YubiKey SSH does not exist: $YUBIKEY_SSH_USER"
+            print_error "Failed to install YubiKey public key; SSH authentication was left unchanged"
             YUBIKEY_SSH_OK=false
         fi
     else
@@ -3401,7 +3522,7 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
     SSHD_CONFIG_DIR="/etc/ssh/sshd_config.d"
     YUBIKEY_SSHD_DROPIN="${SSHD_CONFIG_DIR}/00-yubikey-fido2.conf"
 
-    if [ "$YUBIKEY_SSH_FIDO2_SUPPORTED" != true ]; then
+    if [ "$YUBIKEY_SSH_FIDO2_SUPPORTED" != true ] || [ "$YUBIKEY_SSH_OK" != true ]; then
         print_warning "Skipping sshd drop-in for YubiKey: OpenSSH does not support FIDO2 sk-* key types on this system"
         print_warning "Authorized key (if any) has been added but sshd will not accept it until OpenSSH is upgraded to 8.2+"
     elif [ ! -f "$SSHD_CONFIG" ]; then
@@ -3413,6 +3534,11 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
         print_message "Original sshd_config backed up: $YUBIKEY_SSHD_BACKUP"
 
         mkdir -p "$SSHD_CONFIG_DIR"
+        YUBIKEY_DROPIN_BACKUP=""
+        if [ -e "$YUBIKEY_SSHD_DROPIN" ]; then
+            YUBIKEY_DROPIN_BACKUP="${YUBIKEY_SSHD_DROPIN}.backup.$(date +%Y%m%d-%H%M%S)~"
+            cp -a -- "$YUBIKEY_SSHD_DROPIN" "$YUBIKEY_DROPIN_BACKUP" || exit 1
+        fi
 
         if ! ensure_sshd_include_first "$SSHD_CONFIG"; then
             print_error "Failed to ensure Include directive in $SSHD_CONFIG; restoring backup"
@@ -3450,6 +3576,7 @@ if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; the
                 else
                     print_error "sshd configuration validation failed; restoring backup"
                     rm -f "$YUBIKEY_SSHD_DROPIN"
+                    [ -n "$YUBIKEY_DROPIN_BACKUP" ] && cp -a -- "$YUBIKEY_DROPIN_BACKUP" "$YUBIKEY_SSHD_DROPIN"
                     cp "$YUBIKEY_SSHD_BACKUP" "$SSHD_CONFIG"
                     if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ] && [ -n "${YUBIKEY_AUTHORIZED_KEYS:-}" ] && [ -f "$YUBIKEY_AUTHORIZED_KEYS" ]; then
                         print_warning "Public key was already appended to $YUBIKEY_AUTHORIZED_KEYS and was NOT rolled back."
@@ -3485,51 +3612,16 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
         apt-get install -y software-properties-common
     fi
 
-    # Add Ondrej PHP PPA
-    if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
-        print_message "Adding ppa:ondrej/php..."
-        print_warning "Press ENTER when prompted to confirm the PPA addition"
-        echo ""
+    if [[ "$ADD_PPA_PHP" =~ ^[yY]$ ]]; then
+        add_supported_ubuntu_ppa ppa:ondrej/php || ADD_PPA_PHP="n"
+    fi
+    if [[ "$ADD_PPA_GIT" =~ ^[yY]$ ]]; then
+        add_supported_ubuntu_ppa ppa:git-core/ppa || ADD_PPA_GIT="n"
+    fi
+    if [[ "$ADD_PPA_TOOLCHAIN" =~ ^[yY]$ ]]; then
+        add_supported_ubuntu_ppa ppa:ubuntu-toolchain-r/test || ADD_PPA_TOOLCHAIN="n"
+    fi
 
-        # Use -y flag to auto-accept
-        if add-apt-repository -y ppa:ondrej/php 2>&1; then
-            print_success "Ondrej PHP PPA added successfully"
-        else
-            print_warning "Failed to add Ondrej PHP PPA, continuing..."
-        fi
-        echo ""
-    fi
-    
-    # Add Git Core PPA
-    if [ "$ADD_PPA_GIT" = "y" ] || [ "$ADD_PPA_GIT" = "Y" ]; then
-        print_message "Adding ppa:git-core/ppa..."
-        print_warning "Press ENTER when prompted to confirm the PPA addition"
-        echo ""
-        
-        # Use -y flag to auto-accept
-        if add-apt-repository -y ppa:git-core/ppa 2>&1; then
-            print_success "Git Core PPA added successfully"
-        else
-            print_warning "Failed to add Git Core PPA, continuing..."
-        fi
-        echo ""
-    fi
-    
-    # Add Ubuntu Toolchain PPA
-    if [ "$ADD_PPA_TOOLCHAIN" = "y" ] || [ "$ADD_PPA_TOOLCHAIN" = "Y" ]; then
-        print_message "Adding ppa:ubuntu-toolchain-r/test..."
-        print_warning "Press ENTER when prompted to confirm the PPA addition"
-        echo ""
-        
-        # Use -y flag to auto-accept
-        if add-apt-repository -y ppa:ubuntu-toolchain-r/test 2>&1; then
-            print_success "Ubuntu Toolchain PPA added successfully"
-        else
-            print_warning "Failed to add Ubuntu Toolchain PPA, continuing..."
-        fi
-        echo ""
-    fi
-    
     # Update package lists after adding PPAs
     print_message "Updating package lists with new PPA repositories..."
     if apt-get update; then
@@ -3565,12 +3657,13 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
     NGINX_RM_BK=""
     if [ -d /etc/nginx ]; then
         install -d -m 0700 -o root -g root /var/backups
-        NGINX_RM_BK=$(mktemp -d "/var/backups/nginx-removal-$(date +%Y%m%d-%H%M%S).XXXXXX")
+        NGINX_RM_BK=$(mktemp -d "/var/backups/nginx-removal-$(date +%Y%m%d-%H%M%S).XXXXXX") || exit 1
         chmod 0700 "$NGINX_RM_BK"
         if tar czf "$NGINX_RM_BK/etc-nginx.tar.gz" -C / etc/nginx 2>/dev/null; then
             print_success "Backed up /etc/nginx to $NGINX_RM_BK/etc-nginx.tar.gz"
         else
-            print_warning "Could not archive /etc/nginx"
+            print_error "Could not back up /etc/nginx; refusing destructive changes"
+            exit 1
         fi
         dpkg-query -W -f='${Package} ${Version} ${Status}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
             | awk '$3 == "install" && $4 == "ok" && $5 == "installed" {print $1, $2}' \
@@ -3590,7 +3683,7 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
     NGINX_RM_PKGS="$(echo "$NGINX_RM_PKGS" | xargs 2>/dev/null)"
     if [ -n "$NGINX_RM_PKGS" ]; then
         print_message "Purging packages: $NGINX_RM_PKGS"
-        apt-get purge -y $NGINX_RM_PKGS || print_warning "Some packages could not be purged"
+        apt-get purge -y $NGINX_RM_PKGS || { print_error "nginx purge failed; leaving remaining files intact"; exit 1; }
     else
         print_message "No nginx packages registered with dpkg."
     fi
@@ -3660,6 +3753,20 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
     if [ -z "$NGINX_CODENAME" ]; then
         print_warning "Could not determine distribution codename; skipping Nginx repositories"
     else
+        # Validate suite availability before installing any source definition.
+        for NGINX_SOURCE_FLAG in ADD_NGINX_ORG ADD_NGINX_MYGUARD ADD_NGINX_MODULES; do
+            is_yes "${!NGINX_SOURCE_FLAG}" || continue
+            case "$NGINX_SOURCE_FLAG" in
+                ADD_NGINX_ORG) NGINX_RELEASE_URL="https://nginx.org/packages/$OS/dists/$NGINX_CODENAME/Release" ;;
+                ADD_NGINX_MYGUARD) NGINX_RELEASE_URL="https://deb.myguard.nl/apt/nginx/$NGINX_CODENAME/dists/$NGINX_CODENAME/Release" ;;
+                ADD_NGINX_MODULES) NGINX_RELEASE_URL="https://apt.blendbyte.net/nginx/dists/$NGINX_CODENAME/Release" ;;
+            esac
+            if ! repository_has_release "$NGINX_RELEASE_URL" "$NGINX_CODENAME"; then
+                print_error "Nginx repository has no verified metadata for $NGINX_CODENAME: $NGINX_SOURCE_FLAG"
+                printf -v "$NGINX_SOURCE_FLAG" '%s' n
+            fi
+        done
+
         # ---- Official nginx.org repository ----
         if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
             print_message "Adding official nginx.org repository ($OS $NGINX_CODENAME)..."
@@ -3671,7 +3778,7 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
             if download_verified_url "https://nginx.org/keys/nginx_signing.key" "$NGINX_KEY_ASC" \
                     "55385da31d198fa6a5012d40ae98ecb272a6c4e8fffffba94719ffd3e87de37a" && \
                gpg --batch --yes --dearmor -o "$NGINX_KEYRING_TMP" "$NGINX_KEY_ASC" 2>/dev/null; then
-                mv -f -- "$NGINX_KEYRING_TMP" /usr/share/keyrings/nginx-archive-keyring.gpg
+                mv -f -- "$NGINX_KEYRING_TMP" /usr/share/keyrings/nginx-archive-keyring.gpg || { print_error "Cannot install nginx keyring"; exit 1; }
                 chmod 0644 /usr/share/keyrings/nginx-archive-keyring.gpg
 
                 # Stable repository source (path differs per OS: ubuntu vs debian)
@@ -3705,8 +3812,8 @@ NGINX_PIN
             else
                 # gpg --dearmor -o creates the target before reading stdin, so a
                 # failed download can leave an empty keyring; remove it.
-                rm -f /usr/share/keyrings/nginx-archive-keyring.gpg
-                print_warning "Failed to import nginx.org signing key, skipping official repository"
+                ADD_NGINX_ORG="n"
+                print_error "Failed to import nginx.org signing key, skipping official repository"
             fi
             rm -f -- "$NGINX_KEY_ASC" "$NGINX_KEYRING_TMP"
             echo ""
@@ -3739,7 +3846,8 @@ NGINX_PIN
 
                 print_success "Third-party deb.myguard.nl Nginx repository added"
             else
-                print_warning "Failed to import deb.myguard.nl signing key, skipping third-party repository"
+                ADD_NGINX_MYGUARD="n"
+                print_error "Failed to import deb.myguard.nl signing key, skipping third-party repository"
             fi
             echo ""
         fi
@@ -3777,7 +3885,8 @@ BLENDBYTE_PIN
 
                 print_success "nginx-modules.com (Blendbyte) repository added"
             else
-                print_warning "Failed to import Blendbyte signing key, skipping modules repository"
+                ADD_NGINX_MODULES="n"
+                print_error "Failed to import Blendbyte signing key, skipping modules repository"
             fi
             echo ""
         fi
@@ -3895,8 +4004,15 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
         NGINX_PKGS="$NGINX_PKGS $NGINX_CUSTOM_PKGS"
     fi
 
-    # Normalise separators (allow commas as well as spaces) and trim
-    NGINX_PKGS="$(echo "$NGINX_PKGS" | tr ',' ' ' | xargs 2>/dev/null)"
+    NGINX_PKGS=${NGINX_PKGS//,/ }
+    read -r -a NGINX_PACKAGE_ARRAY <<< "$NGINX_PKGS"
+    for NGINX_PACKAGE in "${NGINX_PACKAGE_ARRAY[@]}"; do
+        if ! [[ "$NGINX_PACKAGE" =~ ^[a-z0-9][a-z0-9.+-]*(:[a-z0-9-]+)?(=[a-zA-Z0-9.+:~_-]+)?$ ]]; then
+            print_error "Invalid nginx package name: $NGINX_PACKAGE"
+            NGINX_VARIANT_OK="n"
+        fi
+    done
+    NGINX_PKGS="${NGINX_PACKAGE_ARRAY[*]}"
 
     if [ "$NGINX_VARIANT_OK" != "y" ]; then
         print_warning "Selected nginx preset '$NGINX_INSTALL_VARIANT' requires a repository that was not enabled; skipping nginx installation."
@@ -3935,19 +4051,21 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
             # ---- Safe migration from an existing (distro) nginx ----
             if [ "$NGINX_PREEXISTING" = "y" ]; then
                 install -d -m 0700 -o root -g root /var/backups
-                NGINX_BK=$(mktemp -d "/var/backups/nginx-migration-$(date +%Y%m%d-%H%M%S).XXXXXX")
+                NGINX_BK=$(mktemp -d "/var/backups/nginx-migration-$(date +%Y%m%d-%H%M%S).XXXXXX") || exit 1
                 chmod 0700 "$NGINX_BK"
                 print_message "Backing up current nginx setup to $NGINX_BK ..."
                 if [ -d /etc/nginx ]; then
                     if tar czf "$NGINX_BK/etc-nginx.tar.gz" -C / etc/nginx 2>/dev/null; then
                         print_success "Saved $NGINX_BK/etc-nginx.tar.gz"
                     else
-                        print_warning "Could not archive /etc/nginx"
+                        print_error "Could not back up /etc/nginx; refusing destructive changes"
+            exit 1
                     fi
                 fi
                 dpkg-query -W -f='${Package} ${Version} ${Status}\n' 'nginx*' 'libnginx-mod-*' 2>/dev/null \
                     | awk '$3 == "install" && $4 == "ok" && $5 == "installed" {print $1, $2}' \
                     > "$NGINX_BK/packages.txt" || true
+                [ -s "$NGINX_BK/packages.txt" ] || { print_error "Cannot save nginx package inventory; migration cancelled"; exit 1; }
                 nginx -v 2> "$NGINX_BK/nginx-version.txt" || true
 
                 # Stop the running service before swapping packages
@@ -4095,7 +4213,7 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                 if command -v nginx >/dev/null 2>&1 && nginx -t 2>&1; then
                     print_success "nginx configuration test passed"
                     if command -v systemctl >/dev/null 2>&1; then
-                        systemctl enable --now nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+                        systemctl enable nginx 2>/dev/null && systemctl restart nginx 2>/dev/null || true
                         if systemctl is-active --quiet nginx; then
                             print_success "nginx is running"
                             NGINX_RUNTIME_OK=true
@@ -4133,7 +4251,7 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     nginx_strip_ipv6_listen
                     if dpkg --configure -a 2>/dev/null && apt-get install -y -f; then
                         print_success "nginx install completed after removing IPv6 listen directives"
-                        if nginx -t 2>&1 && systemctl enable --now nginx 2>/dev/null; then
+                        if nginx -t 2>&1 && systemctl enable nginx 2>/dev/null && systemctl restart nginx 2>/dev/null; then
                             print_success "nginx configuration verified and service started"
                         else
                             print_error "nginx recovery install completed but validation or service start failed"
@@ -4209,13 +4327,16 @@ if ( [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] ) && [ ! -z "$NEW_USER
     
     USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
     
+    ZSH_CONFIG_OK=true
+    USER_GROUP=$(id -gn "$NEW_USERNAME")
+    OH_MY_ZSH_OK=false
+    OH_MY_ZSH_COMMIT="830a5bcfd29fd577fdcd5f3b8e98cbaf973421fa"
     # Install Oh My Zsh as user
     print_message "Installing Oh My Zsh..."
     if [ -d "$USER_HOME/.oh-my-zsh" ]; then
         print_message "Oh My Zsh already installed, reusing existing directory"
     else
         OH_MY_ZSH_INSTALLER_TMP=$(mktemp)
-        OH_MY_ZSH_COMMIT="830a5bcfd29fd577fdcd5f3b8e98cbaf973421fa"
         OH_MY_ZSH_SHA256="5b16896b831243ebd2f409ecd99c3d231385cc706fbc564625057929ebee5e6e"
         if download_verified_url "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/${OH_MY_ZSH_COMMIT}/tools/install.sh" "$OH_MY_ZSH_INSTALLER_TMP" "$OH_MY_ZSH_SHA256"; then
             chmod 755 "$OH_MY_ZSH_INSTALLER_TMP"
@@ -4228,8 +4349,6 @@ if ( [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] ) && [ ! -z "$NEW_USER
 EOF
 	    then
 	        print_error "Pinned Oh My Zsh installer failed"
-	    elif ! sudo -u "$NEW_USERNAME" git -C "$USER_HOME/.oh-my-zsh" checkout --detach "$OH_MY_ZSH_COMMIT"; then
-	        print_error "Failed to pin Oh My Zsh checkout to $OH_MY_ZSH_COMMIT"
 	    fi
             rm -f "$OH_MY_ZSH_INSTALLER_TMP"
         else
@@ -4238,7 +4357,17 @@ EOF
         fi
     fi
     
-    if [ -d "$USER_HOME/.oh-my-zsh" ]; then
+    # The upstream installer fetches only the branch tip (--depth=1). Fetch
+    # the pinned object explicitly, including when repairing an earlier run.
+    if [ -d "$USER_HOME/.oh-my-zsh/.git" ]; then
+        if pin_user_git_checkout "$NEW_USERNAME" "$USER_HOME/.oh-my-zsh" "$OH_MY_ZSH_COMMIT"; then
+            OH_MY_ZSH_OK=true
+        else
+            print_error "Failed to pin Oh My Zsh checkout to $OH_MY_ZSH_COMMIT"
+        fi
+    fi
+
+    if [ "$OH_MY_ZSH_OK" = true ]; then
         print_message "Oh My Zsh installed successfully"
         
         # Install zsh plugins
@@ -4251,8 +4380,10 @@ EOF
             mkdir -p "\$ZSH_PLUGIN_DIR"
             install_plugin() {
                 local url="\$1" directory="\$2" commit="\$3"
-                [ -d "\$directory/.git" ] && return 0
-                git clone --no-checkout "\$url" "\$directory" &&
+                if [ ! -d "\$directory/.git" ]; then
+                    git clone --no-checkout "\$url" "\$directory" || return 1
+                fi
+                git -C "\$directory" fetch --depth=1 origin "\$commit" &&
                     git -C "\$directory" checkout --detach "\$commit"
             }
             install_plugin https://github.com/zsh-users/zsh-syntax-highlighting.git \
@@ -4263,6 +4394,7 @@ EOF
                 "\$ZSH_PLUGIN_DIR/zsh-history-substring-search" 14c8d2e0ffaee98f2df9850b19944f32546fdea5 || exit 1
 EOF
         then
+            ZSH_CONFIG_OK=false
             print_error "Pinned zsh plugin installation failed"
         else
             print_message "Zsh plugins installed successfully"
@@ -4272,10 +4404,11 @@ EOF
         print_message "Downloading custom .zshrc configuration..."
         if install_verified_repo_asset "config/.zshrc" "$USER_HOME/.zshrc" "b5b20444bd9c87f06acb18e56e5cc96d86b40974fcaa3a85dd3ea692c348a654" 0644; then
             print_message "Custom .zshrc verified and installed"
-            chown "$NEW_USERNAME:$NEW_USERNAME" "$USER_HOME/.zshrc"
+            chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.zshrc" || ZSH_CONFIG_OK=false
             chmod 644 "$USER_HOME/.zshrc"
         else
-            print_warning "Failed to download custom .zshrc, using default"
+            ZSH_CONFIG_OK=false
+            print_error "Failed to install custom .zshrc"
         fi
 
         # Download custom .zshenv (sets PATH for non-interactive shells too —
@@ -4283,15 +4416,20 @@ EOF
         print_message "Downloading custom .zshenv configuration..."
         if install_verified_repo_asset "config/.zshenv" "$USER_HOME/.zshenv" "720c0cf32bfda634c8b9ba66012d19a9129048cd4520981c431b6423595cfcfd" 0644; then
             print_message "Custom .zshenv verified and installed"
-            chown "$NEW_USERNAME:$NEW_USERNAME" "$USER_HOME/.zshenv"
+            chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.zshenv" || ZSH_CONFIG_OK=false
         else
-            print_warning "Failed to download custom .zshenv, using default"
+            ZSH_CONFIG_OK=false
+            print_error "Failed to install custom .zshenv"
         fi
 
         # Change default shell to zsh
         print_message "Changing default shell to zsh for $NEW_USERNAME"
-        chsh -s "$(which zsh)" "$NEW_USERNAME"
-        print_message "Default shell changed to zsh"
+        if chsh -s "$(command -v zsh)" "$NEW_USERNAME"; then
+            print_message "Default shell changed to zsh"
+        else
+            ZSH_CONFIG_OK=false
+            print_error "Failed to change default shell to zsh"
+        fi
     else
         print_error "Oh My Zsh installation failed"
     fi
@@ -4308,16 +4446,18 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
 
     SSHD_CONFIG="/etc/ssh/sshd_config"
     SSHD_CONFIG_DIR="/etc/ssh/sshd_config.d"
-    SSHD_DROPIN="${SSHD_CONFIG_DIR}/99-system-setup.conf"
+    SSHD_DROPIN="${SSHD_CONFIG_DIR}/10-system-setup.conf"
     SSHD_CONFIG_BACKUP=""
     SSHD_DROPIN_BACKUP=""
+    SSHD_LEGACY_DROPIN="${SSHD_CONFIG_DIR}/99-system-setup.conf"
+    SSHD_LEGACY_BACKUP=""
     ORIGINAL_SSH_PORT=$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')
     ORIGINAL_SSH_PORT=${ORIGINAL_SSH_PORT:-22}
 
     # Backup original sshd_config
     if [ -f "$SSHD_CONFIG" ]; then
         SSHD_CONFIG_BACKUP="/etc/ssh/sshd_config.backup.$(date +%Y%m%d-%H%M%S)~"
-        cp "$SSHD_CONFIG" "$SSHD_CONFIG_BACKUP"
+        cp -p "$SSHD_CONFIG" "$SSHD_CONFIG_BACKUP" || { print_error "Cannot back up sshd_config"; exit 1; }
         print_message "Original sshd_config backed up"
     else
         print_error "sshd_config not found: $SSHD_CONFIG"
@@ -4330,10 +4470,21 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
 
         if [ -e "$SSHD_DROPIN" ] || [ -L "$SSHD_DROPIN" ]; then
             SSHD_DROPIN_BACKUP="${SSHD_DROPIN}.backup.$(date +%Y%m%d-%H%M%S)~"
-            cp -a -- "$SSHD_DROPIN" "$SSHD_DROPIN_BACKUP"
+            cp -a -- "$SSHD_DROPIN" "$SSHD_DROPIN_BACKUP" || { print_error "Cannot back up SSH drop-in"; exit 1; }
         fi
 
-        if ! ensure_sshd_include_first "$SSHD_CONFIG"; then
+        # Migrate only our old managed file. It sorts after cloud-init and
+        # leaves stale accumulating directives if kept alongside the new file.
+        if [ -f "$SSHD_LEGACY_DROPIN" ] && grep -Fxq '# Managed by system-setup.sh' "$SSHD_LEGACY_DROPIN"; then
+            SSHD_LEGACY_BACKUP="${SSHD_LEGACY_DROPIN}.backup.$(date +%Y%m%d-%H%M%S)~"
+            if ! mv -- "$SSHD_LEGACY_DROPIN" "$SSHD_LEGACY_BACKUP"; then
+                SSHD_LEGACY_BACKUP=""
+                print_error "Failed to back up legacy SSH drop-in"
+                CONFIGURE_SSH="failed"
+            fi
+        fi
+
+        if ! ensure_sshd_include_first "$SSHD_CONFIG" || ! remove_sshd_accumulating_parameters "$SSHD_CONFIG"; then
             print_error "Failed to enable sshd drop-in processing"
             CONFIGURE_SSH="failed"
         fi
@@ -4343,7 +4494,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         SSHD_DROPIN_CONTENT="# Managed by system-setup.sh
 # WARNING: This file is regenerated on every run; manual edits will be lost.
 # To customize sshd beyond what this script manages, create another drop-in
-# whose name sorts BEFORE this one (e.g. /etc/ssh/sshd_config.d/10-local.conf).
+# whose name sorts BEFORE this one (e.g. /etc/ssh/sshd_config.d/01-local.conf).
 "
 
         # Helper: append a parameter to the in-memory drop-in content.
@@ -4355,7 +4506,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         }
 
         # Change SSH port
-        if [ ! -z "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
+        if [ -n "$SSH_PORT" ]; then
             # Ubuntu 24.04+ reads this Port via sshd-socket-generator when
             # systemctl daemon-reload runs. restart_ssh_listener verifies that
             # ssh.socket or ssh.service is actually listening afterward.
@@ -4410,7 +4561,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
 
         # Test SSH configuration
         print_message "Testing SSH configuration..."
-        if [ "$CONFIGURE_SSH" != "failed" ] && sshd -t; then
+        if [ "$CONFIGURE_SSH" != "failed" ] && sshd -t && verify_sshd_parameters "$SSHD_DROPIN"; then
             print_message "SSH configuration is valid"
 
             # Restart the listener and verify the selected port. On Ubuntu
@@ -4425,6 +4576,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
                     rm -f -- "$SSHD_DROPIN"
                 fi
                 [ -n "$SSHD_CONFIG_BACKUP" ] && cp -- "$SSHD_CONFIG_BACKUP" "$SSHD_CONFIG"
+                [ -n "$SSHD_LEGACY_BACKUP" ] && cp -a -- "$SSHD_LEGACY_BACKUP" "$SSHD_LEGACY_DROPIN"
                 restore_ssh_activation_state
                 if sshd -t && restart_ssh_listener "$ORIGINAL_SSH_PORT"; then
                     print_warning "SSH configuration rolled back; listener restored on port $ORIGINAL_SSH_PORT"
@@ -4447,6 +4599,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
             else
                 print_error "No backup found to restore"
             fi
+            [ -n "$SSHD_LEGACY_BACKUP" ] && cp -a -- "$SSHD_LEGACY_BACKUP" "$SSHD_LEGACY_DROPIN"
             restore_ssh_activation_state
             SSH_PORT="$ORIGINAL_SSH_PORT"
             CONFIGURE_SSH="failed"
@@ -4465,12 +4618,21 @@ if { [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; } && command -v u
     print_message "Configuring UFW firewall..."
     UFW_CONFIG_OK=true
     
+    UFW_SSH_PORTS=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
+    UFW_SSH_PORTS=${UFW_SSH_PORTS:-$SSH_PORT}
+    for UFW_SSH_PORT in $UFW_SSH_PORTS; do
+        ufw allow "${UFW_SSH_PORT}/tcp" comment 'SSH' || UFW_CONFIG_OK=false
+    done
+    if [ "$UFW_CONFIG_OK" != true ]; then
+        print_error "Could not allow the SSH listener in UFW; refusing to change firewall policies"
+        exit 1
+    fi
+
     # Set default policies
     print_message "Setting UFW default policies..."
     ufw --force default deny incoming || UFW_CONFIG_OK=false
     ufw --force default allow outgoing || UFW_CONFIG_OK=false
-    ufw --force default deny forward || UFW_CONFIG_OK=false
-    ufw --force default deny routed 2>/dev/null || print_warning "UFW 'deny routed' not supported in this version, skipping"
+    ufw --force default deny routed || UFW_CONFIG_OK=false
     print_message "UFW default policies configured"
     
     # Allow SSH (use configured port)
@@ -4520,8 +4682,8 @@ if { [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; } && command -v u
     
     # Enable UFW
     print_message "Enabling UFW..."
-    if ! ufw --force enable; then
-        UFW_CONFIG_OK=false
+    if [ "$UFW_CONFIG_OK" = true ]; then
+        ufw --force enable || UFW_CONFIG_OK=false
     fi
     ufw status verbose || UFW_CONFIG_OK=false
     if [ "$UFW_CONFIG_OK" != true ]; then
@@ -4568,10 +4730,10 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
             awk '
             /# ok icmp codes for INPUT/ {
                 print "# ok icmp codes for INPUT"
-                print "-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP"
-                print "-A ufw-before-input -p icmp --icmp-type source-quench -j DROP"
-                print "-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP"
-                print "-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP"
+                print "-A ufw-before-input -p icmp --icmp-type destination-unreachable -j ACCEPT"
+                print "-A ufw-before-input -p icmp --icmp-type source-quench -j ACCEPT"
+                print "-A ufw-before-input -p icmp --icmp-type time-exceeded -j ACCEPT"
+                print "-A ufw-before-input -p icmp --icmp-type parameter-problem -j ACCEPT"
                 print "-A ufw-before-input -p icmp --icmp-type echo-request -j DROP"
                 
                 # Skip all lines that start with -A ufw-before-input -p icmp
@@ -4605,8 +4767,12 @@ if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
                 
                 # Reload UFW to apply changes
                 print_message "Reloading UFW to apply ICMP blocking..."
-                ufw reload
-                print_message "UFW reloaded"
+                if ufw reload; then
+                    print_message "UFW reloaded"
+                else
+                    print_error "UFW reload failed after ICMP configuration"
+                    UFW_CONFIG_OK=false
+                fi
             else
                 print_error "Failed to modify before.rules (temporary file is empty)"
                 rm -f "$TEMP_FILE"
@@ -4658,8 +4824,12 @@ install_docker_from_official_repository() {
         return 1
     fi
 
-    install -d -m 0755 /etc/apt/keyrings
-    install -m 0644 -o root -g root "$docker_key_tmp" /etc/apt/keyrings/docker.asc
+    if ! repository_has_release "https://download.docker.com/linux/${docker_repo_os}/dists/${docker_codename}/Release" "$docker_codename"; then
+        print_error "Docker repository does not provide verified metadata for $docker_codename"
+        return 1
+    fi
+    install -d -m 0755 /etc/apt/keyrings || return 1
+    install -m 0644 -o root -g root "$docker_key_tmp" /etc/apt/keyrings/docker.asc || return 1
     write_file_atomic "$docker_sources" 0644 root:root <<EOF
 Types: deb
 URIs: https://download.docker.com/linux/${docker_repo_os}
@@ -4668,6 +4838,7 @@ Components: stable
 Architectures: ${docker_arch}
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
+    [ "$?" -eq 0 ] || return 1
 
     if ! apt-get update; then
         print_error "Docker repository metadata update failed"
@@ -4691,7 +4862,7 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     if command -v docker &> /dev/null; then
         DOCKER_VERSION=$(docker --version 2>/dev/null || echo "unknown")
         print_warning "Docker is already installed: $DOCKER_VERSION"
-        read -r -p "Do you want to reinstall Docker? (y/N): " REINSTALL_DOCKER
+        prompt_read -r -p "Do you want to reinstall Docker? (y/N): " REINSTALL_DOCKER
         REINSTALL_DOCKER=${REINSTALL_DOCKER:-n}
         
         if [ "$REINSTALL_DOCKER" != "y" ] && [ "$REINSTALL_DOCKER" != "Y" ]; then
@@ -4711,8 +4882,9 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             DOCKER_INSTALLED="yes"
             
             # Start and enable Docker
-            systemctl start docker
-            systemctl enable docker
+            if ! systemctl enable --now docker; then
+                print_error "Docker packages installed but daemon failed to start"
+            fi
             
             # Ensure docker group exists
             if ! getent group docker > /dev/null 2>&1; then
@@ -4821,6 +4993,7 @@ DEOF
                 if systemctl restart docker && sleep 2 && systemctl is-active --quiet docker 2>/dev/null; then
                     print_success "Docker restarted with iptables disabled"
                 else
+                    DOCKER_DISABLE_IPTABLES="failed"
                     print_error "Docker failed to restart with the updated daemon.json"
                     if [ -n "${DAEMON_JSON_BACKUP:-}" ] && [ -f "$DAEMON_JSON_BACKUP" ]; then
                         cp -- "$DAEMON_JSON_BACKUP" "$DAEMON_JSON"
@@ -4887,12 +5060,16 @@ if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
 
     if [ -n "$UFW_DOCKER_TMP" ] && download_url_ipv4 "$UFW_DOCKER_URL" "$UFW_DOCKER_TMP" && \
        [ "$(sha256sum "$UFW_DOCKER_TMP" | awk '{print $1}')" = "$UFW_DOCKER_SHA256" ]; then
-        install -m 0755 -o root -g root "$UFW_DOCKER_TMP" /usr/local/bin/ufw-docker
+        install -m 0755 -o root -g root "$UFW_DOCKER_TMP" /usr/local/bin/ufw-docker || {
+            print_error "Failed to install verified ufw-docker binary"
+            exit 1
+        }
         print_message "Pinned ufw-docker verified and installed"
         
         # Run ufw-docker install
         print_message "Configuring ufw-docker..."
         if /usr/local/bin/ufw-docker install; then
+            UFW_DOCKER_OK=true
             print_message "ufw-docker configured successfully"
         else
             print_error "ufw-docker configuration failed"
@@ -4922,48 +5099,30 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
         
         USER_HOME=$(getent passwd "$NEW_USERNAME" | cut -d: -f6)
         
-        # Get the latest Go version from official website
-        print_message "Fetching latest Go version..."
-        GO_VERSION_TMP=$(mktemp)
-        if download_url_ipv4 "https://go.dev/VERSION?m=text" "$GO_VERSION_TMP"; then
-            LATEST_GO_VERSION=$(head -1 "$GO_VERSION_TMP")
-        else
-            LATEST_GO_VERSION=""
-        fi
-        rm -f "$GO_VERSION_TMP"
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64) GO_ARCH="amd64" ;;
+            aarch64|arm64) GO_ARCH="arm64" ;;
+            armv6l) GO_ARCH="armv6l" ;;
+            i386|i686) GO_ARCH="386" ;;
+            *)
+                print_error "Unsupported Go architecture: $ARCH"
+                GO_ARCH=""
+                ;;
+        esac
 
-        if [ -z "$LATEST_GO_VERSION" ] || ! [[ "$LATEST_GO_VERSION" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-            print_error "Could not fetch latest Go version"
-            print_warning "Skipping Go installation instead of installing a stale fallback version"
-            INSTALL_GO="n"
-        fi
-
-        if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
-            print_message "Latest Go version: $LATEST_GO_VERSION"
-
-            # Detect system architecture
-            ARCH=$(uname -m)
-            case "$ARCH" in
-                x86_64)
-                    GO_ARCH="amd64"
-                    ;;
-                aarch64|arm64)
-                    GO_ARCH="arm64"
-                    ;;
-                armv6l)
-                    GO_ARCH="armv6l"
-                    ;;
-                i386|i686)
-                    GO_ARCH="386"
-                    ;;
-                *)
-                    print_error "Unsupported architecture: $ARCH"
-                    print_error "Go installation skipped"
-                    GO_ARCH=""
-                    ;;
-            esac
-        else
-            GO_ARCH=""
+        if [ -n "$GO_ARCH" ]; then
+            print_message "Fetching latest stable Go release and checksum..."
+            GO_METADATA_TMP=$(mktemp)
+            if download_url_ipv4 "https://go.dev/dl/?mode=json" "$GO_METADATA_TMP" &&
+               GO_RELEASE=$(select_go_archive "$GO_METADATA_TMP" "$GO_ARCH"); then
+                read -r LATEST_GO_VERSION GO_ARCHIVE GO_EXPECTED_SHA256 <<< "$GO_RELEASE"
+                print_message "Latest Go version: $LATEST_GO_VERSION"
+            else
+                print_error "Could not fetch verified Go release metadata"
+                GO_ARCH=""
+            fi
+            rm -f -- "$GO_METADATA_TMP"
         fi
 
         if [ -z "$GO_ARCH" ]; then
@@ -4973,28 +5132,23 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
             print_message "Detected architecture: $ARCH (Go architecture: $GO_ARCH)"
 
             # Download Go
-            GO_ARCHIVE="${LATEST_GO_VERSION}.linux-${GO_ARCH}.tar.gz"
             GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
-            GO_CHECKSUM_URL="${GO_URL}.sha256"
             if create_temp_dir "go-install"; then
                 GO_TMP_DIR="$SYSTEM_SETUP_CREATED_TEMP_DIR"
             else
                 GO_TMP_DIR=""
             fi
             GO_ARCHIVE_PATH="${GO_TMP_DIR}/${GO_ARCHIVE}"
-            GO_CHECKSUM_PATH="${GO_ARCHIVE_PATH}.sha256"
             GO_STAGE_DIR="${GO_TMP_DIR}/stage"
             GO_INSTALL_OK=false
 
             print_message "Downloading Go from: $GO_URL"
             if [ -n "$GO_TMP_DIR" ] && \
-               download_url_ipv4 "$GO_URL" "$GO_ARCHIVE_PATH" 900 && \
-               download_url_ipv4 "$GO_CHECKSUM_URL" "$GO_CHECKSUM_PATH"; then
-                GO_EXPECTED_SHA256=$(awk 'NR == 1 { print $1 }' "$GO_CHECKSUM_PATH")
+               download_url_ipv4 "$GO_URL" "$GO_ARCHIVE_PATH" 900; then
                 GO_ACTUAL_SHA256=$(sha256sum "$GO_ARCHIVE_PATH" | awk '{print $1}')
                 if ! [[ "$GO_EXPECTED_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || \
                    [ "$GO_EXPECTED_SHA256" != "$GO_ACTUAL_SHA256" ]; then
-                    print_error "Go archive SHA256 verification failed"
+                    print_error "Go archive SHA256 verification failed (expected $GO_EXPECTED_SHA256, got $GO_ACTUAL_SHA256)"
                 else
                     print_success "Go archive SHA256 verified"
                     mkdir -p "$GO_STAGE_DIR"
@@ -5050,13 +5204,16 @@ if [ "$INSTALL_GO" = "y" ] || [ "$INSTALL_GO" = "Y" ]; then
 
                 # Add Go to PATH if not already present
                 if ! grep -q "export PATH=.*:/usr/local/go/bin" "$SHELL_RC" 2>/dev/null; then
-                    sudo -u "$NEW_USERNAME" bash << EOF
-                        echo "" >> "$SHELL_RC"
-                        echo "# Go language" >> "$SHELL_RC"
-                        echo "export PATH=\$PATH:/usr/local/go/bin" >> "$SHELL_RC"
-                        echo "export PATH=\$PATH:\$HOME/go/bin" >> "$SHELL_RC"
-EOF
-                    print_message "Go PATH added to $SHELL_RC"
+                    if sudo -u "$NEW_USERNAME" tee -a "$SHELL_RC" >/dev/null <<'GOENV'
+
+# Go language
+export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+GOENV
+                    then
+                        print_message "Go PATH added to $SHELL_RC"
+                    else
+                        print_error "Failed to configure Go PATH for $NEW_USERNAME"
+                    fi
                 else
                     print_message "Go PATH already configured in $SHELL_RC"
                 fi
@@ -5072,7 +5229,7 @@ EOF
                 fi
                 fi
             else
-                print_error "Failed to download Go archive or its checksum"
+                print_error "Failed to download Go archive"
             fi
         fi
 
@@ -5149,7 +5306,7 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
         
         # Activate virtual environment and install packages
         print_message "Installing Python packages..."
-        source "$VENV_PATH/bin/activate"
+        VENV_CREATED_OK=true
 
         # Upgrade pip first without letting pip failures stop the whole setup.
         set +e
@@ -5167,10 +5324,10 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
         )
 
         if [ -n "$PIP_TIMEOUT_BIN" ]; then
-            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$PIP_TIMEOUT_BIN" 180 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade pip
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$PIP_TIMEOUT_BIN" 180 "$VENV_PATH/bin/python" -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade pip
             PIP_UPGRADE_EXIT_CODE=$?
         else
-            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade pip
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$VENV_PATH/bin/python" -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade pip
             PIP_UPGRADE_EXIT_CODE=$?
         fi
 
@@ -5184,8 +5341,6 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
             psutil
             pytz
             uvloop
-            ipaddress
-            pathlib
             python-telegram-bot
             nest_asyncio
             aiohttp
@@ -5208,25 +5363,25 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
         )
 
         if [ -n "$PIP_TIMEOUT_BIN" ]; then
-            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$PIP_TIMEOUT_BIN" 600 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade "${PIP_PACKAGES[@]}"
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$PIP_TIMEOUT_BIN" 600 "$VENV_PATH/bin/python" -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade "${PIP_PACKAGES[@]}"
             PIP_EXIT_CODE=$?
         else
-            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 python -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade "${PIP_PACKAGES[@]}"
+            PIP_NO_INPUT=1 PIP_DEFAULT_TIMEOUT=15 "$VENV_PATH/bin/python" -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade "${PIP_PACKAGES[@]}"
             PIP_EXIT_CODE=$?
         fi
         set +e
 
         if [ $PIP_EXIT_CODE -eq 0 ]; then
+            VENV_PACKAGES_OK=true
             print_message "Python packages installed successfully"
         elif [ $PIP_EXIT_CODE -eq 124 ]; then
-            print_warning "Python package installation timed out; continuing setup"
+            print_error "Python package installation timed out"
         else
-            print_warning "Some Python packages may have failed to install (exit code: $PIP_EXIT_CODE)"
+            print_error "Some Python packages may have failed to install (exit code: $PIP_EXIT_CODE)"
         fi
         print_message "Virtual environment location: $VENV_PATH"
         print_message "To activate: source $VENV_PATH/bin/activate"
 
-        deactivate
     else
         print_error "Failed to create virtual environment"
     fi
@@ -5252,9 +5407,9 @@ if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
     EXISTING_CRONTAB_FILE="${CRONTAB_TMP_DIR}/existing-crontab"
     if crontab -l &>/dev/null; then
         CRONTAB_BACKUP=$(mktemp "${TMPDIR:-/tmp}/crontab.backup.$(date +%Y%m%d-%H%M%S).XXXXXX")
-        crontab -l > "$CRONTAB_BACKUP"
+        crontab -l > "$CRONTAB_BACKUP" || { print_error "Cannot back up existing crontab"; exit 1; }
         chmod 600 "$CRONTAB_BACKUP"
-        cp "$CRONTAB_BACKUP" "$EXISTING_CRONTAB_FILE"
+        cp "$CRONTAB_BACKUP" "$EXISTING_CRONTAB_FILE" || exit 1
         print_message "Existing crontab backed up: $CRONTAB_BACKUP"
     else
         : > "$EXISTING_CRONTAB_FILE"
@@ -5262,11 +5417,10 @@ if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
 
     # Remove previous managed block only; preserve user-managed cron entries.
     CLEAN_CRONTAB_FILE="${CRONTAB_TMP_DIR}/clean-crontab"
-    awk '
-        /^# BEGIN system-setup.sh managed crontab$/ { skip=1; next }
-        /^# END system-setup.sh managed crontab$/ { skip=0; next }
-        !skip { print }
-    ' "$EXISTING_CRONTAB_FILE" > "$CLEAN_CRONTAB_FILE"
+    strip_managed_block "$EXISTING_CRONTAB_FILE" crontab > "$CLEAN_CRONTAB_FILE" || {
+        print_error "Unbalanced managed crontab markers; existing crontab was preserved"
+        exit 1
+    }
 
     # Create managed crontab content with environment variables
     CRONTAB_CONTENT="# BEGIN system-setup.sh managed crontab
@@ -5289,16 +5443,19 @@ ${CRONTAB_TASKS}"
 # END system-setup.sh managed crontab"
 
     # Install merged crontab
-    {
+    if {
         cat "$CLEAN_CRONTAB_FILE"
         if [ -s "$CLEAN_CRONTAB_FILE" ]; then
             printf '\n'
         fi
         printf '%s\n' "$CRONTAB_CONTENT"
-    } | crontab -
+    } | crontab -; then
+        CRONTAB_OK=true
+        print_message "Crontab configured successfully"
+    else
+        print_error "Failed to install crontab; previous crontab was preserved"
+    fi
     rm -f "$EXISTING_CRONTAB_FILE" "$CLEAN_CRONTAB_FILE"
-    print_message "Crontab configured successfully"
-    
     # Display configured crontab
     print_message "Configured crontab:"
     echo "----------------------------------------"
@@ -5351,6 +5508,7 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
         print_message "Running MOTD installation script..."
         
         if bash "$MOTD_SCRIPT"; then
+            MOTD_OK=true
             print_message "Custom MOTD installed successfully"
             rm -f "$MOTD_SCRIPT"
             
@@ -5372,9 +5530,8 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             SSHD_CONFIG="/etc/ssh/sshd_config"
             if [ -f "$SSHD_CONFIG" ]; then
                 # Backup SSH config if not already backed up
-                if [ ! -f "${SSHD_CONFIG}.backup.motd~" ]; then
-                    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup.motd~"
-                fi
+                MOTD_SSH_BACKUP="${SSHD_CONFIG}.backup.motd.$(date +%Y%m%d-%H%M%S)~"
+                cp -p "$SSHD_CONFIG" "$MOTD_SSH_BACKUP" || exit 1
                 
                 # Check UsePAM parameter (must be yes for MOTD)
                 if grep -q "^UsePAM no" "$SSHD_CONFIG"; then
@@ -5410,10 +5567,15 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                 # Restart SSH if needed
                 if [ "$SSH_RESTART_NEEDED" = true ]; then
                     print_message "Restarting SSH service for MOTD changes..."
-                    if systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; then
+                    if ! sshd -t; then
+                        print_error "MOTD SSH configuration is invalid; restoring the previous file"
+                        cp -p -- "$MOTD_SSH_BACKUP" "$SSHD_CONFIG"
+                        MOTD_OK=false
+                    elif systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; then
                         print_success "SSH service restarted successfully"
                     else
-                        print_warning "Could not restart SSH automatically, please restart manually"
+                        MOTD_OK=false
+                        print_error "Could not restart SSH after MOTD changes"
                     fi
                 fi
             fi
@@ -5487,7 +5649,8 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                         print_warning "MOTD scripts ran but produced no output"
                     fi
                 else
-                    print_warning "Some MOTD scripts may have errors"
+                    MOTD_OK=false
+                    print_error "Some MOTD scripts failed"
                     print_message "Error details:"
                     cat "$MOTD_TEST_OUTPUT"
                 fi
@@ -5513,7 +5676,11 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             echo ""
             
             # Summary of MOTD configuration
-            print_success "MOTD configuration completed successfully!"
+            if [ "${MOTD_OK:-false}" = true ]; then
+                print_success "MOTD configuration completed successfully!"
+            else
+                print_error "MOTD configuration is incomplete"
+            fi
             print_message "What was configured:"
             print_message "  ✓ MOTD scripts installed in /etc/update-motd.d/"
             print_message "  ✓ SSH configured to display MOTD"
@@ -5526,7 +5693,7 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             
             
         else
-            print_warning "MOTD installation completed with warnings"
+            print_error "MOTD installation failed"
             rm -f "$MOTD_SCRIPT"
         fi
     else
@@ -5623,7 +5790,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
             chmod +x "$UFW_INSTALL_PATH"
             print_message "Script installed with executable permissions"
 
-            run_ufw_custom_rules_script
+            run_ufw_custom_rules_script && UFW_CUSTOM_RULES_OK=true
         else
             print_error "Failed to download script from repository"
             print_error "URL: $UFW_REPO_URL"
@@ -5646,7 +5813,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
         fi
 
         if [ "$UFW_ARCHIVE_READY" = true ]; then
-            UFW_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/ufw-docker-rules-v4.7z"
+            UFW_ARCHIVE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/ufw-docker-rules-v4.7z"
             UFW_ARCHIVE_SHA256="1e18dd1926fa2c767f9a812d63a76504eeb58f07bbd4d64636644f27d561cac1"
             if create_temp_dir "ufw-docker-rules"; then
                 UFW_TMP_DIR="$SYSTEM_SETUP_CREATED_TEMP_DIR"
@@ -5665,8 +5832,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
 
             # Feed the password over stdin so it is never visible in argv.
             print_message "Extracting archive..."
-            if printf '%s\n' "${UFW_CUSTOM_RULES_PASSWORD}" | \
-                7z x -p -o"${UFW_EXTRACT_DIR}" "$UFW_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+            if extract_7z_archive "$UFW_ARCHIVE_FILE" "$UFW_EXTRACT_DIR" <<< "${UFW_CUSTOM_RULES_PASSWORD}"; then
                 print_message "Archive extracted successfully"
 
                 # Find and install the script file
@@ -5697,7 +5863,10 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                         if [ -f "$UFW_INSTALL_PATH" ]; then
                             cp -- "$UFW_INSTALL_PATH" "${UFW_INSTALL_PATH}.backup.$(date +%Y%m%d-%H%M%S)~"
                         fi
-                        install -m 0755 -o root -g root "$SCRIPT_SOURCE" "$UFW_INSTALL_PATH"
+                        if ! install -m 0755 -o root -g root "$SCRIPT_SOURCE" "$UFW_INSTALL_PATH"; then
+                            print_error "Failed to install the extracted UFW script"
+                            SCRIPT_FOUND=false
+                        fi
                     fi
 
                     if [ "$SCRIPT_FOUND" = true ]; then
@@ -5716,7 +5885,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                         sed -i "s/^SSH_PORT=\${SSH_PORT:-22}$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
                     fi
 
-                        run_ufw_custom_rules_script
+                        run_ufw_custom_rules_script && UFW_CUSTOM_RULES_OK=true
                     fi
                 else
                     print_error "Script file not found in archive: ${UFW_SCRIPT_NAME}"
@@ -5734,8 +5903,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                 unset UFW_CUSTOM_RULES_PASSWORD
                 print_message "Archive deleted"
             else
-                print_error "Failed to extract archive. Check if password is correct."
-                print_error "Password authentication failed or archive is corrupted"
+                print_error "Failed to extract archive; see the 7z diagnostic above"
                 rm -f "$UFW_ARCHIVE_FILE"
                 unset UFW_CUSTOM_RULES_PASSWORD
             fi
@@ -5755,6 +5923,7 @@ fi
 # ============================================
 
 OPT_EXTRACTED_OK=false
+OPT_COPY_OK=false
 
 if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
     echo ""
@@ -5776,7 +5945,7 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
 
     # Only proceed if 7z is available
     if command -v 7z &> /dev/null; then
-        OPT_ARCHIVE_URL="https://github.com/civisrom/debian-ubuntu-setup/raw/refs/heads/main/config/opt.7z"
+        OPT_ARCHIVE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/opt.7z"
         OPT_ARCHIVE_SHA256="5516f98f5549bed8a11cd8911ca21904c2cbb501038fd96e450f5ef097a03f03"
         if create_temp_dir "opt-archive"; then
             OPT_TMP_DIR="$SYSTEM_SETUP_CREATED_TEMP_DIR"
@@ -5795,82 +5964,92 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
 
             # Feed the password over stdin so it is never visible in argv.
             print_message "Extracting opt.7z archive..."
-            if printf '%s\n' "${OPT_ARCHIVE_PASSWORD}" | \
-                7z x -p -o"${OPT_EXTRACT_DIR}" "$OPT_ARCHIVE_FILE" -y > /dev/null 2>&1; then
+            if extract_7z_archive "$OPT_ARCHIVE_FILE" "$OPT_EXTRACT_DIR" <<< "${OPT_ARCHIVE_PASSWORD}"; then
                 print_message "opt.7z archive extracted successfully"
 
                 # Copy all contents to /opt
                 print_message "Copying files and folders to /opt..."
                 if [ -n "$(find "$OPT_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-                    find "$OPT_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -exec cp -a -t /opt/ {} +
-                    print_message "Files copied to /opt successfully"
+                    OPT_COPY_SOURCE="$OPT_EXTRACT_DIR"
+                    # Accept archives containing an opt/ wrapper as well as
+                    # archives whose root is already the contents of /opt.
+                    if [ -d "$OPT_EXTRACT_DIR/opt" ] &&
+                       [ "$(find "$OPT_EXTRACT_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]; then
+                        OPT_COPY_SOURCE="$OPT_EXTRACT_DIR/opt"
+                    fi
+                    if mkdir -p /opt && cp -a "$OPT_COPY_SOURCE/." /opt/; then
+                        OPT_COPY_OK=true
+                        print_message "Files copied to /opt successfully"
 
-                    # Verify nftables directory was extracted (critical for config installation)
-                    if [ -d "/opt/nftables" ]; then
-                        print_success "nftables directory found in /opt"
-                        OPT_EXTRACTED_OK=true
-                        # List nftables configs for verification
-                        print_message "Available nftables configs:"
-                        ls -la /opt/nftables/*.conf 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .conf files found in /opt/nftables/"
-                        if [ -d "/opt/nftables/logging" ]; then
-                            print_message "Available logging scripts:"
-                            ls -la /opt/nftables/logging/*.sh 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .sh files found in /opt/nftables/logging/"
-                        else
-                            print_warning "nftables/logging directory not found in archive"
-                        fi
-                        verify_nft_profile_assets "/opt/nftables" || print_warning "Some configured nftables profile assets are missing"
-                    else
-                        print_warning "nftables directory NOT found after extraction"
-                        print_warning "Archive may have different internal structure"
-                        # Try to find nftables files in case of nested directory
-                        FOUND_NFTABLES=$(find /opt -name "*nftables*.conf" -type f 2>/dev/null | head -1)
-                        if [ -n "$FOUND_NFTABLES" ]; then
-                            FOUND_DIR=$(dirname "$FOUND_NFTABLES")
-                            print_message "Found nftables configs in: $FOUND_DIR"
-                            print_message "Restructuring: moving files to /opt/nftables/..."
-                            mkdir -p /opt/nftables
-                            NFT_CONF_COPIED=0
-                            while IFS= read -r _nft_conf; do
-                                cp "$_nft_conf" /opt/nftables/
-                                NFT_CONF_COPIED=$((NFT_CONF_COPIED + 1))
-                            done < <(find "$FOUND_DIR" -maxdepth 1 -type f -name "*nftables*.conf" 2>/dev/null | sort)
-                            print_message "Copied $NFT_CONF_COPIED nftables config file(s)"
-                            # Also try to find and copy logging scripts
-                            FOUND_LOGGING=$(find /opt -type f -name "*.sh" -path "*/logging/*" 2>/dev/null | head -1)
-                            if [ -n "$FOUND_LOGGING" ]; then
-                                FOUND_LOG_DIR=$(dirname "$FOUND_LOGGING")
-                                mkdir -p /opt/nftables/logging
-                                NFT_LOG_COPIED=0
-                                while IFS= read -r _nft_log; do
-                                    cp "$_nft_log" /opt/nftables/logging/
-                                    NFT_LOG_COPIED=$((NFT_LOG_COPIED + 1))
-                                done < <(find "$FOUND_LOG_DIR" -maxdepth 1 -type f -name "*.sh" 2>/dev/null | sort)
-                                print_message "Copied $NFT_LOG_COPIED nftables logging script(s)"
-                            fi
-                            unset _nft_conf _nft_log NFT_CONF_COPIED NFT_LOG_COPIED
+                        # Verify nftables directory was extracted (critical for config installation)
+                        if [ -d "/opt/nftables" ]; then
+                            print_success "nftables directory found in /opt"
                             OPT_EXTRACTED_OK=true
-                            print_success "nftables files restructured to /opt/nftables/"
+                            # List nftables configs for verification
+                            print_message "Available nftables configs:"
+                            ls -la /opt/nftables/*.conf 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .conf files found in /opt/nftables/"
+                            if [ -d "/opt/nftables/logging" ]; then
+                                print_message "Available logging scripts:"
+                                ls -la /opt/nftables/logging/*.sh 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .sh files found in /opt/nftables/logging/"
+                            else
+                                print_warning "nftables/logging directory not found in archive"
+                            fi
                             verify_nft_profile_assets "/opt/nftables" || print_warning "Some configured nftables profile assets are missing"
+                        else
+                            print_warning "nftables directory NOT found after extraction"
+                            print_warning "Archive may have different internal structure"
+                            # Try to find nftables files in case of nested directory
+                            FOUND_NFTABLES=$(find /opt -name "*nftables*.conf" -type f 2>/dev/null | head -1)
+                            if [ -n "$FOUND_NFTABLES" ]; then
+                                FOUND_DIR=$(dirname "$FOUND_NFTABLES")
+                                print_message "Found nftables configs in: $FOUND_DIR"
+                                print_message "Restructuring: moving files to /opt/nftables/..."
+                                mkdir -p /opt/nftables
+                                NFT_CONF_COPIED=0
+                                while IFS= read -r _nft_conf; do
+                                    cp "$_nft_conf" /opt/nftables/
+                                    NFT_CONF_COPIED=$((NFT_CONF_COPIED + 1))
+                                done < <(find "$FOUND_DIR" -maxdepth 1 -type f -name "*nftables*.conf" 2>/dev/null | sort)
+                                print_message "Copied $NFT_CONF_COPIED nftables config file(s)"
+                                # Also try to find and copy logging scripts
+                                FOUND_LOGGING=$(find /opt -type f -name "*.sh" -path "*/logging/*" 2>/dev/null | head -1)
+                                if [ -n "$FOUND_LOGGING" ]; then
+                                    FOUND_LOG_DIR=$(dirname "$FOUND_LOGGING")
+                                    mkdir -p /opt/nftables/logging
+                                    NFT_LOG_COPIED=0
+                                    while IFS= read -r _nft_log; do
+                                        cp "$_nft_log" /opt/nftables/logging/
+                                        NFT_LOG_COPIED=$((NFT_LOG_COPIED + 1))
+                                    done < <(find "$FOUND_LOG_DIR" -maxdepth 1 -type f -name "*.sh" 2>/dev/null | sort)
+                                    print_message "Copied $NFT_LOG_COPIED nftables logging script(s)"
+                                fi
+                                unset _nft_conf _nft_log NFT_CONF_COPIED NFT_LOG_COPIED
+                                OPT_EXTRACTED_OK=true
+                                print_success "nftables files restructured to /opt/nftables/"
+                                verify_nft_profile_assets "/opt/nftables" || print_warning "Some configured nftables profile assets are missing"
+                            fi
                         fi
+
+                        # Make scripts in scripts folder executable (except .ini files)
+                        if [ -d "/opt/scripts" ]; then
+                            print_message "Setting executable permissions for scripts in /opt/scripts..."
+
+                            # Find all files in scripts directory and make them executable (except .ini)
+                            find /opt/scripts -type f ! -name "*.ini" -exec chmod +x {} \;
+
+                            # Count executable files
+                            EXEC_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
+                            print_message "Made $EXEC_COUNT file(s) executable in /opt/scripts"
+                        fi
+
+                        # List what was copied
+                        print_message "Contents copied to /opt:"
+                        find /opt -mindepth 1 -maxdepth 1 -printf '  - %f\n' | sort
+                    else
+                        print_error "Failed to copy extracted archive contents to /opt; files may be incomplete"
                     fi
-
-                    # Make scripts in scripts folder executable (except .ini files)
-                    if [ -d "/opt/scripts" ]; then
-                        print_message "Setting executable permissions for scripts in /opt/scripts..."
-
-                        # Find all files in scripts directory and make them executable (except .ini)
-                        find /opt/scripts -type f ! -name "*.ini" -exec chmod +x {} \;
-
-                        # Count executable files
-                        EXEC_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
-                        print_message "Made $EXEC_COUNT file(s) executable in /opt/scripts"
-                    fi
-
-                    # List what was copied
-                    print_message "Contents copied to /opt:"
-                    find /opt -mindepth 1 -maxdepth 1 -printf '  - %f\n' | sort
                 else
-                    print_warning "opt.7z archive is empty"
+                    print_error "opt.7z archive is empty"
                 fi
 
                 # Cleanup
@@ -5879,7 +6058,7 @@ if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
                 unset OPT_ARCHIVE_PASSWORD
                 print_message "Temporary files cleaned up"
             else
-                print_error "Failed to extract opt.7z archive. Check if password is correct."
+                print_error "Failed to extract opt.7z archive; see the 7z diagnostic above"
                 rm -f "$OPT_ARCHIVE_FILE"
                 unset OPT_ARCHIVE_PASSWORD
             fi
@@ -5927,6 +6106,10 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     NFT_LIVE_BACKUP="${NFT_TMP_DIR}/live-ruleset.nft"
     NFT_ROLLBACK_TRANSACTION="${NFT_TMP_DIR}/rollback.nft"
     NFTABLES_CONFIG_BACKUP=""
+    NFT_CONFIG_CHANGED=false
+    NFT_RUNTIME_CHANGED=false
+    NFT_UFW_CHANGED=false
+    NFT_SERVICE_PREVIOUS_STATE=$(systemctl is-enabled nftables.service 2>/dev/null || true)
     NFT_UFW_PREVIOUS_STATE=$(systemctl is-enabled ufw.service 2>/dev/null || true)
     NFT_LOCK_HELD=false
 
@@ -6031,18 +6214,6 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     fi
     fi
 
-    # --- Step 4: Enable nftables for boot; runtime apply happens atomically below ---
-    if [ "$NFTABLES_OK" = true ]; then
-        echo ""
-        print_message "Step 4: Enabling nftables service..."
-        if systemctl enable nftables 2>/dev/null; then
-            print_success "nftables service enabled"
-        else
-            print_error "Failed to enable nftables service"
-            NFTABLES_OK=false
-        fi
-    fi
-
     # --- Step 5: Install nftables config ---
     if [ "$NFTABLES_OK" = true ] && { [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; }; then
         echo ""
@@ -6068,13 +6239,14 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             # Backup existing nftables.conf
             if [ -f "$NFTABLES_DST" ]; then
                 NFTABLES_CONFIG_BACKUP="${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
-                cp "$NFTABLES_DST" "$NFTABLES_CONFIG_BACKUP"
+                cp -p "$NFTABLES_DST" "$NFTABLES_CONFIG_BACKUP" || { print_error "Cannot back up nftables configuration"; exit 1; }
                 print_message "Existing $NFTABLES_DST backed up"
             fi
 
             # Copy selected profile config as /etc/nftables.conf.
             # Mode 0755: the config carries a `#!/usr/sbin/nft -f` shebang and
             # is expected to be executable so it can be invoked directly.
+            NFT_CONFIG_CHANGED=true
             if ! write_file_atomic "$NFTABLES_DST" 0755 root:root < "$NFTABLES_SRC"; then
                 print_error "CRITICAL: Atomic nftables config installation failed"
                 INSTALL_NFTABLES_CONF="skipped"
@@ -6113,6 +6285,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 
             # Execute logging setup script
             if bash "$LOGGING_SCRIPT"; then
+                NFT_LOGGING_OK=true
                 print_success "Logging setup completed (${NFTABLES_LOG_SCRIPT})"
             else
                 print_warning "Logging setup script returned an error (exit code: $?)"
@@ -6141,6 +6314,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                 print_success "Atomic transaction syntax check passed"
 
                 if nft -f "$NFT_TRANSACTION" 2>"$NFT_APPLY_ERR"; then
+                    NFT_RUNTIME_CHANGED=true
                     TABLES_COUNT=$(nft list tables 2>/dev/null | wc -l)
                     CHAINS_COUNT=$(nft list ruleset 2>/dev/null | grep -cE '^[[:space:]]*chain[[:space:]]' || true)
                     TABLES_COUNT=${TABLES_COUNT:-0}
@@ -6149,7 +6323,10 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                     if [ "$TABLES_COUNT" -eq 0 ] || [ "$CHAINS_COUNT" -eq 0 ]; then
                         print_error "nftables postcondition failed: no tables or chains were loaded"
                         NFTABLES_OK=false
-                    elif ! disable_ufw_firewall true; then
+                    elif ! systemctl enable nftables.service; then
+                        print_error "Could not enable nftables for boot"
+                        NFTABLES_OK=false
+                    elif ! { NFT_UFW_CHANGED=true; disable_ufw_firewall true; }; then
                         print_error "Could not disable future UFW activation after nftables apply"
                         NFTABLES_OK=false
                     else
@@ -6188,28 +6365,45 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                 NFTABLES_OK=false
             fi
 
-            if [ "$NFTABLES_OK" != true ]; then
-                if dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
-                    systemctl unmask ufw.service 2>/dev/null || true
-                    if [ "$NFT_UFW_PREVIOUS_STATE" = "enabled" ]; then
-                        systemctl enable ufw.service 2>/dev/null || true
-                    fi
-                fi
-                if restore_live_nft_ruleset "$NFT_LIVE_BACKUP" "$NFT_ROLLBACK_TRANSACTION"; then
-                    print_warning "Live nftables ruleset restored from the pre-change snapshot"
-                else
-                    print_error "CRITICAL: nftables rollback failed; use console access immediately"
-                fi
-                if [ -n "$NFTABLES_CONFIG_BACKUP" ] && [ -f "$NFTABLES_CONFIG_BACKUP" ]; then
-                    cp -- "$NFTABLES_CONFIG_BACKUP" "$NFTABLES_DST"
-                    print_warning "Previous /etc/nftables.conf restored"
-                fi
-            fi
+
         else
             print_error "No non-empty $NFTABLES_DST found; refusing to replace the current firewall"
             NFTABLES_OK=false
         fi
         rm -f "$NFT_SYNTAX_ERR" "$NFT_APPLY_ERR"
+    fi
+
+    # Restore persistent state even when failure occurred before runtime apply.
+    if [ "$NFTABLES_OK" != true ]; then
+        if [ "$NFT_RUNTIME_CHANGED" = true ]; then
+            if restore_live_nft_ruleset "$NFT_LIVE_BACKUP" "$NFT_ROLLBACK_TRANSACTION"; then
+                print_warning "Live nftables ruleset restored from the pre-change snapshot"
+            else
+                install -d -m 0700 /var/backups
+                NFT_RECOVERY_FILE=$(mktemp /var/backups/nftables-recovery.XXXXXX)
+                cp -- "$NFT_LIVE_BACKUP" "$NFT_RECOVERY_FILE"
+                print_error "nftables rollback failed; live snapshot saved at $NFT_RECOVERY_FILE"
+            fi
+        fi
+        if [ "$NFT_CONFIG_CHANGED" = true ]; then
+            if [ -n "$NFTABLES_CONFIG_BACKUP" ]; then
+                cp -p -- "$NFTABLES_CONFIG_BACKUP" "$NFTABLES_DST" || print_error "Failed to restore nftables config"
+            else
+                rm -f -- "$NFTABLES_DST"
+            fi
+        fi
+        if [ "$NFT_UFW_CHANGED" = true ]; then
+            case "$NFT_UFW_PREVIOUS_STATE" in
+                masked) systemctl mask ufw.service 2>/dev/null || true ;;
+                enabled) systemctl unmask ufw.service; systemctl enable ufw.service ;;
+                *) systemctl unmask ufw.service; systemctl disable ufw.service ;;
+            esac
+        fi
+        case "$NFT_SERVICE_PREVIOUS_STATE" in
+            enabled) : ;;
+            masked) systemctl mask nftables.service 2>/dev/null || true ;;
+            *) systemctl disable nftables.service 2>/dev/null || true ;;
+        esac
     fi
 
     if [ "$NFT_LOCK_HELD" = true ]; then
@@ -6242,7 +6436,7 @@ fi
 # INSTALL NFT-DOCKER-WATCH SERVICE
 # ============================================
 
-if [ "$INSTALL_NFT_DOCKER_WATCH" = "y" ] || [ "$INSTALL_NFT_DOCKER_WATCH" = "Y" ]; then
+if is_yes "$INSTALL_NFT_DOCKER_WATCH" && [ "${NFTABLES_OK:-false}" = true ]; then
     echo ""
     print_header "═══════════════════════════════════════════════════"
     print_header "   Installing nft-docker-watch service"
@@ -6300,8 +6494,8 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
 
     # Ensure zram kernel module is available (missing on some VPS with minimal kernel)
     if ! find "/lib/modules/$(uname -r)" -name '*zram*' 2>/dev/null | grep -q .; then
-        KERNEL_HAS_ZRAM=$(grep -c "^CONFIG_ZRAM=m" "/boot/config-$(uname -r)" 2>/dev/null || echo 0)
-        if [ "$KERNEL_HAS_ZRAM" -gt 0 ]; then
+        KERNEL_HAS_ZRAM=$(grep -c "^CONFIG_ZRAM=m" "/boot/config-$(uname -r)" 2>/dev/null || true)
+        if [ "${KERNEL_HAS_ZRAM:-0}" -gt 0 ]; then
             print_warning "zram module not found — CONFIG_ZRAM=m detected, installing linux-modules-extra..."
             apt-get install -y "linux-modules-extra-$(uname -r)" 2>&1 | tail -3 || \
                 print_warning "Failed to install linux-modules-extra, zram may not work"
@@ -6309,8 +6503,11 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
     fi
     # Load zram module now if available (avoids reboot requirement)
     if find "/lib/modules/$(uname -r)" -name '*zram*' 2>/dev/null | grep -q .; then
-        modprobe zram 2>/dev/null || true
-        print_message "zram module loaded successfully"
+        if modprobe zram 2>/dev/null; then
+            print_message "zram module loaded successfully"
+        else
+            print_warning "zram module could not be loaded; swap installer will check available support"
+        fi
     else
         print_warning "zram module unavailable — zramswap will be skipped by swap-setup.sh"
     fi
@@ -6341,7 +6538,10 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
         chmod +x "$SWAP_SCRIPT_PATH"
 
         # Install to system path for future use
-        install -m 0755 -o root -g root "$SWAP_SCRIPT_PATH" "$SWAP_INSTALL_PATH"
+        install -m 0755 -o root -g root "$SWAP_SCRIPT_PATH" "$SWAP_INSTALL_PATH" || {
+            print_error "Failed to install swap management script"
+            exit 1
+        }
         print_message "Installed to $SWAP_INSTALL_PATH for future use"
 
         # Run swap-setup.sh based on selected mode
@@ -6374,8 +6574,11 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
 
         echo ""
         print_header "═══════════════════════════════════════════════════"
-        if [ "$SWAP_SETUP_EXIT_CODE" -eq 0 ]; then
-            print_message "Swap configuration completed"
+        if [ "$SWAP_SETUP_EXIT_CODE" -eq 0 ] && swapon --show --noheadings | grep -q .; then
+            SWAP_SETUP_OK=true
+            print_message "Swap configuration completed; active swap verified"
+        elif [ "$SWAP_SETUP_EXIT_CODE" -eq 0 ]; then
+            print_error "Swap installer exited successfully but no active swap was found"
         else
             print_error "Swap setup encountered an error (exit code: $SWAP_SETUP_EXIT_CODE)"
             print_warning "Swap configuration may be incomplete; check status before relying on it"
@@ -6451,19 +6654,19 @@ shift
 
 # Run selected functions based on parameters
 if [ "${1:-}" = "force_ipv4" ]; then
-    force_ipv4_apt
+    force_ipv4_apt || exit $?
 fi
 
 if [ "${2:-}" = "full_update" ]; then
-    full_update_upgrade
+    full_update_upgrade || exit $?
 fi
 
 if [ "${3:-}" = "fix_hosts" ]; then
-    fix_etc_hosts
+    fix_etc_hosts || exit $?
 fi
 
 if [ "${4:-}" = "fix_dns" ]; then
-    fix_dns
+    fix_dns || exit $?
 fi
 
 # Always run the main optimization — this handles network tuning via sysctl
@@ -6508,6 +6711,7 @@ EOFWRAPPER
         echo ""
         
         if bash "$BBR_WRAPPER_PATH" "$BBR_SCRIPT_PATH" "$PARAM1" "$PARAM2" "$PARAM3" "$PARAM4"; then
+            BBR_OK=true
             echo ""
             print_header "═══════════════════════════════════════════════════"
             print_message "BBR Network Optimizer completed"
@@ -6560,11 +6764,10 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     # Preserve the existing file and replace only our managed block.
     SYSCTL_TMP=$(mktemp)
     if [ -f "$SYSCTL_TARGET_FILE" ]; then
-        awk '
-            /^# BEGIN system-setup.sh managed sysctl$/ { skip=1; next }
-            /^# END system-setup.sh managed sysctl$/ { skip=0; next }
-            !skip { print }
-        ' "$SYSCTL_TARGET_FILE" > "$SYSCTL_TMP"
+        strip_managed_block "$SYSCTL_TARGET_FILE" sysctl > "$SYSCTL_TMP" || {
+            print_error "Unbalanced managed sysctl markers; existing configuration was preserved"
+            exit 1
+        }
     else
         : > "$SYSCTL_TMP"
     fi
@@ -6648,12 +6851,20 @@ net.ipv4.ip_forward = 1
         fi
     } > "${SYSCTL_TARGET_FILE}.new"
     rm -f "$SYSCTL_TMP"
-    mv "${SYSCTL_TARGET_FILE}.new" "$SYSCTL_TARGET_FILE"
+    write_file_atomic "$SYSCTL_TARGET_FILE" 0644 root:root < "${SYSCTL_TARGET_FILE}.new" || {
+        print_error "Failed to install sysctl configuration"
+        exit 1
+    }
+    rm -f -- "${SYSCTL_TARGET_FILE}.new"
     print_message "sysctl configuration written to ${SYSCTL_TARGET_FILE} (mode: $([ "$SYSCTL_MODE" = "2" ] && echo "full/BBR" || echo "basic/static"))"
 
     # Apply sysctl settings (|| true to prevent set -e exit on unsupported params)
     print_message "Applying sysctl settings from ${SYSCTL_TARGET_FILE}..."
-    sysctl -p "$SYSCTL_TARGET_FILE" || print_warning "Some sysctl parameters may not be supported by the current kernel"
+    if sysctl -p "$SYSCTL_TARGET_FILE"; then
+        SYSCTL_OK=true
+    else
+        print_error "Some sysctl parameters failed; review kernel support and permissions"
+    fi
 
     # Install systemd service for sysctl enforcement on boot
     if [ "$INSTALL_SYSCTL_SERVICE" = "y" ] || [ "$INSTALL_SYSCTL_SERVICE" = "Y" ]; then
@@ -6673,8 +6884,12 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable --now disable-ipv6.service
-        print_message "sysctl enforcement service installed and enabled"
+        if systemctl enable --now disable-ipv6.service; then
+            SYSCTL_SERVICE_OK=true
+            print_message "sysctl enforcement service installed and enabled"
+        else
+            print_error "Failed to enable/start sysctl enforcement service"
+        fi
     fi
 
     # Minimal DNS recovery: ensure resolv.conf has IPv4 DNS after IPv6 disable
@@ -6699,168 +6914,115 @@ fi
 #   3. Preserve and replace /etc/resolv.conf with a symlink
 #   4. Enable and restart systemd-resolved
 
-if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
-    print_message "Configuring systemd-resolved..."
+configure_systemd_resolved() {
+    local config_dir=/etc/systemd/resolved.conf.d
+    local config_file="$config_dir/99-system-setup.conf"
+    local resolv_file=/etc/resolv.conf backup_dir
+    local had_config=false had_resolv=false old_active=false old_enabled
+    local dot=no stub=yes ready=true target=/run/systemd/resolve/stub-resolv.conf
 
-    # sysctl may have disabled IPv6 just before this block. Make sure package
-    # installation still has working DNS before installing libnss-resolve.
-    ensure_dns_works "pre-systemd-resolved"
-
-    if [[ "$RESOLVED_DNS" =~ ^127\. ]] && ! ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq '(^127\.0\.0\.1:53$|^0\.0\.0\.0:53$|^\*:53$)'; then
-        print_warning "DNS=${RESOLVED_DNS} was selected, but no local DNS listener was detected on port 53"
-        print_warning "Using 1.1.1.1 instead to avoid breaking DNS resolution"
-        RESOLVED_DNS="1.1.1.1"
+    if ! python3 - "$RESOLVED_DNS" <<'PYDNS'
+import ipaddress
+import sys
+try:
+    address, *hostname = sys.argv[1].split('#')
+    ipaddress.ip_address(address)
+    if hostname and (len(hostname) != 1 or not hostname[0] or
+                     any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-' for c in hostname[0])):
+        raise ValueError('invalid TLS hostname')
+except ValueError:
+    sys.exit(1)
+PYDNS
+    then
+        print_error "Invalid DNS server address"
+        return 1
     fi
 
-    # Step 1: Install libnss-resolve
-    # This installs libnss_resolve.so and updates /etc/nsswitch.conf
-    # hosts: files dns → hosts: files resolve [!UNAVAIL=return] dns
-    print_message "Step 1: Installing libnss-resolve..."
-    if dpkg -l libnss-resolve 2>/dev/null | grep -q "^ii"; then
-        print_message "libnss-resolve is already installed"
-    else
-        if apt-get install -y libnss-resolve; then
-            print_success "libnss-resolve installed successfully"
-        else
-            print_error "Failed to install libnss-resolve"
-            print_warning "systemd-resolved configuration may not work properly without NSS module"
-        fi
+    if [[ "$RESOLVED_DNS" == 127.* ]] &&
+       ! ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq '(^127\.0\.0\.1:53$|^0\.0\.0\.0:53$|^\*:53$)'; then
+        print_error "Selected local DNS server has no listener on port 53"
+        return 1
     fi
 
-    # Verify nsswitch.conf was updated
-    if [ -f /etc/nsswitch.conf ]; then
-        if grep -q "resolve" /etc/nsswitch.conf; then
-            print_message "nsswitch.conf already contains 'resolve' entry"
-        else
-            print_warning "nsswitch.conf does not contain 'resolve' — adding manually"
-            cp /etc/nsswitch.conf "/etc/nsswitch.conf.backup.$(date +%Y%m%d-%H%M%S)~"
-            sed -i 's/^hosts:.*/hosts:          files resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
-            print_message "Updated /etc/nsswitch.conf hosts line"
-        fi
+    # Capture the manager-owned symlink itself, not only its current target.
+    install -d -m 0700 /var/backups || return 1
+    backup_dir=$(mktemp -d /var/backups/system-setup-resolved.XXXXXX) || return 1
+    if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+        cp -a -- "$config_file" "$backup_dir/dropin.conf" || return 1
+        had_config=true
+    fi
+    if [ -e "$resolv_file" ] || [ -L "$resolv_file" ]; then
+        cp -a -- "$resolv_file" "$backup_dir/resolv.conf" || return 1
+        had_resolv=true
+    fi
+    systemctl is-active --quiet systemd-resolved && old_active=true
+    old_enabled=$(systemctl is-enabled systemd-resolved 2>/dev/null || true)
+
+    # Explicitly install the daemon as well as its NSS module on minimal images.
+    if ! apt-get install -y systemd-resolved libnss-resolve; then
+        print_error "Could not install systemd-resolved and libnss-resolve"
+        ready=false
+    fi
+    mkdir -p "$config_dir" || ready=false
+    is_yes "$RESOLVED_DNS_OVER_TLS" && dot=yes
+    if is_yes "$RESOLVED_STUB_LISTENER_OFF"; then
+        stub=no
+        target=/run/systemd/resolve/resolv.conf
     fi
 
-    # Step 2: Configure /etc/systemd/resolved.conf
-    print_message "Step 2: Configuring /etc/systemd/resolved.conf..."
-    RESOLVED_CONF="/etc/systemd/resolved.conf"
-
-    if [ -f "$RESOLVED_CONF" ]; then
-        cp "$RESOLVED_CONF" "${RESOLVED_CONF}.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Original resolved.conf backed up"
-    fi
-
-    # Determine DNSOverTLS value
-    if [ "$RESOLVED_DNS_OVER_TLS" = "y" ] || [ "$RESOLVED_DNS_OVER_TLS" = "Y" ]; then
-        RESOLVED_DOT_VALUE="yes"
-    else
-        RESOLVED_DOT_VALUE="no"
-    fi
-
-    # Determine DNSStubListener value
-    if [ "$RESOLVED_STUB_LISTENER_OFF" = "y" ] || [ "$RESOLVED_STUB_LISTENER_OFF" = "Y" ]; then
-        RESOLVED_STUB_VALUE="no"
-    else
-        RESOLVED_STUB_VALUE="yes"
-    fi
-
-    cat > "$RESOLVED_CONF" << REOF
+    # A drop-in preserves administrator settings in resolved.conf. Reset the
+    # accumulated DNS list so our earlier emergency ipv4-dns.conf cannot win.
+    if [ "$ready" = true ] && write_file_atomic "$config_file" 0644 root:root <<REOF
 [Resolve]
-# Some examples of DNS servers which may be used for DNS= and FallbackDNS=:
-# Cloudflare: 1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com 2606:4700:4700::1111#cloudflare-dns.com 2606:4700:4700::1001#cloudflare-dns.com
-# Google:     8.8.8.8#dns.google 8.8.4.4#dns.google 2001:4860:4860::8888#dns.google 2001:4860:4860::8844#dns.google
-# Quad9:      9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net 2620:fe::fe#dns.quad9.net 2620:fe::9#dns.quad9.net
+DNS=
 DNS=${RESOLVED_DNS}
-#FallbackDNS=
-#Domains=
-#DNSSEC=no
-DNSOverTLS=${RESOLVED_DOT_VALUE}
-DNSStubListener=${RESOLVED_STUB_VALUE}
-#MulticastDNS=no
-#LLMNR=no
-#Cache=no-negative
-#CacheFromLocalhost=no
-#DNSStubListenerExtra=
-#ReadEtcHosts=yes
-#ResolveUnicastSingleLabel=no
+FallbackDNS=
+DNSOverTLS=${dot}
+DNSStubListener=${stub}
 REOF
-    print_success "Written $RESOLVED_CONF (DNS=${RESOLVED_DNS}, DNSOverTLS=${RESOLVED_DOT_VALUE}, DNSStubListener=${RESOLVED_STUB_VALUE})"
-
-    # Step 3: Create symlink /etc/resolv.conf -> /run/systemd/resolve/resolv.conf
-    # Using ln -sf to force replacement without interactive prompt (replaces ln -svi)
-    print_message "Step 3: Creating resolv.conf symlink..."
-    RESOLV_LINK_TARGET="/run/systemd/resolve/resolv.conf"
-
-    RESOLV_PREVIOUS_KIND="missing"
-    RESOLV_PREVIOUS_LINK=""
-    RESOLV_PREVIOUS_BACKUP=""
-    if [ -L /etc/resolv.conf ]; then
-        RESOLV_PREVIOUS_KIND="symlink"
-        RESOLV_PREVIOUS_LINK=$(readlink /etc/resolv.conf)
-        print_message "Current /etc/resolv.conf symlink preserved -> $RESOLV_PREVIOUS_LINK"
-    elif [ -f /etc/resolv.conf ]; then
-        RESOLV_PREVIOUS_KIND="file"
-        RESOLV_PREVIOUS_BACKUP=$(mktemp "/etc/resolv.conf.backup.$(date +%Y%m%d-%H%M%S).XXXXXX~")
-        cp -a -- /etc/resolv.conf "$RESOLV_PREVIOUS_BACKUP"
-        chmod 0600 "$RESOLV_PREVIOUS_BACKUP"
-        print_message "Original /etc/resolv.conf backed up to $RESOLV_PREVIOUS_BACKUP"
-    fi
-
-    # Create the symlink (ln -sf forces overwrite without prompt)
-    ln -sf "$RESOLV_LINK_TARGET" /etc/resolv.conf
-    if [ -L /etc/resolv.conf ]; then
-        print_success "Symlink created: /etc/resolv.conf -> $RESOLV_LINK_TARGET"
-    else
-        print_error "Failed to create symlink /etc/resolv.conf"
-    fi
-
-    # Step 4: Enable and restart systemd-resolved
-    print_message "Step 4: Enabling and starting systemd-resolved..."
-    systemctl enable systemd-resolved 2>/dev/null || print_warning "Failed to enable systemd-resolved"
-    systemctl restart systemd-resolved 2>/dev/null || print_warning "Failed to restart systemd-resolved"
-
-    # Verify service status
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        print_success "systemd-resolved is active and running"
-
-        # Show resolved status
-        if command -v resolvectl &>/dev/null; then
-            print_message "Current DNS configuration:"
-            resolvectl status 2>/dev/null | head -15 || true
-        fi
-    else
-        print_error "systemd-resolved failed to start"
-        print_message "Check status: systemctl status systemd-resolved"
-        print_message "Check journal: journalctl -xeu systemd-resolved"
-
-        # Restore the exact previous manager/file state. In particular, never
-        # destroy a NetworkManager/resolvconf-owned symlink on recovery.
-        rm -f -- /etc/resolv.conf
-        case "$RESOLV_PREVIOUS_KIND" in
-            symlink)
-                ln -s -- "$RESOLV_PREVIOUS_LINK" /etc/resolv.conf
-                print_warning "Previous /etc/resolv.conf symlink restored"
-                ;;
-            file)
-                cp -a -- "$RESOLV_PREVIOUS_BACKUP" /etc/resolv.conf
-                print_warning "Previous /etc/resolv.conf file restored"
-                ;;
-            *)
-                printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
-                chmod 0644 /etc/resolv.conf
-                print_warning "Created emergency /etc/resolv.conf with public DNS"
-                ;;
-        esac
-    fi
-
-    # Remove any drop-in configs that might conflict with our resolved.conf
-    if [ -d /etc/systemd/resolved.conf.d ]; then
-        if ls /etc/systemd/resolved.conf.d/*.conf &>/dev/null; then
-            print_warning "Found drop-in configs in /etc/systemd/resolved.conf.d/ — these may override resolved.conf"
-            ls -la /etc/systemd/resolved.conf.d/*.conf 2>/dev/null || true
+    then
+        if systemctl enable systemd-resolved && systemctl restart systemd-resolved &&
+           systemctl is-active --quiet systemd-resolved && [ -s "$target" ] &&
+           ln -sfn -- "$target" "$resolv_file" &&
+           { getent ahostsv4 deb.debian.org >/dev/null || getent ahostsv4 archive.ubuntu.com >/dev/null; }; then
+            print_success "systemd-resolved configured; service and DNS resolution verified"
+            print_message "Managed DNS config: $config_file (backup: $backup_dir)"
+            return 0
         fi
     fi
 
-    echo ""
-    print_success "systemd-resolved configuration complete"
+    print_error "systemd-resolved configuration failed; restoring previous resolver state"
+    if [ "$had_config" = true ]; then
+        cp -a --remove-destination -- "$backup_dir/dropin.conf" "$config_file" || return 1
+    else
+        rm -f -- "$config_file"
+    fi
+    if [ "$had_resolv" = true ]; then
+        cp -a --remove-destination -- "$backup_dir/resolv.conf" "$resolv_file" || return 1
+    else
+        rm -f -- "$resolv_file"
+    fi
+    if [ "$old_active" = true ]; then
+        systemctl restart systemd-resolved || print_error "Could not restart previous resolver configuration"
+    else
+        systemctl stop systemd-resolved || true
+    fi
+    case "$old_enabled" in
+        enabled) systemctl enable systemd-resolved >/dev/null 2>&1 || true ;;
+        masked) systemctl mask systemd-resolved >/dev/null 2>&1 || true ;;
+        *) systemctl disable systemd-resolved >/dev/null 2>&1 || true ;;
+    esac
+    return 1
+}
+
+if is_yes "$CONFIGURE_RESOLVED"; then
+    print_message "Configuring systemd-resolved..."
+    ensure_dns_works "pre-systemd-resolved"
+    if configure_systemd_resolved; then
+        RESOLVED_OK=true
+    else
+        print_error "systemd-resolved setup did not complete"
+    fi
 else
     print_message "Skipping systemd-resolved configuration (not requested)"
 fi
@@ -6886,69 +7048,26 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
         print_error "update-grub not found — system may use systemd-boot or similar"
         print_warning "Skipping IPv6 GRUB disable"
     else
-        # Single backup for the whole block — both line edits roll back together.
-        cp "$GRUB_CONFIG" "${GRUB_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)~"
-        print_message "Original GRUB config backed up"
-
-        # Idempotent: add $2 to the $1=\"...\" line in $GRUB_CONFIG.
-        # If line exists & has param → no-op. If line exists w/o param → append.
-        # If line missing → create it (with optional $3 prefix prepended).
-        _grub_add_param() {
-            local line_name="$1" param="$2" default_prefix="${3:-}"
-            local current_value esc_new initial
-
-            if grep -q "^${line_name}=" "$GRUB_CONFIG"; then
-                current_value=$(grep "^${line_name}=" "$GRUB_CONFIG" | head -1 | \
-                                sed -E "s/^${line_name}=\"([^\"]*)\"$/\1/")
-                # Whole-word check (spaces as boundaries)
-                if printf '%s' " ${current_value} " | grep -Fq " ${param} "; then
-                    print_message "  '${param}' already present in ${line_name}"
-                    return 0
-                fi
-                if [ -z "$current_value" ]; then
-                    esc_new=$(printf '%s' "$param" | sed -e 's/[\/&]/\\&/g')
-                else
-                    esc_new=$(printf '%s' "${current_value} ${param}" | sed -e 's/[\/&]/\\&/g')
-                fi
-                sed -i "s/^${line_name}=.*/${line_name}=\"${esc_new}\"/" "$GRUB_CONFIG"
-                print_message "  Added '${param}' to ${line_name}"
-            else
-                if [ -n "$default_prefix" ]; then
-                    initial="${default_prefix} ${param}"
-                else
-                    initial="${param}"
-                fi
-                printf '%s="%s"\n' "$line_name" "$initial" >> "$GRUB_CONFIG"
-                print_message "  Created ${line_name}=\"${initial}\""
-            fi
-        }
-
-        # When the line is missing entirely, create it in the canonical form:
-        #   GRUB_CMDLINE_LINUX_DEFAULT="quiet splash ipv6.disable=1"
-        #   GRUB_CMDLINE_LINUX="ipv6.disable=1"
-        _grub_add_param "GRUB_CMDLINE_LINUX_DEFAULT" "ipv6.disable=1" "quiet splash"
-        _grub_add_param "GRUB_CMDLINE_LINUX"         "ipv6.disable=1"
-
-        # Update GRUB
-        print_message "Running update-grub..."
-        GRUB_UPDATE_LOG=$(mktemp "${TMPDIR:-/tmp}/grub-update.$(date +%Y%m%d-%H%M%S).XXXXXX")
-        chmod 600 "$GRUB_UPDATE_LOG"
-        update-grub 2>&1 | tee "$GRUB_UPDATE_LOG"
-        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+        GRUB_BACKUP="${GRUB_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)~"
+        cp -p -- "$GRUB_CONFIG" "$GRUB_BACKUP" || { print_error "Cannot back up GRUB configuration"; exit 1; }
+        GRUB_STAGE=$(mktemp) || exit 1
+        GRUB_UPDATE_LOG=$(mktemp "${TMPDIR:-/tmp}/grub-update.XXXXXX") || exit 1
+        if prepare_grub_ipv6 "$GRUB_CONFIG" > "$GRUB_STAGE" &&
+           write_file_atomic "$GRUB_CONFIG" < "$GRUB_STAGE" &&
+           update-grub > "$GRUB_UPDATE_LOG" 2>&1; then
+            GRUB_OK=true
             print_success "GRUB configuration updated successfully"
             print_warning "IPv6 will be disabled at kernel level after reboot"
         else
-            print_error "Failed to update GRUB configuration"
-            print_warning "Check $GRUB_UPDATE_LOG for details"
-
-            # Roll back this run's changes
-            print_warning "Attempting to restore GRUB config from backup..."
-            LATEST_BACKUP=$(ls -t ${GRUB_CONFIG}.backup.*~ 2>/dev/null | head -1)
-            if [ ! -z "$LATEST_BACKUP" ]; then
-                cp "$LATEST_BACKUP" "$GRUB_CONFIG"
-                print_message "GRUB config restored from backup"
+            print_error "Failed to prepare or update GRUB; restoring this run's backup"
+            if cp -p -- "$GRUB_BACKUP" "$GRUB_CONFIG" && update-grub >> "$GRUB_UPDATE_LOG" 2>&1; then
+                print_warning "Previous GRUB configuration restored and regenerated"
+            else
+                print_error "GRUB rollback failed; review $GRUB_UPDATE_LOG before rebooting"
             fi
         fi
+        cat "$GRUB_UPDATE_LOG"
+        rm -f -- "$GRUB_STAGE"
 
         # Show resulting state
         print_message "Resulting GRUB cmdline lines:"
@@ -7053,7 +7172,9 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
             # Verify the temporary file is not empty
             if [ -s "$TEMP_FILE" ]; then
                 # Replace original file
-                mv "$TEMP_FILE" "$INTERFACES_FILE"
+                write_file_atomic "$INTERFACES_FILE" < "$TEMP_FILE" || { print_error "Failed to update interfaces file"; exit 1; }
+                rm -f -- "$TEMP_FILE"
+                INTERFACES_OK=true
                 print_success "IPv6 configuration commented out in $INTERFACES_FILE"
 
                 echo ""
@@ -7066,7 +7187,7 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                 # Remove IPv6 nameservers from /etc/resolv.conf
                 # Skip if systemd-resolved manages resolv.conf (it's a symlink)
                 RESOLV_FILE="/etc/resolv.conf"
-                if { [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; } && [ -L "$RESOLV_FILE" ]; then
+                if [ -L "$RESOLV_FILE" ]; then
                     print_message "Skipping resolv.conf cleanup — managed by systemd-resolved"
                 elif [ -f "$RESOLV_FILE" ]; then
                     if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE"; then
@@ -7077,7 +7198,8 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                         grep -vE "^[[:space:]]*nameserver[[:space:]]+[0-9a-fA-F]*:" "$RESOLV_FILE" > "$TEMP_RESOLV"
                         # Check if any IPv4 nameservers remain after removing IPv6 ones
                         if grep -qE "^[[:space:]]*nameserver[[:space:]]+[0-9]+\.[0-9]+" "$TEMP_RESOLV" && [ -s "$TEMP_RESOLV" ]; then
-                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
+                            write_file_atomic "$RESOLV_FILE" 0644 root:root < "$TEMP_RESOLV" || exit 1
+                            rm -f -- "$TEMP_RESOLV"
                             print_success "IPv6 nameservers removed from $RESOLV_FILE"
                         else
                             # No IPv4 nameservers remain - add fallback DNS
@@ -7085,7 +7207,8 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                             grep -vE "^[[:space:]]*nameserver" "$RESOLV_FILE" > "$TEMP_RESOLV" 2>/dev/null || true
                             echo "nameserver 1.1.1.1" >> "$TEMP_RESOLV"
                             echo "nameserver 8.8.8.8" >> "$TEMP_RESOLV"
-                            mv "$TEMP_RESOLV" "$RESOLV_FILE"
+                            write_file_atomic "$RESOLV_FILE" 0644 root:root < "$TEMP_RESOLV" || exit 1
+                            rm -f -- "$TEMP_RESOLV"
                             print_success "IPv6 nameservers replaced with Cloudflare and Google DNS"
                         fi
                     else
@@ -7107,6 +7230,7 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                 fi
             fi
         else
+            INTERFACES_OK=true
             print_message "No IPv6 configuration found in $INTERFACES_FILE"
             print_message "File is already without IPv6 or uses different format"
         fi
@@ -7169,11 +7293,14 @@ if [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
 
                 for f in "${NETPLAN_FILES[@]}"; do
                     print_message "Processing: $f"
-                    cp "$f" "${f}.backup.${NETPLAN_TS}~"
+                    cp -p "$f" "${f}.backup.${NETPLAN_TS}~" || { print_error "Cannot back up netplan file: $f"; exit 1; }
 
                     set +e
                     python3 - "$f" <<'PYEOF'
+import os
+import stat
 import sys
+import tempfile
 import yaml
 
 path = sys.argv[1]
@@ -7181,8 +7308,8 @@ path = sys.argv[1]
 try:
     with open(path, 'r') as fp:
         cfg = yaml.safe_load(fp)
-except yaml.YAMLError as e:
-    print(f"  YAML parse error: {e}")
+except yaml.YAMLError:
+    print("  YAML parse error; original file was left unchanged")
     sys.exit(2)
 
 if not isinstance(cfg, dict) or 'network' not in cfg \
@@ -7219,9 +7346,10 @@ for dev_type in ('ethernets', 'wifis', 'bonds', 'bridges', 'vlans', 'tunnels'):
             iface['accept-ra'] = False
             changed = True
 
-        # Keep IPv4 link-local (169.254/16), suppress only IPv6 fe80::/10.
-        if iface.get('link-local') != ['ipv4']:
-            iface['link-local'] = ['ipv4']
+        # Netplan defaults to IPv6 link-local. Remove it without enabling IPv4.
+        link_local = [family for family in iface.get('link-local', ['ipv6']) if family != 'ipv6']
+        if iface.get('link-local') != link_local:
+            iface['link-local'] = link_local
             changed = True
 
         # addresses: drop IPv6 entries
@@ -7267,8 +7395,15 @@ for dev_type in ('ethernets', 'wifis', 'bonds', 'bridges', 'vlans', 'tunnels'):
                 iface.pop('routes', None)
 
 if changed:
-    with open(path, 'w') as fp:
-        yaml.safe_dump(cfg, fp, default_flow_style=False, sort_keys=False)
+    fd, temporary = tempfile.mkstemp(prefix='.netplan-', dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, 'w') as fp:
+            yaml.safe_dump(cfg, fp, default_flow_style=False, sort_keys=False)
+        os.chmod(temporary, stat.S_IMODE(os.stat(path).st_mode))
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     print("  CHANGED: IPv6 settings disabled")
     sys.exit(10)
 else:
@@ -7291,12 +7426,14 @@ PYEOF
                 done
 
                 if [ "${#NETPLAN_CHANGED_FILES[@]}" -eq 0 ]; then
-                    print_message "No IPv6 configuration found in any netplan file"
+                    if netplan generate >/dev/null 2>&1; then NETPLAN_OK=true; fi
+                    print_message "No netplan files changed"
                 else
                     print_message "Validating netplan config with 'netplan generate'..."
                     NETPLAN_LOG=$(mktemp "${TMPDIR:-/tmp}/netplan-generate.${NETPLAN_TS}.XXXXXX")
                     chmod 600 "$NETPLAN_LOG"
                     if netplan generate >"$NETPLAN_LOG" 2>&1; then
+                        NETPLAN_OK=true
                         print_success "Netplan config is valid"
                         print_message "Modified files:"
                         for f in "${NETPLAN_CHANGED_FILES[@]}"; do
@@ -7315,6 +7452,7 @@ PYEOF
                             chmod 600 "$f"
                             print_message "  Restored: $f"
                         done
+                        netplan generate >>"$NETPLAN_LOG" 2>&1 || print_error "Could not regenerate netplan runtime files after rollback"
                     fi
                 fi
             fi
@@ -7335,7 +7473,7 @@ print_header "══════════════════════
 if final_exit_code; then
     print_message "System setup completed successfully!"
 else
-    print_error "System setup completed with errors; review the execution log below"
+    print_header "System setup completed with errors; review the execution log below"
 fi
 print_header "═════════════════════════════════════════"
 print_message "Summary:"
@@ -7363,25 +7501,30 @@ else
 fi
 
 if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
-    print_message "- Root password: SET"
+    report_setup_result "Root password" "${ROOT_PASSWORD_OK:-false}"
 else
     print_message "- Root password: NOT SET"
 fi
 
 if [ ! -z "$NEW_USERNAME" ]; then
-    print_message "- New user created: $NEW_USERNAME"
+    print_message "- User account: $NEW_USERNAME ($CREATE_USER)"
     if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ]; then
-        print_message "  - SSH key configured"
+        report_setup_result "SSH key" "${USER_SSH_KEY_OK:-false}"
     fi
     if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
-        print_message "  - zsh and Oh My Zsh installed"
+        if [ "${OH_MY_ZSH_OK:-false}" = true ]; then
+            print_message "  - Oh My Zsh installed at the pinned commit"
+            report_setup_result "Zsh plugins, configuration and login shell" "${ZSH_CONFIG_OK:-false}"
+        else
+            print_message "  - Oh My Zsh installation FAILED or incomplete"
+        fi
     fi
 else
     print_message "- New user: NOT CREATED"
 fi
 
 if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
-    print_message "- Crontab configured for root"
+    report_setup_result "Root crontab" "${CRONTAB_OK:-false}"
 else
     print_message "- Crontab: NOT CONFIGURED"
 fi
@@ -7408,7 +7551,7 @@ else
 fi
 
 if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
-    print_message "- YubiKey/FIDO2 SSH: Configured"
+    report_setup_result "YubiKey/FIDO2 SSH" "${YUBIKEY_SSH_OK:-false}"
     print_message "  User: ${YUBIKEY_SSH_USER:-not set}"
     if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
         print_message "  Public key: added to authorized_keys"
@@ -7424,7 +7567,8 @@ else
 fi
 
 if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
-    print_message "- Python venv created at: $VENV_PATH"
+    report_setup_result "Python venv ($VENV_PATH)" "${VENV_CREATED_OK:-false}"
+    report_setup_result "Python packages" "${VENV_PACKAGES_OK:-false}"
 else
     print_message "- Python venv: NOT CREATED"
 fi
@@ -7435,25 +7579,22 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     else
         print_message "- sysctl: Basic optimization (static parameters)"
     fi
+    report_setup_result "sysctl application" "${SYSCTL_OK:-false}"
     print_message "  sysctl config file: ${SYSCTL_TARGET_FILE:-/etc/sysctl.conf}"
     if [ "$ENABLE_IP_FORWARD" = "y" ] || [ "$ENABLE_IP_FORWARD" = "Y" ]; then
         print_message "  IP forwarding: ENABLED"
     else
-        print_message "  IP forwarding: DISABLED"
+        print_message "  IP forwarding: not changed by this step"
     fi
     if [ "$INSTALL_SYSCTL_SERVICE" = "y" ] || [ "$INSTALL_SYSCTL_SERVICE" = "Y" ]; then
-        print_message "  sysctl enforcement service: INSTALLED (disable-ipv6.service)"
+        report_setup_result "sysctl enforcement service" "${SYSCTL_SERVICE_OK:-false}"
     fi
 else
     print_message "- sysctl: SKIPPED"
 fi
 
 if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        print_message "- systemd-resolved: ACTIVE"
-    else
-        print_message "- systemd-resolved: CONFIGURED (service not active — check status)"
-    fi
+    report_setup_result "systemd-resolved" "${RESOLVED_OK:-false}"
     print_message "  DNS: ${RESOLVED_DNS}"
     print_message "  DNSStubListener: $([ "$RESOLVED_STUB_LISTENER_OFF" = "y" ] || [ "$RESOLVED_STUB_LISTENER_OFF" = "Y" ] && echo "disabled" || echo "enabled")"
     print_message "  DNSOverTLS: $([ "$RESOLVED_DNS_OVER_TLS" = "y" ] || [ "$RESOLVED_DNS_OVER_TLS" = "Y" ] && echo "yes" || echo "no")"
@@ -7466,7 +7607,7 @@ fi
 
 if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
    { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
-    print_message "- IPv6 disabled via GRUB (kernel level, both GRUB_CMDLINE_LINUX[_DEFAULT])"
+    report_setup_result "GRUB IPv6 configuration" "${GRUB_OK:-false}"
     print_warning "  Note: Requires reboot to take effect"
 fi
 
@@ -7522,18 +7663,18 @@ fi
 
 if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ]; then
     if [ -f /etc/network/interfaces ]; then
-        print_message "- IPv6 commented in /etc/network/interfaces"
+        report_setup_result "IPv6 in /etc/network/interfaces" "${INTERFACES_OK:-false}"
         print_warning "  Note: May require network restart or reboot"
     fi
 fi
 
 if [ "$DISABLE_IPV6_NETPLAN" = "y" ] || [ "$DISABLE_IPV6_NETPLAN" = "Y" ]; then
-    print_message "- IPv6 stripped from /etc/netplan/*.yaml (validated, NOT applied)"
+    report_setup_result "Netplan IPv6 configuration (not applied)" "${NETPLAN_OK:-false}"
     print_warning "  Run 'sudo netplan apply' manually when ready"
 fi
 
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
-    print_message "- UFW firewall configured and enabled"
+    report_setup_result "UFW firewall" "${UFW_CONFIG_OK:-false}"
     if [ "$BLOCK_ICMP" = "y" ] || [ "$BLOCK_ICMP" = "Y" ]; then
         print_message "- ICMP (ping) blocking: ENABLED"
     else
@@ -7547,19 +7688,20 @@ else
 fi
 
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
-    if systemctl is-active --quiet nftables 2>/dev/null; then
-        print_message "- nftables: ENABLED and running"
+    if [ "${NFTABLES_OK:-false}" = true ]; then
+        print_message "- nftables: rules applied and verified; service enabled for boot"
+        print_message "  Runtime rules are loaded directly; an inactive oneshot service does not mean the firewall is off"
     else
-        print_message "- nftables: ENABLED (service not active — check configuration)"
+        print_message "- nftables setup: FAILED; review rollback messages"
     fi
     if [ ! -z "$NFTABLES_PROFILE" ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
         print_message "  Profile: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
     fi
     if [ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ]; then
-        print_message "  Logging: ${NFTABLES_LOG_SCRIPT} executed"
+        report_setup_result "nftables logging" "${NFT_LOGGING_OK:-false}"
     fi
     if dpkg -l ufw 2>/dev/null | grep -q "^ii"; then
-        if systemctl is-masked --quiet ufw 2>/dev/null; then
+        if [ "$(systemctl is-enabled ufw 2>/dev/null)" = masked ]; then
             print_message "  UFW: disabled and masked"
         fi
     fi
@@ -7584,7 +7726,8 @@ else
 fi
 
 if command -v ufw-docker &> /dev/null; then
-    print_message "- ufw-docker: Installed and configured"
+    print_message "- ufw-docker binary: present"
+    if is_yes "$INSTALL_UFW_DOCKER"; then report_setup_result "ufw-docker configuration" "${UFW_DOCKER_OK:-false}"; fi
 else
     if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
         print_message "- ufw-docker: Installation attempted but not found"
@@ -7637,7 +7780,7 @@ else
 fi
 
 if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
-    print_message "- Custom MOTD: Installed"
+    report_setup_result "Custom MOTD" "${MOTD_OK:-false}"
     print_warning "  Note: MOTD will be visible on next SSH login"
 else
     print_message "- Custom MOTD: Not installed"
@@ -7645,7 +7788,7 @@ fi
 
 if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
     UFW_SCRIPT_PATH="/opt/ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
-    if [ -f "$UFW_SCRIPT_PATH" ]; then
+    if [ "${UFW_CUSTOM_RULES_OK:-false}" = true ] && [ -f "$UFW_SCRIPT_PATH" ]; then
         UFW_SOURCE_TEXT="$([ "$UFW_INSTALL_SOURCE" = "2" ] && echo "from repository" || echo "from archive")"
         print_message "- Custom UFW Docker rules: Installed and executed (v${UFW_RULES_VERSION}, ${UFW_SOURCE_TEXT})"
         print_message "  Script location: $UFW_SCRIPT_PATH"
@@ -7668,8 +7811,20 @@ else
     print_message "- Custom UFW Docker rules: Not installed"
 fi
 
+if [[ "$EXTRACT_OPT_ARCHIVE" =~ ^[yY]$ ]]; then
+    if [ "$OPT_COPY_OK" = true ]; then
+        print_message "- opt.7z: Extracted and copied to /opt"
+    else
+        print_message "- opt.7z: Extraction or copy FAILED"
+    fi
+fi
+
 if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
-    print_message "- Swap Configuration: Configured"
+    if [ "${SWAP_SETUP_OK:-false}" = true ]; then
+        print_message "- Swap Configuration: Configured (active swap verified)"
+    else
+        print_message "- Swap Configuration: FAILED or incomplete"
+    fi
     if [ -f /usr/local/sbin/swap-setup.sh ]; then
         print_message "  Swap script installed: /usr/local/sbin/swap-setup.sh"
     fi
@@ -7679,7 +7834,7 @@ else
 fi
 
 if [ "$SYSCTL_MODE" = "2" ]; then
-    print_message "- Linux NetworkOptimizer (bbr.sh): Executed"
+    report_setup_result "Linux NetworkOptimizer (bbr.sh)" "${BBR_OK:-false}"
     print_message "  Force IPv4 APT: $([ "$BBR_FORCE_IPV4" = "y" ] || [ "$BBR_FORCE_IPV4" = "Y" ] && echo "YES" || echo "NO")"
     print_message "  Full Update: $([ "$BBR_FULL_UPDATE" = "y" ] || [ "$BBR_FULL_UPDATE" = "Y" ] && echo "YES" || echo "NO")"
     print_message "  Fix /etc/hosts: $([ "$BBR_FIX_HOSTS" = "y" ] || [ "$BBR_FIX_HOSTS" = "Y" ] && echo "YES" || echo "NO")"
@@ -7703,7 +7858,7 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ] || [ "$CONFIGU
     fi
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         print_message "- /etc/ssh/sshd_config.backup.*~"
-        print_message "- /etc/ssh/sshd_config.d/99-system-setup.conf (managed drop-in)"
+        print_message "- /etc/ssh/sshd_config.d/10-system-setup.conf (managed drop-in)"
     fi
     if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
         print_message "- /etc/ssh/sshd_config.backup.yubikey.*~"
@@ -7844,11 +7999,11 @@ if [ "$OS" = "ubuntu" ]; then
 fi
 print_message "sudo nano /etc/ssh/sshd_config"
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
-    print_message "sudo nano /etc/ssh/sshd_config.d/99-system-setup.conf  # Managed drop-in (overwritten on re-run!)"
+    print_message "sudo nano /etc/ssh/sshd_config.d/10-system-setup.conf  # Managed drop-in (overwritten on re-run!)"
     print_message "sudo sshd -T | less                    # Show effective sshd config (resolves all drop-ins)"
-    print_warning "Note: /etc/ssh/sshd_config.d/99-system-setup.conf is REGENERATED every time this script runs."
+    print_warning "Note: /etc/ssh/sshd_config.d/10-system-setup.conf is REGENERATED every time this script runs."
     print_warning "      For permanent customization, create another drop-in that sorts BEFORE it,"
-    print_warning "      e.g. /etc/ssh/sshd_config.d/10-local.conf  (first value wins in sshd)."
+    print_warning "      e.g. /etc/ssh/sshd_config.d/01-local.conf  (first value wins in sshd)."
 fi
 if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
     print_message "ssh-keygen -t ed25519-sk -O resident -O verify-required -C \"user@host\""
