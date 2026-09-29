@@ -21,11 +21,13 @@ jobs:
         run: |
           bash -n install.sh system-setup.sh install-nft-docker-watch.sh update-checksum.sh
           bash -n config/nft-apply.sh config/rustdesk-safe-update.sh tests/regression.sh
+          bash -n config/opt-vault.sh
 
       - name: ShellCheck
         run: |
           shellcheck --severity=warning install.sh install-nft-docker-watch.sh update-checksum.sh
           shellcheck --severity=warning config/nft-apply.sh config/rustdesk-safe-update.sh tests/regression.sh
+          shellcheck --severity=warning config/opt-vault.sh
           timeout 180 shellcheck --severity=error system-setup.sh
 
       - name: Docker Compose validation

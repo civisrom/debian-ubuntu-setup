@@ -50,6 +50,11 @@ assert_embedded_hash system-setup.sh RUSTDESK_SERVICE_SHA256 config/rustdesk-com
 assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_SERVICE_SHA256 config/rustdesk-update.service
 assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_TIMER_SHA256 config/rustdesk-update.timer
 assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_SCRIPT_SHA256 config/rustdesk-safe-update.sh
+assert_embedded_hash system-setup.sh OPT_VAULT_SHA256 config/opt.hc
+assert_embedded_hash system-setup.sh OPT_VAULT_HELPER_SHA256 config/opt-vault.sh
+assert_embedded_hash system-setup.sh OPT_PAYLOAD_SHA256 config/opt-payload.py
+[ "$(stat -c %s config/opt.hc)" -eq 104857600 ] || fail "opt.hc must be exactly 100 MiB"
+[ ! -e config/opt.7z ] || fail "obsolete opt.7z remains"
 
 grep -q 'SYSTEM_SETUP_REPOSITORY_COMMIT="$RESOLVED_COMMIT"' install.sh || \
     fail "install.sh does not pass its immutable commit to downloaded assets"
@@ -63,5 +68,6 @@ if grep -qE '7z[[:space:]]+x[[:space:]]+-p[^[:space:]]' system-setup.sh; then
 fi
 
 python3 tests/setup_failures.py
+python3 tests/opt_vault.py
 
 printf 'Regression checks passed\n'

@@ -16,6 +16,7 @@
 - 🔥 Настройка UFW firewall
 - 🌐 Nginx из upstream-репозиториев (nginx.org / deb.myguard.nl / nginx-modules.com) с гибким выбором модулей
 - 🔐 Проверка целостности (SHA256)
+- 🔒 Восстановление файлов `/opt` из защищённого паролем VeraCrypt-контейнера — [инструкция](VERACRYPT.md)
 - 🧪 Проверка checksum, синтаксиса, ShellCheck и конфигурационных файлов в GitHub Actions
 
 ## 📥 Установка

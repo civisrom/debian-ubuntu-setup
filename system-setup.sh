@@ -184,6 +184,29 @@ extract_7z_archive() {
     return "$result"
 }
 
+# All assets come from the same immutable commit as system-setup.sh.
+restore_opt_vault() {
+    local work base result
+    local OPT_VAULT_SHA256="d23cff98b409b9ae7bf8bc9475cbad4fd44b297a49c0f38227b6375fd008c988"
+    local OPT_VAULT_HELPER_SHA256="c02a04445fa1e42a52134d2829d1c7d97326597cb5f6cbaa97543dee3f0c38ca"
+    local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
+    create_temp_dir opt-download || return 1
+    work=$SYSTEM_SETUP_CREATED_TEMP_DIR
+    base="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config"
+    if ! download_verified_url "$base/opt.hc" "$work/opt.hc" "$OPT_VAULT_SHA256" 900 ||
+       ! download_verified_url "$base/opt-vault.sh" "$work/opt-vault.sh" "$OPT_VAULT_HELPER_SHA256" ||
+       ! download_verified_url "$base/opt-payload.py" "$work/opt-payload.py" "$OPT_PAYLOAD_SHA256" ||
+       ! validate_shell_script "$work/opt-vault.sh"; then
+        print_error "Cannot download and verify the VeraCrypt snapshot and helpers"
+        return 1
+    fi
+    set +x
+    bash "$work/opt-vault.sh" restore "$work/opt.hc" <<< "${OPT_VAULT_PASSWORD}"
+    result=$?
+    unset OPT_VAULT_PASSWORD
+    return "$result"
+}
+
 # Select version, filename and digest from the same official metadata response.
 select_go_archive() {
     python3 - "$1" "$2" <<'PY'
@@ -1435,31 +1458,28 @@ if [ "$INTERACTIVE" = true ]; then
 
     echo ""
 
-    # Ask about extracting opt.7z archive
+    # Ask about restoring the VeraCrypt snapshot.
     print_header "───────────────────────────────────────────────"
-    print_header "   Additional Files (opt.7z)"
+    print_header "   Additional Files (VeraCrypt opt.hc)"
     print_header "───────────────────────────────────────────────"
-    echo ""
-    print_message "Extract additional files to /opt?"
-    print_message "  - Downloads opt.7z and copies contents to /opt"
-    print_message "  - Scripts in 'scripts' subfolder will be made executable"
-    prompt_read -r -p "Extract opt.7z to /opt? (y/N): " EXTRACT_OPT_ARCHIVE
-    EXTRACT_OPT_ARCHIVE=${EXTRACT_OPT_ARCHIVE:-n}
-
-    if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
-        print_message "The archive is password-protected. Please enter the password:"
-        prompt_read -r -s -p "Password: " OPT_ARCHIVE_PASSWORD
+    print_message "Restore the encrypted snapshot to /opt?"
+    print_message "  - Downloads and verifies opt.hc (100 MiB)"
+    print_message "  - Installs signed VeraCrypt if needed; backs up replaced files"
+    print_message "  - Restores root ownership, private configs and executable scripts"
+    prompt_read -r -p "Restore opt.hc to /opt? (y/N): " RESTORE_OPT_VAULT
+    RESTORE_OPT_VAULT=${RESTORE_OPT_VAULT:-n}
+    # Do not expose passwords even when the installer was started with bash -x.
+    set +x
+    if [[ "$RESTORE_OPT_VAULT" =~ ^[yY]$ ]]; then
+        prompt_read -r -s -p "VeraCrypt password: " OPT_VAULT_PASSWORD
         echo ""
-        if [ -z "$OPT_ARCHIVE_PASSWORD" ]; then
-            print_warning "No password provided. opt.7z will not be extracted."
-            EXTRACT_OPT_ARCHIVE="n"
-        else
-            print_message "Password saved. Archive will be extracted during installation."
+        if [ -z "$OPT_VAULT_PASSWORD" ]; then
+            print_warning "No password provided. opt.hc restoration skipped."
+            RESTORE_OPT_VAULT="n"
         fi
     else
-        OPT_ARCHIVE_PASSWORD=""
+        OPT_VAULT_PASSWORD=""
     fi
-
     echo ""
 
     # Ask about root password
@@ -2128,11 +2148,11 @@ if [ "$INTERACTIVE" = true ]; then
 
         # Ask about nftables config profile
         # Profiles are loaded from config/nftables-profiles.conf (or embedded fallback)
-        # Config files are installed from opt.7z archive at execution time
+        # Config files are installed from opt.hc container at execution time
         echo ""
         print_message "Install nftables configuration profile?"
-        if [ "$EXTRACT_OPT_ARCHIVE" != "y" ] && [ "$EXTRACT_OPT_ARCHIVE" != "Y" ]; then
-            print_warning "opt.7z extraction not selected — config files must already exist in /opt/nftables/"
+        if [ "$RESTORE_OPT_VAULT" != "y" ] && [ "$RESTORE_OPT_VAULT" != "Y" ]; then
+            print_warning "opt.hc restoration not selected — config files must already exist in /opt/nftables/"
         fi
         print_message "  Available profiles:"
         # Generate menu dynamically from NFT_PROFILE_DESCRIPTIONS array
@@ -2719,7 +2739,7 @@ else
     CONFIGURE_UFW="y"
     BLOCK_ICMP="n"
     INSTALL_UFW_CUSTOM_RULES="n"
-    EXTRACT_OPT_ARCHIVE="n"
+    RESTORE_OPT_VAULT="n"
     UFW_RULES_VERSION="6"
     UFW_CUSTOM_RULES_PASSWORD=""
     CONFIGURE_SYSCTL="y"
@@ -2843,7 +2863,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             print_message "    - Logging script: N/A (not available for this profile)"
         fi
     else
-        print_message "    - Config from opt.7z: NO (default config)"
+        print_message "    - Config from opt.hc: NO (default config)"
     fi
     print_message "    - nft-docker-watch: $([ "$INSTALL_NFT_DOCKER_WATCH" = "y" ] || [ "$INSTALL_NFT_DOCKER_WATCH" = "Y" ] && echo "YES (systemd service)" || echo "NO")"
 fi
@@ -2854,7 +2874,7 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
         UFW_SOURCE_TEXT="$([ "$UFW_INSTALL_SOURCE" = "2" ] && echo "from repository" || echo "from archive")"
         print_message "  Custom UFW Docker rules: YES (v${UFW_RULES_VERSION}, ${UFW_SOURCE_TEXT})"
         if [ "$UFW_INSTALL_SOURCE" = "1" ]; then
-            print_message "    - Extract opt.7z to /opt: $([ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ] && echo "YES" || echo "NO")"
+            print_message "    - Restore opt.hc to /opt: $([ "$RESTORE_OPT_VAULT" = "y" ] || [ "$RESTORE_OPT_VAULT" = "Y" ] && echo "YES" || echo "NO")"
         elif [ "$UFW_INSTALL_SOURCE" = "2" ] && [ -n "$UFW_SSH_PORT" ]; then
             print_message "    - Custom SSH port: $UFW_SSH_PORT"
         fi
@@ -5967,169 +5987,40 @@ else
 fi
 
 # ============================================
-# EXTRACT OPT.7Z ARCHIVE TO /OPT
+# RESTORE VERACRYPT SNAPSHOT TO /OPT
 # ============================================
 
 OPT_EXTRACTED_OK=false
 OPT_COPY_OK=false
 
-if [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; then
-    echo ""
-    print_header "═══════════════════════════════════════════════════"
-    print_header "   Extracting opt.7z Archive to /opt"
-    print_header "═══════════════════════════════════════════════════"
-    echo ""
-
-    # Check if p7zip is installed, install if needed
-    if ! command -v 7z &> /dev/null; then
-        print_message "Installing 7z for archive extraction..."
-        if apt-get install -y p7zip-full || apt-get install -y 7zip; then
-            print_message "7z installed successfully"
-        else
-            print_error "CRITICAL: Failed to install 7z archive tool"
-            print_error "Cannot extract opt.7z archive"
+if [[ "$RESTORE_OPT_VAULT" =~ ^[yY]$ ]]; then
+    print_header "   Restoring VeraCrypt opt.hc to /opt"
+    if restore_opt_vault; then
+        OPT_COPY_OK=true
+        if [ -d /opt/nftables ]; then
+            OPT_EXTRACTED_OK=true
+            verify_nft_profile_assets /opt/nftables || print_warning "Some configured nftables profile assets are missing"
         fi
+        print_success "VeraCrypt snapshot restored to /opt and closed"
+    else
+        print_error "VeraCrypt restoration failed; nftables installation will be skipped"
+        ENABLE_NFTABLES=n
     fi
-
-    # Only proceed if 7z is available
-    if command -v 7z &> /dev/null; then
-        OPT_ARCHIVE_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/opt.7z"
-        OPT_ARCHIVE_SHA256="5516f98f5549bed8a11cd8911ca21904c2cbb501038fd96e450f5ef097a03f03"
-        if create_temp_dir "opt-archive"; then
-            OPT_TMP_DIR="$SYSTEM_SETUP_CREATED_TEMP_DIR"
-        else
-            OPT_TMP_DIR=""
-        fi
-        OPT_ARCHIVE_FILE="${OPT_TMP_DIR}/opt.7z"
-        OPT_EXTRACT_DIR="${OPT_TMP_DIR}/extract"
-
-        print_message "Downloading opt.7z archive for /opt files..."
-        if [ -n "$OPT_TMP_DIR" ] && download_verified_url "$OPT_ARCHIVE_URL" "$OPT_ARCHIVE_FILE" "$OPT_ARCHIVE_SHA256" 900; then
-            print_message "opt.7z archive downloaded and SHA256 verified"
-
-            # Create extraction directory
-            mkdir -p "$OPT_EXTRACT_DIR"
-
-            # Feed the password over stdin so it is never visible in argv.
-            print_message "Extracting opt.7z archive..."
-            if extract_7z_archive "$OPT_ARCHIVE_FILE" "$OPT_EXTRACT_DIR" <<< "${OPT_ARCHIVE_PASSWORD}"; then
-                print_message "opt.7z archive extracted successfully"
-
-                # Copy all contents to /opt
-                print_message "Copying files and folders to /opt..."
-                if [ -n "$(find "$OPT_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-                    OPT_COPY_SOURCE="$OPT_EXTRACT_DIR"
-                    # Accept archives containing an opt/ wrapper as well as
-                    # archives whose root is already the contents of /opt.
-                    if [ -d "$OPT_EXTRACT_DIR/opt" ] &&
-                       [ "$(find "$OPT_EXTRACT_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]; then
-                        OPT_COPY_SOURCE="$OPT_EXTRACT_DIR/opt"
-                    fi
-                    if mkdir -p /opt && cp -a "$OPT_COPY_SOURCE/." /opt/; then
-                        OPT_COPY_OK=true
-                        print_message "Files copied to /opt successfully"
-
-                        # Verify nftables directory was extracted (critical for config installation)
-                        if [ -d "/opt/nftables" ]; then
-                            print_success "nftables directory found in /opt"
-                            OPT_EXTRACTED_OK=true
-                            # List nftables configs for verification
-                            print_message "Available nftables configs:"
-                            ls -la /opt/nftables/*.conf 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .conf files found in /opt/nftables/"
-                            if [ -d "/opt/nftables/logging" ]; then
-                                print_message "Available logging scripts:"
-                                ls -la /opt/nftables/logging/*.sh 2>/dev/null | awk '{print "  - " $NF}' || print_warning "No .sh files found in /opt/nftables/logging/"
-                            else
-                                print_warning "nftables/logging directory not found in archive"
-                            fi
-                            verify_nft_profile_assets "/opt/nftables" || print_warning "Some configured nftables profile assets are missing"
-                        else
-                            print_warning "nftables directory NOT found after extraction"
-                            print_warning "Archive may have different internal structure"
-                            # Try to find nftables files in case of nested directory
-                            FOUND_NFTABLES=$(find /opt -name "*nftables*.conf" -type f 2>/dev/null | head -1)
-                            if [ -n "$FOUND_NFTABLES" ]; then
-                                FOUND_DIR=$(dirname "$FOUND_NFTABLES")
-                                print_message "Found nftables configs in: $FOUND_DIR"
-                                print_message "Restructuring: moving files to /opt/nftables/..."
-                                mkdir -p /opt/nftables
-                                NFT_CONF_COPIED=0
-                                while IFS= read -r _nft_conf; do
-                                    cp "$_nft_conf" /opt/nftables/
-                                    NFT_CONF_COPIED=$((NFT_CONF_COPIED + 1))
-                                done < <(find "$FOUND_DIR" -maxdepth 1 -type f -name "*nftables*.conf" 2>/dev/null | sort)
-                                print_message "Copied $NFT_CONF_COPIED nftables config file(s)"
-                                # Also try to find and copy logging scripts
-                                FOUND_LOGGING=$(find /opt -type f -name "*.sh" -path "*/logging/*" 2>/dev/null | head -1)
-                                if [ -n "$FOUND_LOGGING" ]; then
-                                    FOUND_LOG_DIR=$(dirname "$FOUND_LOGGING")
-                                    mkdir -p /opt/nftables/logging
-                                    NFT_LOG_COPIED=0
-                                    while IFS= read -r _nft_log; do
-                                        cp "$_nft_log" /opt/nftables/logging/
-                                        NFT_LOG_COPIED=$((NFT_LOG_COPIED + 1))
-                                    done < <(find "$FOUND_LOG_DIR" -maxdepth 1 -type f -name "*.sh" 2>/dev/null | sort)
-                                    print_message "Copied $NFT_LOG_COPIED nftables logging script(s)"
-                                fi
-                                unset _nft_conf _nft_log NFT_CONF_COPIED NFT_LOG_COPIED
-                                OPT_EXTRACTED_OK=true
-                                print_success "nftables files restructured to /opt/nftables/"
-                                verify_nft_profile_assets "/opt/nftables" || print_warning "Some configured nftables profile assets are missing"
-                            fi
-                        fi
-
-                        # Make scripts in scripts folder executable (except .ini files)
-                        if [ -d "/opt/scripts" ]; then
-                            print_message "Setting executable permissions for scripts in /opt/scripts..."
-
-                            # Find all files in scripts directory and make them executable (except .ini)
-                            find /opt/scripts -type f ! -name "*.ini" -exec chmod +x {} \;
-
-                            # Count executable files
-                            EXEC_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
-                            print_message "Made $EXEC_COUNT file(s) executable in /opt/scripts"
-                        fi
-
-                        # List what was copied
-                        print_message "Contents copied to /opt:"
-                        find /opt -mindepth 1 -maxdepth 1 -printf '  - %f\n' | sort
-                    else
-                        print_error "Failed to copy extracted archive contents to /opt; files may be incomplete"
-                    fi
-                else
-                    print_error "opt.7z archive is empty"
-                fi
-
-                # Cleanup
-                rm -rf "$OPT_EXTRACT_DIR"
-                rm -f "$OPT_ARCHIVE_FILE"
-                unset OPT_ARCHIVE_PASSWORD
-                print_message "Temporary files cleaned up"
-            else
-                print_error "Failed to extract opt.7z archive; see the 7z diagnostic above"
-                rm -f "$OPT_ARCHIVE_FILE"
-                unset OPT_ARCHIVE_PASSWORD
-            fi
-        else
-            print_error "Failed to download opt.7z archive"
-        fi
-    fi
-
-    echo ""
 else
-    print_message "Skipping opt.7z extraction (not requested)"
+    print_message "Skipping VeraCrypt restoration (not requested)"
 fi
+unset OPT_VAULT_PASSWORD
 
 # ============================================
 # ENABLE NFTABLES FIREWALL
 # ============================================
-# NOTE: This section runs AFTER opt.7z extraction so config files are available.
+# NOTE: This section runs AFTER opt.hc restoration so config files are available.
 # Order of operations:
 #   1. Install nftables and validate a single atomic transaction
 #   2. Snapshot the live ruleset before any mutation
 #   3. Apply `flush ruleset` + the new config in one nft transaction
 #   4. Disable future UFW activation without touching committed runtime rules
-#   5. Install nftables config from opt.7z (relay/docker/native profile)
+#   5. Install nftables config from opt.hc (relay/docker/native profile)
 #   6. Run logging setup script matching the selected profile
 #   7. Verify syntax and apply nftables configuration
 
@@ -6270,14 +6161,14 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         NFTABLES_SRC="/opt/nftables/${NFTABLES_CONF_FILE}"
         NFTABLES_DST="/etc/nftables.conf"
 
-        # Check if config file exists (from opt.7z extraction or pre-installed)
+        # Check if config file exists (from opt.hc restoration or pre-installed)
         if [ ! -f "$NFTABLES_SRC" ] || [ ! -s "$NFTABLES_SRC" ]; then
-            # Config not found — check if opt.7z was supposed to provide it
+            # Config not found — check if opt.hc was supposed to provide it
             if [ "$OPT_EXTRACTED_OK" = true ]; then
-                print_error "Config file not found after opt.7z extraction: $NFTABLES_SRC"
+                print_error "Config file not found after opt.hc restoration: $NFTABLES_SRC"
             else
                 print_error "Config file not found: $NFTABLES_SRC"
-                print_message "  opt.7z was not extracted — file must already exist in /opt/nftables/"
+                print_message "  opt.hc was not restored — file must already exist in /opt/nftables/"
             fi
             print_message "Available files in /opt/nftables/:"
             ls -la /opt/nftables/ 2>/dev/null || print_error "  /opt/nftables/ directory does not exist"
@@ -6341,7 +6232,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             fi
         else
             print_warning "Logging script not found: $LOGGING_SCRIPT"
-            print_message "  File must exist in /opt/nftables/logging/ (from opt.7z or pre-installed)"
+            print_message "  File must exist in /opt/nftables/logging/ (from opt.hc or pre-installed)"
             print_message "Available logging scripts:"
             ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
         fi
@@ -6786,7 +6677,7 @@ fi
 # CONFIGURE SYSCTL
 # ============================================
 # NOTE: This section is intentionally placed AFTER all network-dependent
-# operations (Docker, Go, ipset, pip, MOTD, UFW rules, swap, BBR, opt.7z).
+# operations (Docker, Go, ipset, pip, MOTD, UFW rules, swap, BBR, opt.hc).
 # Reason: sysctl disables IPv6 at runtime, which breaks DNS resolution
 # on systems where the resolver depends on IPv6 upstream DNS.
 # By running this last, we avoid the need for fragile DNS recovery hacks.
@@ -7851,10 +7742,10 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
             print_message "  Custom SSH port configured: $UFW_SSH_PORT"
         fi
         # Show archive extraction info
-        if [ "$UFW_INSTALL_SOURCE" = "1" ] && { [ "$EXTRACT_OPT_ARCHIVE" = "y" ] || [ "$EXTRACT_OPT_ARCHIVE" = "Y" ]; }; then
-            print_message "  Archive extracted to: /opt"
+        if [ "$UFW_INSTALL_SOURCE" = "1" ] && { [ "$RESTORE_OPT_VAULT" = "y" ] || [ "$RESTORE_OPT_VAULT" = "Y" ]; }; then
+            print_message "  VeraCrypt snapshot restored to: /opt"
             if [ -d "/opt/scripts" ]; then
-                SCRIPT_COUNT=$(find /opt/scripts -type f ! -name "*.ini" | wc -l)
+                SCRIPT_COUNT=$(find /opt/scripts -type f -executable | wc -l)
                 print_message "  Executable scripts in /opt/scripts: $SCRIPT_COUNT"
             fi
         fi
@@ -7865,11 +7756,11 @@ else
     print_message "- Custom UFW Docker rules: Not installed"
 fi
 
-if [[ "$EXTRACT_OPT_ARCHIVE" =~ ^[yY]$ ]]; then
+if [[ "$RESTORE_OPT_VAULT" =~ ^[yY]$ ]]; then
     if [ "$OPT_COPY_OK" = true ]; then
-        print_message "- opt.7z: Extracted and copied to /opt"
+        print_message "- opt.hc: Decrypted, verified and restored to /opt"
     else
-        print_message "- opt.7z: Extraction or copy FAILED"
+        print_message "- opt.hc: Restoration FAILED"
     fi
 fi
 

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.password
+payload.tar.gz
+payload.sha256
+/research/
