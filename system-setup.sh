@@ -187,7 +187,7 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="d23cff98b409b9ae7bf8bc9475cbad4fd44b297a49c0f38227b6375fd008c988"
+    local OPT_VAULT_SHA256="b28dc0e5401c46cba24c7f83515d51f832b9de61f2483af598a794bf8371deb8"
     local OPT_VAULT_HELPER_SHA256="c02a04445fa1e42a52134d2829d1c7d97326597cb5f6cbaa97543dee3f0c38ca"
     local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
     create_temp_dir opt-download || return 1
