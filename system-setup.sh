@@ -187,7 +187,7 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="b28dc0e5401c46cba24c7f83515d51f832b9de61f2483af598a794bf8371deb8"
+    local OPT_VAULT_SHA256="5fb868082dbf352a6447791b16b18d2057ebe8dd5698bd430c96bd3a9766b706"
     local OPT_VAULT_HELPER_SHA256="c02a04445fa1e42a52134d2829d1c7d97326597cb5f6cbaa97543dee3f0c38ca"
     local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
     create_temp_dir opt-download || return 1
@@ -5413,7 +5413,7 @@ if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
             nest_asyncio
             aiohttp
             charset-normalizer
-            maxminddb
+            maxminddb==3.2.0
             geoipsets
             setuptools
             wheel

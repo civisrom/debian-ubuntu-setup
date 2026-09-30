@@ -74,6 +74,27 @@ less /opt/scripts/nft-full/MANUAL_RU.md
 bash /opt/scripts/nft-full/full-nftables.sh --help
 ```
 
+В `requirements.txt` закреплён `maxminddb==3.2.0`; тот же пакет устанавливается
+при создании Python-окружения основным установщиком. Для уже существующего
+окружения выполните `python -m pip install -r /opt/scripts/nft-full/requirements.txt`
+именно его интерпретатором (обычно `/root/skripts/bin/python3` или
+`/opt/scripts/nft-full/.venv/bin/python3`). Системный Python изменять не требуется.
+
+Установщики журналов находятся в `/opt/nftables/logging/`:
+
+```bash
+# PL; прежнее имя ge_docker_host_nftables_v5.sh также поддерживается
+sudo bash /opt/nftables/logging/ge_docker_host_nftables_v5_eth0.sh
+# NUXT
+sudo bash /opt/nftables/logging/ge_docker_host_nftables_v5_ens3_nuxt.sh
+```
+
+Общий `install-nft-logging.sh` должен находиться рядом с оболочками. Он создаёт
+семь тематических журналов для PL и восемь для NUXT, сохраняет полные сообщения
+без дублирования, переносит прежнюю историю в `legacy/`, а новые архивы ротации
+складывает в `archive/`. Подробности и команды чтения:
+`/opt/nftables/logging/LOGGING_RU.md` и раздел 12 мануала NFT Full.
+
 Отдельные обновления файлов без применения firewall:
 
 ```bash
