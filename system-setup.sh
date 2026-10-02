@@ -628,6 +628,49 @@ validate_shell_script() {
     fi
 }
 
+configure_tmux_choice() {
+    INSTALL_TMUX="n"
+    TMUX_USER=""
+    prompt_read -r -p "Install and configure tmux (native package + user systemd service)? (y/N): " INSTALL_TMUX
+    INSTALL_TMUX=${INSTALL_TMUX:-n}
+    is_yes "$INSTALL_TMUX" || return 0
+
+    local default_user="${NEW_USERNAME:-${SUDO_USER:-root}}"
+    while true; do
+        prompt_read -r -p "tmux service user (default: $default_user): " TMUX_USER
+        TMUX_USER=${TMUX_USER:-$default_user}
+        if ! [[ "$TMUX_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]]; then
+            print_warning "Invalid username; enter an existing account or the new user selected above"
+            continue
+        fi
+        if id -u -- "$TMUX_USER" >/dev/null 2>&1 ||
+           { is_yes "${CREATE_USER:-n}" && [ "$TMUX_USER" = "${NEW_USERNAME:-}" ]; }; then
+            break
+        fi
+        print_warning "User $TMUX_USER does not exist and is not scheduled for creation"
+    done
+}
+
+install_tmux_service() {
+    local target_user="$1"
+    local TMUX_INSTALLER_COMMIT="04ddbb271e945098009f9ceb52f27a13ac74bf93"
+    local TMUX_INSTALLER_SHA256="224a2642727e714984e62ded6f81188b5df128b95c9ef0835d704b0caf9acdd0"
+    local installer
+
+    if ! id -u -- "$target_user" >/dev/null 2>&1; then
+        print_error "Cannot install tmux: user $target_user does not exist"
+        return 1
+    fi
+    create_temp_dir "tmux-setup" || return 1
+    installer="$SYSTEM_SETUP_CREATED_TEMP_DIR/install.sh"
+    download_verified_url \
+        "https://raw.githubusercontent.com/civisrom/tmux-systemd/${TMUX_INSTALLER_COMMIT}/install.sh" \
+        "$installer" "$TMUX_INSTALLER_SHA256" || return 1
+    validate_shell_script "$installer" || return 1
+    wait_for_apt_locks || return 1
+    bash "$installer" --user "$target_user"
+}
+
 # Atomically replace a file with the given content (read from stdin).
 # Preserves owner/mode of an existing target; falls back to root:root 0644 for new files.
 write_file_atomic() {
@@ -1608,6 +1651,9 @@ if [ "$INTERACTIVE" = true ]; then
     
     echo ""
     
+    configure_tmux_choice
+    echo ""
+
     # Ask about crontab configuration
     print_message "Do you want to configure crontab for root?"
     prompt_read -r -p "Configure crontab? (y/N): " CONFIGURE_CRONTAB
@@ -2712,6 +2758,8 @@ else
     CONFIGURE_USER_SSH_KEY="n"
     USER_SSH_KEY=""
     INSTALL_ZSH="n"
+    INSTALL_TMUX="n"
+    TMUX_USER=""
     CONFIGURE_CRONTAB="n"
     CRONTAB_MODE="3"
     CRONTAB_TASKS=""
@@ -2788,6 +2836,7 @@ else
     print_message "Non-interactive mode - using default settings:"
     print_message "- Root password: NO"
     print_message "- Create user: NO"
+    print_message "- tmux: NO"
     print_message "- SSH configuration: NO"
     print_message "- Python venv: NO"
     print_message "- Docker: NO"
@@ -2820,6 +2869,11 @@ print_message "  New user: $([ ! -z "$NEW_USERNAME" ] && echo "YES ($NEW_USERNAM
 if [ ! -z "$NEW_USERNAME" ]; then
     print_message "    - SSH key: $([ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ] && echo "YES" || echo "NO")"
     print_message "    - zsh: $([ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ] && echo "YES" || echo "NO")"
+fi
+if is_yes "$INSTALL_TMUX"; then
+    print_message "  tmux: YES (native package, RGB configuration, user service for $TMUX_USER)"
+else
+    print_message "  tmux: NO"
 fi
 print_message "  Crontab: $([ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT, Users: ${SSH_ALLOW_USERS:-none})" || echo "NO")"
@@ -4500,6 +4554,22 @@ EOF
         fi
     else
         print_error "Oh My Zsh installation failed"
+    fi
+    echo ""
+fi
+
+# ============================================
+# INSTALL AND CONFIGURE TMUX
+# ============================================
+
+TMUX_SETUP_OK=false
+if is_yes "${INSTALL_TMUX:-n}"; then
+    print_message "Installing and configuring tmux for $TMUX_USER..."
+    if install_tmux_service "$TMUX_USER"; then
+        TMUX_SETUP_OK=true
+        print_success "tmux and its user systemd service are ready for $TMUX_USER"
+    else
+        print_error "tmux installation failed for $TMUX_USER; see errors above"
     fi
     echo ""
 fi
@@ -7466,6 +7536,15 @@ if [ ! -z "$NEW_USERNAME" ]; then
     fi
 else
     print_message "- New user: NOT CREATED"
+fi
+
+if is_yes "${INSTALL_TMUX:-n}"; then
+    report_setup_result "tmux + user systemd service ($TMUX_USER)" "${TMUX_SETUP_OK:-false}"
+    if [ "${TMUX_SETUP_OK:-false}" = true ]; then
+        print_message "  After SSH login as $TMUX_USER: tmux -L systemd attach -t main"
+    fi
+else
+    print_message "- tmux: NOT CONFIGURED"
 fi
 
 if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then

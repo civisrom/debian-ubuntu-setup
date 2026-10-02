@@ -40,6 +40,115 @@ class SetupFailures(unittest.TestCase):
             input=input, text=True, capture_output=True, timeout=30,
         )
 
+    def test_tmux_choice_defaults_and_explicit_selection(self):
+        body = function("is_yes") + function("prompt_read") + function("configure_tmux_choice") + """
+CREATE_USER=$1 NEW_USERNAME=$2 SUDO_USER=$3
+id() { case "${@: -1}" in root|sudoer|existing) return 0 ;; *) return 1 ;; esac; }
+configure_tmux_choice
+printf 'RESULT:%s|%s\\n' "$INSTALL_TMUX" "$TMUX_USER"
+"""
+        cases = [
+            ("n", "", "sudoer", "\n", "n|"),
+            ("n", "", "sudoer", "n\n", "n|"),
+            ("y", "newuser", "sudoer", "y\n\n", "y|newuser"),
+            ("existing", "existing", "sudoer", "Y\n\n", "Y|existing"),
+            ("n", "", "sudoer", "y\n\n", "y|sudoer"),
+            ("n", "", "", "y\n\n", "y|root"),
+            ("n", "", "sudoer", "y\nexisting\n", "y|existing"),
+        ]
+        for create, new_user, sudo_user, answer, expected in cases:
+            with self.subTest(answer=answer, expected=expected):
+                result = self.shell(body, create, new_user, sudo_user, input=answer)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("RESULT:" + expected, result.stdout)
+
+    def test_tmux_choice_retries_bad_users_and_rejects_eof(self):
+        body = function("is_yes") + function("prompt_read") + function("configure_tmux_choice") + """
+CREATE_USER=n NEW_USERNAME='' SUDO_USER=root
+id() { [ "${@: -1}" = root ]; }
+configure_tmux_choice
+printf 'RESULT:%s\\n' "$TMUX_USER"
+"""
+        result = self.shell(body, input="y\ninvalid name\nmissing\nroot\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count("WARNING:"), 2)
+        self.assertNotIn("ERROR:", result.stdout + result.stderr)
+        self.assertIn("RESULT:root", result.stdout)
+        for answer in ("", "y\n", "y\nmissing\n"):
+            with self.subTest(answer=answer):
+                result = self.shell(body, input=answer)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("RESULT:", result.stdout)
+
+    def test_tmux_installer_validation_and_child_failures(self):
+        installer = self.root / "downloaded fixture.sh"
+        body = (function("create_temp_dir") + function("validate_shell_script") +
+                function("install_tmux_service") + """
+TMPDIR=$1 fixture=$2 mode=$3
+export TMUX_TEST_RESULT="$TMPDIR/executed"
+id() { [ "$mode" != missing_user ]; }
+download_verified_url() {
+    [[ "$1" =~ ^https://raw.githubusercontent.com/civisrom/tmux-systemd/[0-9a-f]{40}/install.sh$ ]] || return 9
+    [[ "$3" =~ ^[0-9a-f]{64}$ ]] || return 9
+    printf '%s\\n' "$1" > "$TMPDIR/downloaded"
+    [ "$mode" != download_error ] || return 1
+    cp -- "$fixture" "$2"
+}
+wait_for_apt_locks() { [ "$mode" != apt_locked ]; }
+install_tmux_service root
+""")
+        for mode in ("ok", "download_error", "invalid_script", "apt_locked", "child_error", "missing_user"):
+            with self.subTest(mode=mode):
+                marker = self.root / "executed"
+                downloaded = self.root / "downloaded"
+                marker.unlink(missing_ok=True)
+                downloaded.unlink(missing_ok=True)
+                if mode == "invalid_script":
+                    installer.write_text("#!/bin/bash\nif then\n")
+                else:
+                    code = 17 if mode == "child_error" else 0
+                    installer.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$TMUX_TEST_RESULT"\nexit ' + str(code) + '\n')
+                result = self.shell(body, self.root, installer, mode)
+                self.assertEqual(result.returncode == 0, mode == "ok", result.stdout + result.stderr)
+                self.assertEqual(marker.exists(), mode in ("ok", "child_error"))
+                self.assertEqual(downloaded.exists(), mode != "missing_user")
+                if marker.exists():
+                    self.assertEqual(marker.read_text(), "--user\nroot\n")
+
+    def test_tmux_hash_mismatch_never_executes_download(self):
+        marker = self.root / "executed"
+        body = (function("create_temp_dir") + function("download_verified_url") +
+                function("validate_shell_script") + function("install_tmux_service") + """
+TMPDIR=$1
+export TMUX_TEST_RESULT="$TMPDIR/executed"
+download_url_ipv4() { printf '#!/bin/bash\\ntouch "$TMUX_TEST_RESULT"\\n' > "$2"; }
+wait_for_apt_locks() { return 0; }
+install_tmux_service root
+""")
+        result = self.shell(body, self.root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SHA256 mismatch", result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_tmux_execution_is_optional_and_reports_failures(self):
+        start = SOURCE.index("# INSTALL AND CONFIGURE TMUX")
+        end = SOURCE.index("# CONFIGURE SSH", start)
+        block = SOURCE[start:end]
+        body = function("is_yes") + """
+INSTALL_TMUX=$1 TMUX_USER=root code=$2
+SETUP_ERRORS=()
+print_error() { SETUP_ERRORS+=("$1"); }
+install_tmux_service() { printf 'CALLED:%s\\n' "$1"; return "$code"; }
+""" + block + '\nprintf "RESULT:%s|%s\\n" "$TMUX_SETUP_OK" "${#SETUP_ERRORS[@]}"'
+        for choice, code, called, result in [("n", 0, False, "false|0"),
+                                            ("y", 0, True, "true|0"),
+                                            ("Y", 3, True, "false|1")]:
+            output = self.shell(body, choice, code)
+            self.assertEqual(output.returncode, 0, output.stderr)
+            self.assertEqual("CALLED:root" in output.stdout, called)
+            self.assertIn("RESULT:" + result, output.stdout)
+
+
     @unittest.skipUnless(shutil.which("7z"), "7z required for real encrypted archive tests")
     def test_archive_password_stdin_and_failure_diagnostics(self):
         payload = self.root / "payload.txt"
