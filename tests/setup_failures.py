@@ -582,5 +582,138 @@ bash -c 'cat -- "$APT_CONFIG"'
         self.assertIn('DPkg::Lock::Timeout "600";', result.stdout)
 
 
+    TIMESYNC = "\n".join(function(name) for name in (
+        "timesync_probe_name", "timesync_probe_servers", "timesync_format_rtt",
+        "timesync_print_results", "timesync_configure_timesyncd", "timesync_wait_timesyncd",
+        "timesync_configure_chrony", "timesync_wait_chrony", "timesync_is_synchronized",
+        "is_yes")) + """
+TIMESYNC_MAX_ADDRESSES=4 TIMESYNC_WAIT_SECONDS=4
+create_temp_dir() { SYSTEM_SETUP_CREATED_TEMP_DIR=$(mktemp -d); }
+sleep() { :; }
+"""
+
+    def test_timesync_ranking_partial_pools_and_single_server(self):
+        # Addresses ending in .9 stay silent; the last octet is the RTT in ms.
+        stubs = """
+getent() {
+    case "$2" in
+        fast.example) printf '192.0.2.3 STREAM fast.example\n192.0.2.3 DGRAM\n' ;;
+        pool.example) printf '198.51.100.2 STREAM\n198.51.100.9 STREAM\n198.51.100.1 STREAM\n' ;;
+        slow.example) printf '203.0.113.40 STREAM\n' ;;
+        dead.example) printf '203.0.113.9 STREAM\n' ;;
+        big.example) for i in 11 12 13 14 15 16; do printf '203.0.113.%s STREAM\n' "$i"; done ;;
+        *) return 2 ;;
+    esac
+}
+timesync_probe_address() {
+    local last="${1##*.}"
+    [ "$last" != 9 ] || return 1
+    printf '%s 2\n' "$((last * 1000))"
+}
+timesync_probe_servers "$@" || exit 1
+printf '%s\n' "${TIMESYNC_RESULTS[@]}"
+printf 'recommended=%s\n' "$TIMESYNC_RECOMMENDED"
+timesync_print_results
+"""
+        result = self.shell(self.TIMESYNC + stubs, "dead.example", "pool.example", "nodns.example",
+                            "slow.example", "fast.example", "big.example")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[:6], [
+            "fast.example 1 1 3000 2",
+            "big.example 4 4 11000 2",
+            "slow.example 1 1 40000 2",
+            "pool.example 2 3 1000 2",
+            "dead.example 0 1 - -",
+            "nodns.example 0 0 - -",
+        ])
+        self.assertEqual(lines[6], "recommended=fast.example big.example slow.example")
+        self.assertIn("no DNS", result.stdout)
+        self.assertIn("3.0 ms", result.stdout)
+
+        # Only one server answers (a provider filtering NTP): it is still
+        # recommended, alone, instead of falling back to silent defaults.
+        result = self.shell(self.TIMESYNC + stubs, "dead.example", "nodns.example", "slow.example")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("recommended=slow.example\n", result.stdout)
+        result = self.shell(self.TIMESYNC + stubs, "dead.example", "nodns.example")
+        self.assertIn("recommended=\n", result.stdout)
+
+    def test_timesyncd_dropin_resets_servers_and_waits_for_reply(self):
+        dropins = self.root / "etc/systemd/timesyncd.conf.d"
+        dropins.mkdir(parents=True)
+        (dropins / "90-other.conf").write_text("[Time]\nNTP=old.example\n")
+        (dropins / "99-zz-late.conf").write_text("[Time]\nNTP=late.example\n")
+        dropin = dropins / "99-system-setup-ntp.conf"
+        stubs = f"""
+TIMESYNC_TIMESYNCD_DROPIN={dropin}
+TIMESYNC_SERVICE=timesyncd
+reply=$1 calls={self.root / "calls"}
+write_file_atomic() {{ local t; t=$(mktemp); cat > "$t" && mv -- "$t" "$1"; }}
+systemctl() {{ printf 'systemctl %s\n' "$*" >> "$calls"; }}
+timedatectl() {{
+    case "$*" in
+        "show-timesync -p ServerName --value") printf 'b.example\n' ;;
+        "show-timesync -p NTPMessage --value") [ "$reply" = yes ] && printf '{{ Leap=0, Version=4, Mode=4, Stratum=3 }}\n' ;;
+        "show-timesync -p ServerAddress --value") printf '192.0.2.7\n' ;;
+        *) printf 'timedatectl %s\n' "$*" >> "$calls" ;;
+    esac
+}}
+timesync_configure_timesyncd "a.example b.example"
+"""
+        result = self.shell(self.TIMESYNC + stubs, "yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[Time]\nNTP=\nNTP=a.example b.example\n", dropin.read_text())
+        calls = (self.root / "calls").read_text()
+        self.assertIn("systemctl restart systemd-timesyncd", calls)
+        self.assertIn("timedatectl set-ntp true", calls)
+        self.assertIn("99-zz-late.conf is read after", result.stderr)
+        self.assertNotIn("90-other.conf is read after", result.stderr)
+        self.assertIn("b.example (192.0.2.7)", result.stdout)
+
+        result = self.shell(self.TIMESYNC + stubs, "no")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("got no reply from a.example b.example", result.stderr)
+        self.assertTrue(list(dropins.glob("99-system-setup-ntp.conf.backup.*~")))
+
+    def test_chrony_sources_file_and_reachability(self):
+        config = self.root / "chrony.conf"
+        sources = self.root / "sources.d"
+        sources.mkdir()
+        config.write_text(f"pool 2.debian.pool.ntp.org iburst\nsourcedir {sources}\n")
+        body = function("timesync_configure_chrony").replace("/etc/chrony/chrony.conf", str(config))
+        body = body.replace("/etc/chrony/sources\\.d", str(sources).replace(".", "\\."))
+        body = body.replace("/etc/chrony/sources.d", str(sources))
+        stubs = """
+stub_reach=$1 stub_state=${2:-*}
+write_file_atomic() { local t; t=$(mktemp); cat > "$t" && mv -- "$t" "$1"; }
+systemctl() { printf 'systemctl %s\n' "$*"; return 0; }
+chronyc() {
+    case "$*" in
+        "reload sources") printf 'chronyc reload\n' ;;
+        "-N -c sources") printf '^,-,2.debian.pool.ntp.org,0,6,0,0,0,0,0\n^,%s,a.example,2,6,%s,1,0,0,0\n' "$stub_state" "$stub_reach" ;;
+        "-n -c tracking") printf 'A,192.0.2.1,2\n' ;;
+    esac
+}
+timedatectl() { [ "$stub_reach" != 0 ] && printf 'yes\n'; }
+timesync_configure_chrony "a.example b.example"
+"""
+        result = self.shell(self.TIMESYNC + body + stubs, "17")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        managed = sources / "system-setup.sources"
+        self.assertIn("server a.example iburst\nserver b.example iburst\n", managed.read_text())
+        self.assertIn("chrony receives time from a.example", result.stdout)
+        result = self.shell(self.TIMESYNC + body + stubs, "0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("chrony got no reply", result.stderr)
+        # A source chrony rejected is not a success; one it keeps as a backup is.
+        for state in ("x", "~"):
+            result = self.shell(self.TIMESYNC + body + stubs, "1", state)
+            self.assertNotEqual(result.returncode, 0, state)
+        result = self.shell(self.TIMESYNC + body + stubs, "1", "?")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("keeps a.example as a backup", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

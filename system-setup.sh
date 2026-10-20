@@ -1107,6 +1107,395 @@ DNSEOF
     fi
 }
 
+# ============================================
+# TIME SYNCHRONIZATION (NTP) HELPERS
+# ============================================
+# Some providers drop outgoing NTP to almost every public server (seen on a
+# VPS where only time.cloudflare.com answered): the distribution defaults
+# then never synchronize and nothing reports it. These helpers probe the
+# candidates over UDP 123 with bash's /dev/udp (no extra packages), rank them
+# by response time and configure the time service that is already present:
+# chrony through its sources directory, otherwise systemd-timesyncd through
+# a drop-in (the package is installed when no time service exists).
+TIMESYNC_CANDIDATES=(
+    time.cloudflare.com
+    time.google.com
+    ntp.ubuntu.com
+    0.debian.pool.ntp.org
+    1.debian.pool.ntp.org
+    0.ubuntu.pool.ntp.org
+    pool.ntp.org
+    time.windows.com
+    time.apple.com
+    time.facebook.com
+    time.aws.com
+    time.nist.gov
+    ptbtime1.ptb.de
+    ntp1.vniiftri.ru
+)
+TIMESYNC_MAX_ADDRESSES=4
+TIMESYNC_PROBE_TIMEOUT=2
+TIMESYNC_WAIT_SECONDS=90
+TIMESYNC_TIMESYNCD_DROPIN="/etc/systemd/timesyncd.conf.d/99-system-setup-ntp.conf"
+TIMESYNC_SERVICE=""
+TIMESYNC_SERVERS=""
+TIMESYNC_RECOMMENDED=""
+TIMESYNC_RESULTS=()
+
+# Sets TIMESYNC_SERVICE to chrony, ntpd, timesyncd or none.
+timesync_detect_service() {
+    local unit
+    for unit in ntpsec ntp openntpd; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            TIMESYNC_SERVICE="ntpd"
+            return 0
+        fi
+    done
+    if [ -x /usr/sbin/chronyd ]; then
+        TIMESYNC_SERVICE="chrony"
+    elif [ -x /usr/lib/systemd/systemd-timesyncd ] || [ -x /lib/systemd/systemd-timesyncd ]; then
+        TIMESYNC_SERVICE="timesyncd"
+    else
+        TIMESYNC_SERVICE="none"
+    fi
+}
+
+timesync_is_synchronized() {
+    [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]
+}
+
+timesync_status_text() {
+    local service server=""
+    case "$TIMESYNC_SERVICE" in
+        chrony) service="chrony"
+                server=$(chronyc -n -c tracking 2>/dev/null | cut -d, -f2) ;;
+        timesyncd) service="systemd-timesyncd"
+                server=$(timedatectl show-timesync -p ServerName --value 2>/dev/null) ;;
+        ntpd) service="ntpd (not managed by this script)" ;;
+        *) service="no time service installed" ;;
+    esac
+    printf '%s, clock %s%s' "$service" \
+        "$(timesync_is_synchronized && echo synchronized || echo "NOT synchronized")" \
+        "${server:+, server $server}"
+}
+
+# Prints "<rtt_us> <stratum>" when <address> answers a client request with a
+# valid server reply: mode 4 and stratum 1-15 (stratum 0 is a kiss-o'-death).
+# <raw> receives the reply datagram. The reader is started before the clock is taken and the request is sent by
+# the printf builtin as one datagram, so no process start lands inside the
+# measured interval even when many probes run at once.
+timesync_probe_address() {
+    local address="$1" raw="$2" reply start end mode stratum
+    reply=$(timeout "$TIMESYNC_PROBE_TIMEOUT" bash -c '
+        exec 3<>"/dev/udp/$1/123" || exit 1
+        head -c 48 <&3 > "$2" &
+        reader=$!
+        start=$EPOCHREALTIME
+        printf "\033\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000" >&3 || exit 1
+        wait "$reader" || exit 1
+        end=$EPOCHREALTIME
+        printf "%s %s %s\n" "${start/[.,]/}" "${end/[.,]/}" "$(od -An -tu1 -N2 "$2")"
+    ' _ "$address" "$raw" 2>/dev/null) || return 1
+    read -r start end mode stratum <<< "$reply"
+    [[ "$start$end$mode$stratum" =~ ^[0-9]+$ ]] || return 1
+    [ $((mode & 7)) -eq 4 ] && [ "$stratum" -ge 1 ] && [ "$stratum" -le 15 ] || return 1
+    printf '%s %s\n' "$((end - start))" "$stratum"
+}
+
+# Probes every IPv4 address of <name> (up to TIMESYNC_MAX_ADDRESSES) in
+# parallel, so a pool with a few blocked members shows up as partial. For
+# address N it writes <out>.N.addr and, when the address answered, <out>.N
+# with "<rtt_us> <stratum>"; <out>.count gets the number of addresses.
+timesync_probe_name() {
+    local name="$1" out="$2" address total=0
+    local -a pids=()
+    while read -r address; do
+        total=$((total + 1))
+        printf '%s\n' "$address" > "$out.$total.addr"
+        timesync_probe_address "$address" "$out.$total.raw" > "$out.$total" 2>/dev/null &
+        pids+=("$!")
+        [ "$total" -lt "$TIMESYNC_MAX_ADDRESSES" ] || break
+    done < <(getent ahostsv4 "$name" 2>/dev/null | awk '!seen[$1]++ {print $1}')
+    [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}"
+    printf '%s\n' "$total" > "$out.count"
+}
+
+# Probes the given names and fills TIMESYNC_RESULTS with
+# "<name> <answered> <addresses> <rtt_us|-> <stratum|->" in rank order:
+# fully answering names by response time, then partially answering ones,
+# then silent or unresolved ones. TIMESYNC_RECOMMENDED gets the first three
+# names that answered at all, so a network where a single server is reachable
+# still gets that server (plus partially reachable backups, if any).
+# The parallel round finds who answers; dozens of simultaneous process starts
+# distort its timings, so the answering addresses are timed again one by one.
+timesync_probe_servers() {
+    local work index=0 name answered total best stratum class rtt layer address i i_rtt i_layer
+    local -a pids=() names=()
+    TIMESYNC_RESULTS=()
+    TIMESYNC_RECOMMENDED=""
+    create_temp_dir "system-setup-ntp" || return 1
+    work="$SYSTEM_SETUP_CREATED_TEMP_DIR"
+    for name in "$@"; do
+        index=$((index + 1))
+        names[index]="$name"
+        timesync_probe_name "$name" "$work/name.$index" &
+        pids+=("$!")
+    done
+    [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}"
+    for ((index = 1; index <= ${#names[@]}; index++)); do
+        read -r total < "$work/name.$index.count" 2>/dev/null || total=0
+        answered=0 best="-" stratum="-"
+        for ((i = 1; i <= total; i++)); do
+            read -r rtt layer < "$work/name.$index.$i" 2>/dev/null || continue
+            answered=$((answered + 1))
+            read -r address < "$work/name.$index.$i.addr"
+            if read -r i_rtt i_layer < <(timesync_probe_address "$address" "$work/name.$index.$i.raw") && [ "$i_rtt" -lt "$rtt" ]; then
+                rtt="$i_rtt" layer="$i_layer"
+            fi
+            if [ "$best" = "-" ] || [ "$rtt" -lt "$best" ]; then
+                best="$rtt" stratum="$layer"
+            fi
+        done
+        printf '%s %s %s %s %s %s\n' "$index" "$answered" "$total" "$best" "$stratum" \
+            "$([ "$answered" -eq 0 ] && echo 2 || { [ "$answered" -eq "$total" ] && echo 0 || echo 1; })" \
+            > "$work/name.$index"
+    done
+    while read -r class rtt index answered total stratum; do
+        [ "$rtt" != 999999999 ] || rtt="-"
+        TIMESYNC_RESULTS+=("${names[index]} $answered $total $rtt $stratum")
+        if [ "$answered" -gt 0 ] && [ "$(wc -w <<< "$TIMESYNC_RECOMMENDED")" -lt 3 ]; then
+            TIMESYNC_RECOMMENDED="${TIMESYNC_RECOMMENDED:+$TIMESYNC_RECOMMENDED }${names[index]}"
+        fi
+    done < <(
+        for ((index = 1; index <= ${#names[@]}; index++)); do
+            read -r _ answered total best stratum class < "$work/name.$index"
+            [ "$best" != "-" ] || best=999999999
+            printf '%s %s %s %s %s %s\n' "$class" "$best" "$index" "$answered" "$total" "$stratum"
+        done | sort -k1,1n -k2,2n -k3,3n
+    )
+    rm -rf -- "$work"
+}
+
+timesync_format_rtt() {
+    [ "$1" = "-" ] && { printf -- '-'; return; }
+    printf '%d.%d ms' "$(($1 / 1000))" "$((($1 % 1000) / 100))"
+}
+
+timesync_print_results() {
+    local row name answered total rtt stratum number=0 state
+    printf '  %-3s %-24s %-10s %-10s %s\n' "#" "Server" "Answered" "Best RTT" "Stratum"
+    for row in "${TIMESYNC_RESULTS[@]}"; do
+        read -r name answered total rtt stratum <<< "$row"
+        number=$((number + 1))
+        if [ "$total" -eq 0 ]; then state="no DNS"
+        else state="$answered/$total"
+        fi
+        printf '  %-3s %-24s %-10s %-10s %s\n' "$number" "$name" "$state" "$(timesync_format_rtt "$rtt")" "$stratum"
+    done
+}
+
+# Interactive choice: sets TIMESYNC_SERVERS, or clears CONFIGURE_TIMESYNC
+# when nothing answers and no server is entered.
+timesync_choose_servers() {
+    local answer token name custom row answered total rtt chosen confirm saved_recommended
+    local -a saved=()
+    print_message "Probing NTP servers over UDP 123 (up to $TIMESYNC_MAX_ADDRESSES addresses per name)..."
+    timesync_probe_servers "${TIMESYNC_CANDIDATES[@]}" || return 1
+    timesync_print_results
+    if [ -z "$TIMESYNC_RECOMMENDED" ]; then
+        print_warning "No public NTP server answered from this network (UDP 123 is probably filtered)"
+    elif [ "$(wc -w <<< "$TIMESYNC_RECOMMENDED")" -eq 1 ]; then
+        print_warning "Only one NTP server answers from this network; it will be the only time source"
+    fi
+    while true; do
+        print_message "Recommended: ${TIMESYNC_RECOMMENDED:-none}"
+        prompt_read -r -p "NTP servers (numbers separated by commas or spaces, 'c' = custom server, Enter = recommended): " answer
+        if [ -z "$answer" ]; then
+            if [ -z "$TIMESYNC_RECOMMENDED" ]; then
+                print_warning "No NTP server selected; time synchronization will not be configured"
+                CONFIGURE_TIMESYNC="n"
+                return 0
+            fi
+            TIMESYNC_SERVERS="$TIMESYNC_RECOMMENDED"
+            return 0
+        fi
+        chosen=""
+        for token in ${answer//,/ }; do
+            name=""
+            if [[ "$token" =~ ^[0-9]+$ ]] && [ "$token" -ge 1 ] && [ "$token" -le "${#TIMESYNC_RESULTS[@]}" ]; then
+                read -r name answered total _ <<< "${TIMESYNC_RESULTS[token - 1]}"
+                [ "$answered" -gt 0 ] || print_warning "$name did not answer the probe"
+            elif [ "$token" = "c" ] || [ "$token" = "C" ]; then
+                prompt_read -r -p "Custom NTP server (host name or IPv4 address): " custom
+                if ! [[ "$custom" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+                    print_warning "Invalid server name: $custom"
+                    continue
+                fi
+                # Probe the custom server alone, keeping the candidate table
+                # so the numbers keep their meaning for the next prompt.
+                saved=("${TIMESYNC_RESULTS[@]}")
+                saved_recommended="$TIMESYNC_RECOMMENDED"
+                timesync_probe_servers "$custom" || return 1
+                row="${TIMESYNC_RESULTS[0]}"
+                TIMESYNC_RESULTS=("${saved[@]}")
+                TIMESYNC_RECOMMENDED="$saved_recommended"
+                read -r name answered total rtt _ <<< "$row"
+                print_message "$name: answered $answered/$total, best RTT $(timesync_format_rtt "$rtt")"
+                if [ "$answered" -eq 0 ]; then
+                    prompt_read -r -p "$custom did not answer. Use it anyway? (y/N): " confirm
+                    is_yes "$confirm" || continue
+                fi
+            else
+                print_warning "Ignoring unknown choice: $token"
+                continue
+            fi
+            [[ " $chosen " == *" $name "* ]] || chosen="${chosen:+$chosen }$name"
+        done
+        if [ -n "$chosen" ]; then
+            TIMESYNC_SERVERS="$chosen"
+            return 0
+        fi
+    done
+}
+
+timesync_wait_timesyncd() {
+    local servers="$1" deadline=$((SECONDS + TIMESYNC_WAIT_SECONDS)) server message
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        server=$(timedatectl show-timesync -p ServerName --value 2>/dev/null)
+        message=$(timedatectl show-timesync -p NTPMessage --value 2>/dev/null)
+        if [ -n "$server" ] && [[ " $servers " == *" $server "* ]] && [[ "$message" == *"Mode=4"* ]]; then
+            print_success "systemd-timesyncd receives time from $server ($(timedatectl show-timesync -p ServerAddress --value 2>/dev/null))"
+            return 0
+        fi
+        sleep 2
+    done
+    print_error "systemd-timesyncd got no reply from $servers within $TIMESYNC_WAIT_SECONDS seconds"
+    timedatectl timesync-status 2>&1 | sed 's/^/  /'
+    return 1
+}
+
+timesync_configure_timesyncd() {
+    local servers="$1" dropin="$TIMESYNC_TIMESYNCD_DROPIN" file
+    if [ "$TIMESYNC_SERVICE" = "none" ]; then
+        print_message "Installing systemd-timesyncd..."
+        wait_for_apt_locks
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-timesyncd; then
+            print_error "Failed to install systemd-timesyncd"
+            return 1
+        fi
+    fi
+    mkdir -p "${dropin%/*}" || return 1
+    for file in "${dropin%/*}"/*.conf; do
+        [ -f "$file" ] && [ "$file" != "$dropin" ] || continue
+        grep -qE '^[[:space:]]*NTP=' "$file" || continue
+        if [[ "$file" > "$dropin" ]]; then
+            print_warning "$file is read after $dropin and overrides its NTP= servers"
+        else
+            print_message "NTP= servers in $file are replaced by $dropin"
+        fi
+    done
+    if [ -f "$dropin" ]; then
+        cp -p "$dropin" "${dropin}.backup.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
+    fi
+    # NTP= adds to the list collected from timesyncd.conf and earlier
+    # drop-ins; the empty assignment resets it first.
+    write_file_atomic "$dropin" 0644 root:root <<EOF || return 1
+# Managed by system-setup.sh: NTP servers that answered from this network,
+# ordered by response time. timesyncd uses the first reachable one.
+[Time]
+NTP=
+NTP=$servers
+EOF
+    systemctl unmask systemd-timesyncd >/dev/null 2>&1 || true
+    timedatectl set-ntp true >/dev/null 2>&1 || print_warning "timedatectl set-ntp true failed"
+    systemctl enable systemd-timesyncd >/dev/null 2>&1 || true
+    if ! systemctl restart systemd-timesyncd; then
+        print_error "Failed to restart systemd-timesyncd"
+        return 1
+    fi
+    timesync_wait_timesyncd "$servers"
+}
+
+timesync_wait_chrony() {
+    local servers="$1" deadline=$((SECONDS + TIMESYNC_WAIT_SECONDS)) mode state name reach rest
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        while IFS=, read -r mode state name _ _ reach rest; do
+            [ "$mode" = "^" ] && [[ " $servers " == *" $name "* ]] || continue
+            # Reach counts valid replies. "x" (falseticker) and "~" (jitter)
+            # are rejected sources. "?" with replies is a source chrony does
+            # not select yet; Ubuntu's default authselectmode keeps plain NTP
+            # sources behind its reachable NTS ones this way.
+            [[ "$reach" =~ ^[0-7]+$ ]] && [ "$reach" != 0 ] && [[ "$state" != [x~] ]] || continue
+            if timesync_is_synchronized; then
+                print_success "chrony receives time from $name (state $state); current source: $(chronyc -n -c tracking 2>/dev/null | cut -d, -f2)"
+                [ "$state" != "?" ] || print_message "chrony does not select $name yet; it prefers other reachable sources (for example NTS) and keeps $name as a backup"
+                return 0
+            fi
+        done < <(chronyc -N -c sources 2>/dev/null)
+        sleep 2
+    done
+    print_error "chrony got no reply from $servers within $TIMESYNC_WAIT_SECONDS seconds"
+    chronyc -N sources 2>&1 | sed 's/^/  /'
+    return 1
+}
+
+timesync_configure_chrony() {
+    local servers="$1" config=/etc/chrony/chrony.conf target reload name
+    if grep -qE '^[[:space:]]*sourcedir[[:space:]]+/etc/chrony/sources\.d([[:space:]]|$)' "$config" 2>/dev/null; then
+        target=/etc/chrony/sources.d/system-setup.sources
+        reload=sources
+    elif grep -qE '^[[:space:]]*confdir[[:space:]]+/etc/chrony/conf\.d([[:space:]]|$)' "$config" 2>/dev/null; then
+        target=/etc/chrony/conf.d/system-setup-ntp.conf
+        reload=restart
+    else
+        print_error "$config includes neither /etc/chrony/sources.d nor /etc/chrony/conf.d; add the servers manually: $servers"
+        return 1
+    fi
+    mkdir -p "${target%/*}" || return 1
+    if [ -f "$target" ]; then
+        cp -p "$target" "${target}.backup.$(date +%Y%m%d-%H%M%S)~" 2>/dev/null || true
+    fi
+    {
+        echo "# Managed by system-setup.sh: NTP servers that answered from this network."
+        echo "# Sources from chrony.conf and other files stay; chrony skips unreachable ones."
+        for name in $servers; do
+            echo "server $name iburst"
+        done
+    } | write_file_atomic "$target" 0644 root:root || return 1
+    systemctl enable chrony >/dev/null 2>&1 || true
+    if [ "$reload" = "sources" ] && systemctl is-active --quiet chrony && chronyc reload sources >/dev/null 2>&1; then
+        print_message "chrony sources reloaded from $target"
+    elif ! systemctl restart chrony; then
+        print_error "Failed to restart chrony"
+        return 1
+    fi
+    timesync_wait_chrony "$servers"
+}
+
+configure_time_sync() {
+    timesync_detect_service
+    if [ "$TIMESYNC_SERVICE" = "ntpd" ]; then
+        print_error "An ntpd service is active; this step manages only chrony and systemd-timesyncd"
+        return 1
+    fi
+    if [ -z "$TIMESYNC_SERVERS" ]; then
+        print_message "Probing NTP servers over UDP 123..."
+        timesync_probe_servers "${TIMESYNC_CANDIDATES[@]}" || return 1
+        timesync_print_results
+        TIMESYNC_SERVERS="$TIMESYNC_RECOMMENDED"
+        if [ -z "$TIMESYNC_SERVERS" ]; then
+            print_error "No public NTP server answered from this network (UDP 123 is probably filtered)"
+            return 1
+        fi
+    fi
+    print_message "NTP servers: $TIMESYNC_SERVERS"
+    if [ "$TIMESYNC_SERVICE" = "chrony" ]; then
+        timesync_configure_chrony "$TIMESYNC_SERVERS"
+    else
+        timesync_configure_timesyncd "$TIMESYNC_SERVERS"
+    fi
+}
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root"
@@ -2429,6 +2818,33 @@ if [ "$INTERACTIVE" = true ]; then
         BBR_FIX_DNS="n"
     fi
 
+    # Ask about time synchronization (NTP)
+    echo ""
+    timesync_detect_service
+    TIMESYNC_SERVERS=""
+    print_message "Configure time synchronization (NTP)?"
+    print_message "  Current: $(timesync_status_text)"
+    print_message "  - Probes public NTP servers over UDP 123 and ranks them by response time"
+    print_message "  - Lets you choose the servers; recommended ones are those that answer fastest"
+    print_message "  - Uses chrony when installed, otherwise systemd-timesyncd (installed if missing)"
+    if [ "$TIMESYNC_SERVICE" = "ntpd" ]; then
+        print_message "  - ntpd is active and is not managed by this step"
+        TIMESYNC_DEFAULT="n"
+    elif [ "$TIMESYNC_SERVICE" = "none" ] || ! timesync_is_synchronized; then
+        TIMESYNC_DEFAULT="y"
+    else
+        TIMESYNC_DEFAULT="n"
+    fi
+    if is_yes "$TIMESYNC_DEFAULT"; then
+        prompt_read -r -p "Configure time synchronization? (Y/n): " CONFIGURE_TIMESYNC
+    else
+        prompt_read -r -p "Configure time synchronization? (y/N): " CONFIGURE_TIMESYNC
+    fi
+    CONFIGURE_TIMESYNC=${CONFIGURE_TIMESYNC:-$TIMESYNC_DEFAULT}
+    if is_yes "$CONFIGURE_TIMESYNC"; then
+        timesync_choose_servers || CONFIGURE_TIMESYNC="n"
+    fi
+
     # Ask about IPv6 disable via GRUB (Debian and Ubuntu)
     if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && command -v update-grub >/dev/null 2>&1; then
         echo ""
@@ -2798,6 +3214,15 @@ else
     RESOLVED_DNS=""
     RESOLVED_STUB_LISTENER_OFF=""
     RESOLVED_DNS_OVER_TLS=""
+    # Only an unsynchronized clock is changed unattended; the servers are
+    # probed and chosen when the step runs.
+    TIMESYNC_SERVERS=""
+    timesync_detect_service
+    if [ "$TIMESYNC_SERVICE" != "ntpd" ] && { [ "$TIMESYNC_SERVICE" = "none" ] || ! timesync_is_synchronized; }; then
+        CONFIGURE_TIMESYNC="y"
+    else
+        CONFIGURE_TIMESYNC="n"
+    fi
     CONFIGURE_REPOS="n"
     INSTALL_MOTD="n"
     CUSTOM_PORTS=""
@@ -2952,6 +3377,10 @@ if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
     print_message "    - DNS server: ${RESOLVED_DNS}"
     print_message "    - DNSStubListener: $([ "$RESOLVED_STUB_LISTENER_OFF" = "y" ] || [ "$RESOLVED_STUB_LISTENER_OFF" = "Y" ] && echo "disabled" || echo "enabled (default)")"
     print_message "    - DNSOverTLS: $([ "$RESOLVED_DNS_OVER_TLS" = "y" ] || [ "$RESOLVED_DNS_OVER_TLS" = "Y" ] && echo "yes" || echo "no")"
+fi
+print_message "  Time synchronization (NTP): $(is_yes "$CONFIGURE_TIMESYNC" && echo "YES" || echo "NO")"
+if is_yes "$CONFIGURE_TIMESYNC"; then
+    print_message "    - Servers: ${TIMESYNC_SERVERS:-fastest answering servers, probed during setup}"
 fi
 if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
     print_message "  IPv6 disable via GRUB: $([ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ] && echo "YES (kernel level, both GRUB lines)" || echo "NO")"
@@ -7043,6 +7472,21 @@ else
 fi
 
 # ============================================
+# TIME SYNCHRONIZATION (NTP)
+# ============================================
+# Runs after the resolver step: server names are resolved with the final DNS.
+if is_yes "$CONFIGURE_TIMESYNC"; then
+    print_message "Configuring time synchronization..."
+    if configure_time_sync; then
+        TIMESYNC_OK=true
+    else
+        print_error "Time synchronization setup did not complete"
+    fi
+else
+    print_message "Skipping time synchronization configuration (not requested)"
+fi
+
+# ============================================
 # DISABLE IPv6 VIA GRUB (Debian and Ubuntu)
 # ============================================
 # Adds 'ipv6.disable=1' to BOTH GRUB_CMDLINE_LINUX_DEFAULT and
@@ -7629,6 +8073,14 @@ else
     print_message "- systemd-resolved: Not configured"
 fi
 
+if is_yes "$CONFIGURE_TIMESYNC"; then
+    report_setup_result "Time synchronization" "${TIMESYNC_OK:-false}"
+    print_message "  NTP servers: ${TIMESYNC_SERVERS:-none}"
+    print_message "  Service: $(timesync_detect_service; timesync_status_text)"
+else
+    print_message "- Time synchronization: Not configured"
+fi
+
 if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
    { [ "$DISABLE_IPV6_GRUB" = "y" ] || [ "$DISABLE_IPV6_GRUB" = "Y" ]; }; then
     report_setup_result "GRUB IPv6 configuration" "${GRUB_OK:-false}"
@@ -8051,6 +8503,10 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
 fi
 if [ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ]; then
     print_message "sudo nano /etc/docker/daemon.json  # Docker daemon config"
+fi
+if is_yes "$CONFIGURE_TIMESYNC"; then
+    print_message "timedatectl timesync-status            # Time sync status (systemd-timesyncd)"
+    print_message "chronyc -N sources                     # Time sources (chrony)"
 fi
 if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
     print_message "resolvectl status                      # Check resolved status"
