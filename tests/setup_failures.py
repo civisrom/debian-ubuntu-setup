@@ -440,6 +440,20 @@ fail_restart=$1
                 self.assertEqual(legacy.read_text(), legacy_text)
                 self.assertFalse(managed.exists())
 
+    def test_sshd_verify_accepts_prohibit_password_alias(self):
+        managed = self.root / "managed.conf"
+        managed.write_text("# Managed by system-setup.sh\nPermitRootLogin prohibit-password\n")
+        body = function("verify_sshd_parameters") + f"""
+sshd() {{ printf 'permitrootlogin %s\\n' "$effective_value"; }}
+for effective_value in without-password prohibit-password yes; do
+    if verify_sshd_parameters '{managed}'; then echo "OK:$effective_value"; else echo "FAIL:$effective_value"; fi
+done
+"""
+        result = self.shell(body)
+        self.assertIn("OK:without-password", result.stdout, result.stdout + result.stderr)
+        self.assertIn("OK:prohibit-password", result.stdout)
+        self.assertIn("FAIL:yes", result.stdout)
+
     def test_ufw_failure_never_enables_firewall(self):
         section = SOURCE.split("# CONFIGURE UFW\n# ============================================", 1)[1]
         section = section.split("# Configure ICMP blocking in UFW", 1)[0]

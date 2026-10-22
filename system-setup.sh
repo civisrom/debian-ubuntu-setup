@@ -272,6 +272,11 @@ verify_sshd_parameters() {
         actual=$(awk -v key="${parameter,,}" '$1 == key {$1=""; sub(/^ /, ""); print}' <<< "$effective")
         # sshd may output an accumulating directive on several lines.
         actual=$(xargs <<< "$actual")
+        # Older sshd -T (e.g. Debian 13) prints prohibit-password by its
+        # deprecated alias.
+        if [ "${parameter,,}" = "permitrootlogin" ] && [ "$actual" = "without-password" ]; then
+            actual="prohibit-password"
+        fi
         if [ "$actual" != "$expected" ]; then
             print_error "Effective SSH $parameter is '$actual'; requested '$expected'. Resolve conflicting drop-ins or Match settings"
             return 1
@@ -2315,10 +2320,18 @@ if [ "$INTERACTIVE" = true ]; then
         prompt_read -r -p "Configure PermitRootLogin? (y/N): " CONFIG_ROOT_LOGIN
         CONFIG_ROOT_LOGIN=${CONFIG_ROOT_LOGIN:-n}
         if [ "$CONFIG_ROOT_LOGIN" = "y" ] || [ "$CONFIG_ROOT_LOGIN" = "Y" ]; then
-            prompt_read -r -p "Set PermitRootLogin to yes or no? (Y/n): " SSH_ROOT_LOGIN
+            print_message "  yes               - root may log in with any enabled method"
+            print_message "  prohibit-password - root may log in with a key only, never with a password"
+            print_message "  no                - root may not log in over SSH"
+            prompt_read -r -p "Set PermitRootLogin to yes, prohibit-password or no? (Y/p/n): " SSH_ROOT_LOGIN
             SSH_ROOT_LOGIN=${SSH_ROOT_LOGIN:-y}
             if [[ "${SSH_ROOT_LOGIN,,}" =~ ^(y|yes)$ ]]; then
                 SSH_ROOT_LOGIN="yes"
+            elif [[ "${SSH_ROOT_LOGIN,,}" =~ ^(p|prohibit-password)$ ]]; then
+                SSH_ROOT_LOGIN="prohibit-password"
+                if [ ! -s /root/.ssh/authorized_keys ]; then
+                    print_warning "/root/.ssh/authorized_keys is empty or missing: root will not be able to log in over SSH"
+                fi
             else
                 SSH_ROOT_LOGIN="no"
             fi
