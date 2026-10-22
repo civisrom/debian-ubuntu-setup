@@ -236,6 +236,20 @@ repository_has_release https://example.invalid/Release trixie
         for fixture in ("Suite: bookworm\\n", "Suite: trixie-updates\\n", "<html>error</html>"):
             self.assertNotEqual(self.shell(body, fixture).returncode, 0, fixture)
 
+    def test_sysctl_skips_ipv6_keys_when_kernel_has_no_ipv6(self):
+        guard = re.search(r"(?ms)^        if \[ -d /proc/sys/net/ipv6 \]; then\n.*?^        fi\n", SOURCE)[0]
+        body = guard.replace("/proc/sys/net/ipv6", '"$1"') + 'printf "%s" "$SYSCTL_MANAGED_BLOCK"'
+        present = self.root / "ipv6"
+        present.mkdir()
+        result = self.shell(body, present)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("net.ipv6.conf.all.disable_ipv6 = 1", result.stdout)
+        # ipv6.disable=1: the whole net.ipv6 tree is missing from /proc/sys.
+        result = self.shell(body, self.root / "missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("disable_ipv6 =", result.stdout)
+        self.assertIn("already disabled by the kernel", result.stdout)
+
     def test_pinned_commit_is_fetched_from_shallow_checkout(self):
         # This creates only disposable local repositories, with an explicit
         # non-personal identity independent of the user's Git configuration.

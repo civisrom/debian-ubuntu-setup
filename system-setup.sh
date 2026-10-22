@@ -7228,13 +7228,20 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
     else
         # === Basic mode: full static parameters ===
         print_message "Applying basic sysctl configuration (static parameters)"
-        SYSCTL_MANAGED_BLOCK="${SYSCTL_MANAGED_BLOCK}
+        # Kernels booted with ipv6.disable=1 have no net.ipv6 keys at all;
+        # writing them would make every "sysctl -p" (and the boot service) fail.
+        if [ -d /proc/sys/net/ipv6 ]; then
+            SYSCTL_MANAGED_BLOCK="${SYSCTL_MANAGED_BLOCK}
 
 # IPv6 Disable
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
-
+"
+        else
+            print_message "IPv6 is already disabled by the kernel; skipping disable_ipv6 keys"
+        fi
+        SYSCTL_MANAGED_BLOCK="${SYSCTL_MANAGED_BLOCK}
 # Network Tuning (BBR + TCP/UDP optimization)
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
