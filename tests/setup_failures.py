@@ -41,7 +41,7 @@ class SetupFailures(unittest.TestCase):
         )
 
     def test_tmux_choice_defaults_and_explicit_selection(self):
-        body = function("is_yes") + function("prompt_read") + function("configure_tmux_choice") + """
+        body = function("is_yes") + function("prompt_read") + function("prompt_setup_user") + function("configure_tmux_choice") + """
 CREATE_USER=$1 NEW_USERNAME=$2 SUDO_USER=$3
 id() { case "${@: -1}" in root|sudoer|existing) return 0 ;; *) return 1 ;; esac; }
 configure_tmux_choice
@@ -63,7 +63,7 @@ printf 'RESULT:%s|%s\\n' "$INSTALL_TMUX" "$TMUX_USER"
                 self.assertIn("RESULT:" + expected, result.stdout)
 
     def test_tmux_choice_retries_bad_users_and_rejects_eof(self):
-        body = function("is_yes") + function("prompt_read") + function("configure_tmux_choice") + """
+        body = function("is_yes") + function("prompt_read") + function("prompt_setup_user") + function("configure_tmux_choice") + """
 CREATE_USER=n NEW_USERNAME='' SUDO_USER=root
 id() { [ "${@: -1}" = root ]; }
 configure_tmux_choice
@@ -79,6 +79,48 @@ printf 'RESULT:%s\\n' "$TMUX_USER"
                 result = self.shell(body, input=answer)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("RESULT:", result.stdout)
+
+    def test_ghx_install_keeps_user_files_and_manages_one_block(self):
+        home = self.root / "home"
+        (home / ".config").mkdir(parents=True)
+        (home / ".bashrc").write_text("user line\n")
+        (home / ".config/github-repos.tsv").write_text("mine  me  me  *  GITHUB_TOKEN_MINE\n")
+        body = function("strip_managed_block") + function("install_ghx") + """
+SYSTEM_SETUP_TEMP_FILES=()
+home=$1
+id() { return 0; }
+getent() { printf 'u:x:1000:1000::%s:/bin/bash\\n' "$home"; }
+sudo() { shift 2; "$@"; }
+apt-get() { printf 'apt %s\\n' "$*"; }
+install_verified_repo_asset() { printf 'asset %s %s\\n' "$1" "$2"; }
+install_ghx u && install_ghx u
+"""
+        result = self.shell(body, home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("apt install -y gh python3", result.stdout)
+        self.assertIn("asset config/ghx /usr/local/bin/ghx", result.stdout)
+        # Existing routing is never replaced; tokens file is private and empty.
+        self.assertEqual((home / ".config/github-repos.tsv").read_text(), "mine  me  me  *  GITHUB_TOKEN_MINE\n")
+        secrets = home / ".config/secrets.env"
+        self.assertEqual((secrets.stat().st_mode & 0o777, secrets.read_text()), (0o600, ""))
+        for rc in (".bashrc", ".zshenv"):
+            text = (home / rc).read_text()
+            self.assertEqual(text.count("# BEGIN system-setup.sh managed ghx"), 1, rc)
+        self.assertTrue((home / ".bashrc").read_text().startswith("user line\n"))
+
+        # The managed block loads only a 600/400 file owned by the user.
+        loader = 'HOME=$1; . "$HOME/.bashrc"; printf "TOKEN:%s\\n" "${GITHUB_TOKEN_T:-}"'
+        secrets.write_text("export GITHUB_TOKEN_T='value'\n")
+        self.assertIn("TOKEN:value", self.shell(loader, home).stdout)
+        secrets.chmod(0o644)
+        self.assertIn("TOKEN:\n", self.shell(loader, home).stdout)
+
+        # A fresh home gets the template with no active routes.
+        fresh = self.root / "fresh"
+        fresh.mkdir()
+        self.assertEqual(self.shell(body, fresh).returncode, 0)
+        rows = [l for l in (fresh / ".config/github-repos.tsv").read_text().splitlines() if not l.startswith("#")]
+        self.assertEqual(rows, [])
 
     def test_tmux_installer_validation_and_child_failures(self):
         installer = self.root / "downloaded fixture.sh"

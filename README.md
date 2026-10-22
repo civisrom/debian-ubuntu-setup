@@ -14,6 +14,7 @@
 - 🐳 Docker и Docker Compose
 - 🖥️ RustDesk сервер (опционально)
 - 🖥️ tmux с RGB-конфигурацией и автозапуском пользовательской службы systemd (опционально, нативная установка)
+- 🐙 GitHub CLI (`gh`) и маршрутизатор токенов `ghx` (опционально)
 - 🔥 Настройка UFW firewall
 - 🕒 Синхронизация времени: проба NTP-серверов, выбор по времени отклика, настройка chrony или systemd-timesyncd
 - 🌐 Nginx из upstream-репозиториев (nginx.org / deb.myguard.nl / nginx-modules.com) с гибким выбором модулей
@@ -98,6 +99,48 @@ systemctl --user status tmux-systemd.service
 [руководстве tmux-systemd](https://github.com/civisrom/tmux-systemd#содержание).
 Самостоятельный установщик дополнительно поддерживает Ubuntu 22.04 LTS;
 поддерживаемые системы основного скрипта перечислены в начале этого README.
+
+## gh и ghx: GitHub CLI с выбором токена по метке
+
+После вопроса о tmux скрипт спрашивает:
+
+```text
+Install GitHub CLI (gh) and the ghx token router? (y/N):
+ghx user (default: USER):
+```
+
+По умолчанию установка отключена, в неинтерактивном режиме не выполняется.
+Ставятся пакеты `gh` и `python3` из репозиториев дистрибутива и
+`/usr/local/bin/ghx` из `config/ghx` этого репозитория с проверкой SHA256.
+Для выбранного пользователя создаются, только если их ещё нет:
+
+- `~/.config/github-repos.tsv` — несекретная таблица маршрутов
+  `label account ssh_host repos token_env` (шаблон без активных строк);
+- `~/.config/secrets.env` — пустой файл с правами `600` для токенов.
+
+В `~/.bashrc` и `~/.zshenv` добавляется управляемый блок: он загружает
+`secrets.env`, только если файл принадлежит пользователю и имеет права `600`
+или `400`. Скрипт не запрашивает и не записывает токены: их добавляет сам
+пользователь.
+
+```bash
+# ~/.config/secrets.env
+export GITHUB_TOKEN_WORK='<pat>'
+# ~/.config/github-repos.tsv
+work  myaccount  myaccount  *  GITHUB_TOKEN_WORK
+```
+
+`ssh_host` — алиас `Host` из `~/.ssh/config`, через него выполняются
+`ghx clone` и `ghx remote`. После нового входа в оболочку:
+
+```bash
+ghx list                         # метки и наличие токенов (без значений)
+ghx api work /user               # проверка токена
+ghx run work repo list myaccount # любая команда gh с токеном метки
+```
+
+`ghx clone` клонирует только в `~/codex_project`. Для сервера лучше выпустить
+отдельный fine-grained токен с минимальными правами и сроком действия.
 
 ## 🕒 Синхронизация времени (NTP)
 

@@ -630,26 +630,104 @@ validate_shell_script() {
     fi
 }
 
+# Ask for an existing account or the new user selected above; stores it in $1.
+prompt_setup_user() {
+    local result_var="$1" label="$2" selected_user
+    local default_user="${NEW_USERNAME:-${SUDO_USER:-root}}"
+    while true; do
+        prompt_read -r -p "$label (default: $default_user): " selected_user
+        selected_user=${selected_user:-$default_user}
+        if ! [[ "$selected_user" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]]; then
+            print_warning "Invalid username; enter an existing account or the new user selected above"
+            continue
+        fi
+        if id -u -- "$selected_user" >/dev/null 2>&1 ||
+           { is_yes "${CREATE_USER:-n}" && [ "$selected_user" = "${NEW_USERNAME:-}" ]; }; then
+            printf -v "$result_var" '%s' "$selected_user"
+            return 0
+        fi
+        print_warning "User $selected_user does not exist and is not scheduled for creation"
+    done
+}
+
 configure_tmux_choice() {
     INSTALL_TMUX="n"
     TMUX_USER=""
     prompt_read -r -p "Install and configure tmux (native package + user systemd service)? (y/N): " INSTALL_TMUX
     INSTALL_TMUX=${INSTALL_TMUX:-n}
     is_yes "$INSTALL_TMUX" || return 0
+    prompt_setup_user TMUX_USER "tmux service user"
+}
 
-    local default_user="${NEW_USERNAME:-${SUDO_USER:-root}}"
-    while true; do
-        prompt_read -r -p "tmux service user (default: $default_user): " TMUX_USER
-        TMUX_USER=${TMUX_USER:-$default_user}
-        if ! [[ "$TMUX_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]]; then
-            print_warning "Invalid username; enter an existing account or the new user selected above"
-            continue
+configure_ghx_choice() {
+    INSTALL_GHX="n"
+    GHX_USER=""
+    prompt_read -r -p "Install GitHub CLI (gh) and the ghx token router? (y/N): " INSTALL_GHX
+    INSTALL_GHX=${INSTALL_GHX:-n}
+    is_yes "$INSTALL_GHX" || return 0
+    prompt_setup_user GHX_USER "ghx user"
+}
+
+# gh comes from the distribution archive, ghx is a verified repository asset.
+# Per-user files are created only when missing: tokens are always added by the
+# user into ~/.config/secrets.env, never by this script.
+install_ghx() {
+    local target_user="$1" user_home rc rc_tmp
+    local GHX_SHA256="1b76764f0ccc011b5219e847fdb516206a635d2cd2ad6d921b3ef2832dc349e6"
+
+    if ! id -u -- "$target_user" >/dev/null 2>&1; then
+        print_error "Cannot install ghx: user $target_user does not exist"
+        return 1
+    fi
+    user_home=$(getent passwd "$target_user" | cut -d: -f6)
+    [ -n "$user_home" ] && [ -d "$user_home" ] || {
+        print_error "Cannot install ghx: home directory of $target_user is missing"
+        return 1
+    }
+
+    apt-get install -y gh python3 || return 1
+    install_verified_repo_asset "config/ghx" /usr/local/bin/ghx "$GHX_SHA256" 0755 || return 1
+
+    # Writes in the user's home run as that user, so a planted symlink cannot
+    # turn them into root-owned writes elsewhere.
+    sudo -u "$target_user" mkdir -p "$user_home/.config" || return 1
+    if ! sudo -u "$target_user" test -e "$user_home/.config/github-repos.tsv"; then
+        sudo -u "$target_user" tee "$user_home/.config/github-repos.tsv" >/dev/null <<'EOF' || return 1
+# ghx routing table — NON-SECRET. Token values live in ~/.config/secrets.env
+# as: export GITHUB_TOKEN_<LABEL>='<pat>'   (file mode 600, owned by you)
+#
+# Columns (whitespace-separated): label  account  ssh_host  repos  token_env
+#   ssh_host  Host alias from ~/.ssh/config used for git clone/push
+#   repos     comma-separated repo names, or * for the whole account
+# Example:
+# work      myaccount  myaccount  *      GITHUB_TOKEN_WORK
+EOF
+    fi
+    if ! sudo -u "$target_user" test -e "$user_home/.config/secrets.env"; then
+        sudo -u "$target_user" sh -c 'umask 077 && : > "$1"' sh "$user_home/.config/secrets.env" || return 1
+    fi
+
+    # Load tokens in bash and zsh only from a private file owned by the user.
+    for rc in .bashrc .zshenv; do
+        rc_tmp=$(mktemp) || return 1
+        SYSTEM_SETUP_TEMP_FILES+=("$rc_tmp")
+        if sudo -u "$target_user" test -e "$user_home/$rc"; then
+            sudo -u "$target_user" cat -- "$user_home/$rc" |
+                strip_managed_block /dev/stdin ghx > "$rc_tmp" || {
+                print_error "Unbalanced managed ghx markers in $user_home/$rc; file was preserved"
+                return 1
+            }
         fi
-        if id -u -- "$TMUX_USER" >/dev/null 2>&1 ||
-           { is_yes "${CREATE_USER:-n}" && [ "$TMUX_USER" = "${NEW_USERNAME:-}" ]; }; then
-            break
-        fi
-        print_warning "User $TMUX_USER does not exist and is not scheduled for creation"
+        cat >> "$rc_tmp" <<'EOF'
+# BEGIN system-setup.sh managed ghx
+if [ -f "$HOME/.config/secrets.env" ] && [ -O "$HOME/.config/secrets.env" ]; then
+    case "$(stat -c '%a' "$HOME/.config/secrets.env" 2>/dev/null)" in
+        600|400) . "$HOME/.config/secrets.env" ;;
+    esac
+fi
+# END system-setup.sh managed ghx
+EOF
+        sudo -u "$target_user" tee "$user_home/$rc" < "$rc_tmp" >/dev/null || return 1
     done
 }
 
@@ -2045,6 +2123,9 @@ if [ "$INTERACTIVE" = true ]; then
     configure_tmux_choice
     echo ""
 
+    configure_ghx_choice
+    echo ""
+
     # Ask about crontab configuration
     print_message "Do you want to configure crontab for root?"
     prompt_read -r -p "Configure crontab? (y/N): " CONFIGURE_CRONTAB
@@ -3178,6 +3259,8 @@ else
     INSTALL_ZSH="n"
     INSTALL_TMUX="n"
     TMUX_USER=""
+    INSTALL_GHX="n"
+    GHX_USER=""
     CONFIGURE_CRONTAB="n"
     CRONTAB_MODE="3"
     CRONTAB_TASKS=""
@@ -3301,6 +3384,11 @@ if is_yes "$INSTALL_TMUX"; then
     print_message "  tmux: YES (native package, RGB configuration, user service for $TMUX_USER)"
 else
     print_message "  tmux: NO"
+fi
+if is_yes "$INSTALL_GHX"; then
+    print_message "  gh + ghx: YES (for $GHX_USER; tokens are added manually)"
+else
+    print_message "  gh + ghx: NO"
 fi
 print_message "  Crontab: $([ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] && echo "YES" || echo "NO")"
 print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT, Users: ${SSH_ALLOW_USERS:-none})" || echo "NO")"
@@ -5001,6 +5089,22 @@ if is_yes "${INSTALL_TMUX:-n}"; then
         print_success "tmux and its user systemd service are ready for $TMUX_USER"
     else
         print_error "tmux installation failed for $TMUX_USER; see errors above"
+    fi
+    echo ""
+fi
+
+# ============================================
+# INSTALL GH AND GHX
+# ============================================
+
+GHX_SETUP_OK=false
+if is_yes "${INSTALL_GHX:-n}"; then
+    print_message "Installing gh and ghx for $GHX_USER..."
+    if install_ghx "$GHX_USER"; then
+        GHX_SETUP_OK=true
+        print_success "gh and ghx are ready for $GHX_USER"
+    else
+        print_error "gh/ghx installation failed for $GHX_USER; see errors above"
     fi
     echo ""
 fi
@@ -7998,6 +8102,16 @@ if is_yes "${INSTALL_TMUX:-n}"; then
     fi
 else
     print_message "- tmux: NOT CONFIGURED"
+fi
+
+if is_yes "${INSTALL_GHX:-n}"; then
+    report_setup_result "gh + ghx ($GHX_USER)" "${GHX_SETUP_OK:-false}"
+    if [ "${GHX_SETUP_OK:-false}" = true ]; then
+        print_message "  As $GHX_USER: add export GITHUB_TOKEN_<LABEL>='<pat>' to ~/.config/secrets.env,"
+        print_message "  a row to ~/.config/github-repos.tsv, open a new shell, then run: ghx list"
+    fi
+else
+    print_message "- gh + ghx: NOT INSTALLED"
 fi
 
 if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
