@@ -123,7 +123,9 @@ strip_managed_block() {
 repository_has_release() {
     local url="$1" codename="$2" metadata
     metadata=$(mktemp) || return 1
-    if download_url_ipv4 "$url" "$metadata" && grep -Fxq "Codename: $codename" "$metadata"; then
+    # Docker's Release files carry only "Suite: <codename>", without Codename.
+    if download_url_ipv4 "$url" "$metadata" && \
+       grep -Fxq -e "Codename: $codename" -e "Suite: $codename" "$metadata"; then
         rm -f -- "$metadata"
         return 0
     fi

@@ -224,6 +224,18 @@ add_supported_ubuntu_ppa ppa:ondrej/php
         self.assertEqual(self.shell(body, "available", marker).returncode, 0)
         self.assertEqual(marker.read_text().strip(), "--no-update -y ppa:ondrej/php")
 
+    def test_release_check_accepts_suite_only_metadata(self):
+        body = function("repository_has_release") + """
+download_url_ipv4() { printf '%b' "$fixture" > "$2"; }
+fixture=$1
+repository_has_release https://example.invalid/Release trixie
+"""
+        # download.docker.com publishes "Suite: trixie" and no Codename field.
+        for fixture in ("Origin: Docker\\nSuite: trixie\\n", "Suite: stable\\nCodename: trixie\\n"):
+            self.assertEqual(self.shell(body, fixture).returncode, 0, fixture)
+        for fixture in ("Suite: bookworm\\n", "Suite: trixie-updates\\n", "<html>error</html>"):
+            self.assertNotEqual(self.shell(body, fixture).returncode, 0, fixture)
+
     def test_pinned_commit_is_fetched_from_shallow_checkout(self):
         # This creates only disposable local repositories, with an explicit
         # non-personal identity independent of the user's Git configuration.
