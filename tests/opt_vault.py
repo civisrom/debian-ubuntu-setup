@@ -160,6 +160,48 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(payload.mode("a/.git", True), 0o700)
         self.assertEqual(payload.mode("GeoLite2-ASN.mmdb"), 0o644)
 
+    def test_veracrypt_version_selection_and_upgrade_verification(self):
+        source = (REPO / "config/opt-vault.sh").read_text()
+        install = re.search(r"(?ms)^install_veracrypt\(\) \{\n.*?^\}$", source)[0]
+        version = re.search(r"(?m)^VC_VERSION=(.+)$", source)[1]
+        fingerprint = re.search(r"(?m)^VC_FPR=(.+)$", source)[1]
+        stubs = r'''
+die() { printf '%s\n' "$*" >&2; exit 1; }
+veracrypt() {
+    if [[ -f $WORK/installed ]]; then printf 'VeraCrypt %s\n' "$AFTER";
+    else printf 'VeraCrypt %s\n' "$BEFORE"; fi
+}
+download() { : > "$2"; }
+apt-get() {
+    printf 'apt\n' >> "$WORK/apt-calls"
+    [[ $* != *'.deb'* ]] || touch "$WORK/installed"
+    return 0
+}
+gpg() {
+    if [[ $* == *'--verify'* ]]; then printf '[GNUPG:] VALIDSIG %s\n' "$VC_FPR"; fi
+}
+'''
+        cases = [
+            ("1.26.29", version, True, True),
+            (version, version, True, False),
+            ("9.0.0", "9.0.0", True, False),
+            ("unknown", version, False, False),
+            ("1.26.29", "1.26.29", False, True),
+        ]
+        for index, (before, after, success, upgraded) in enumerate(cases):
+            with self.subTest(before=before, after=after):
+                work = self.root / f"vc-{index}"
+                work.mkdir()
+                env = dict(os.environ, WORK=str(work), BEFORE=before, AFTER=after,
+                           VC_VERSION=version, VC_FPR=fingerprint)
+                result = subprocess.run(
+                    ["bash", "-c", "set -euo pipefail\n" + stubs + install + "\ninstall_veracrypt"],
+                    env=env, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                self.assertEqual((work / "installed").exists(), upgraded)
+                self.assertEqual((work / "apt-calls").exists(), upgraded)
+
     def test_help_does_not_need_root_or_password(self):
         result = subprocess.run(["bash", str(REPO / "config/opt-vault.sh"), "--help"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)

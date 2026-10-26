@@ -19,12 +19,13 @@
 ответьте `y`, затем введите пароль. Ввод скрыт. Без этого выбора контейнер
 не скачивается и VeraCrypt не устанавливается.
 
-При необходимости установщик загрузит VeraCrypt 1.26.29 с официального GitHub,
+При необходимости установщик загрузит VeraCrypt 1.26.30 с официального GitHub,
 проверит PGP-подпись пакета и отпечаток ключа
 `5069A233D55A0EEB174A5FC3821ACD02680D16DE`, затем установит пакет с зависимостями.
 Есть пакеты для Debian 12 amd64, Debian 13 amd64/arm64, Ubuntu 24.04 и 26.04
 amd64/arm64. Для Debian 12 arm64 VeraCrypt нужно установить самостоятельно.
-Уже установленный VeraCrypt используется без переустановки.
+Установленная версия 1.26.30 или новее используется без переустановки;
+более старая обновляется до 1.26.30 с той же проверкой подписи.
 Для монтирования нужны FUSE, loop и поддержка FAT в работающем ядре.
 Используется шифрование в процессе VeraCrypt (`nokernelcrypto`), поэтому
 наличие AES-XTS в device-mapper не требуется.
@@ -83,17 +84,31 @@ bash /opt/scripts/nft-full/full-nftables.sh --help
 Установщики журналов находятся в `/opt/nftables/logging/`:
 
 ```bash
-# PL; прежнее имя ge_docker_host_nftables_v5.sh также поддерживается
-sudo bash /opt/nftables/logging/ge_docker_host_nftables_v5_eth0.sh
-# NUXT
-sudo bash /opt/nftables/logging/ge_docker_host_nftables_v5_ens3_nuxt.sh
+# PL eth0
+sudo bash /opt/nftables/logging/pl_nftables_eth0.sh
+# NUXT (GE) ens3
+sudo bash /opt/nftables/logging/ge_nftables_ens3.sh
+# Relay: выберите свой интерфейс
+sudo bash /opt/nftables/logging/relay_nftables_net0.sh
+sudo bash /opt/nftables/logging/relay_nftables_eth0.sh
 ```
 
-Общий `install-nft-logging.sh` должен находиться рядом с оболочками. Он создаёт
-семь тематических журналов для PL и восемь для NUXT, сохраняет полные сообщения
-без дублирования, переносит прежнюю историю в `legacy/`, а новые архивы ротации
-складывает в `archive/`. Подробности и команды чтения:
+Общие `install-nft-logging.sh` и `nft-log-verdicts.py` должны находиться рядом
+с оболочками. Они создают восемь тематических журналов для PL, девять для NUXT
+и девять для Relay, сохраняют полные сообщения
+без дублирования, переносят прежнюю историю в `legacy/`, а новые архивы ротации
+складывают в `archive/`. Подробности и команды чтения:
 `/opt/nftables/logging/LOGGING_RU.md` и раздел 12 мануала NFT Full.
+
+В установщике доступны только четыре конфигурации:
+`pl_nftables_eth0.conf`, `ge_nftables_ens3.conf`,
+`relay_nftables_net0.conf` и `relay_nftables_eth0.conf`.
+Имя каждой оболочки журналирования совпадает с именем конфигурации без `.conf`.
+Логирование настраивается после успешного применения выбранных правил.
+
+Каталог `/opt/2026-10-22-acme` содержит файлы окна ACME для ручной установки.
+Восстановление контейнера только копирует их: службы, таймеры и автоматическое
+обновление не включаются. Наборы ACME в конфигурациях PL/NUXT изначально пусты.
 
 Отдельные обновления файлов без применения firewall:
 

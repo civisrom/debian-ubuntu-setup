@@ -40,6 +40,84 @@ class SetupFailures(unittest.TestCase):
             input=input, text=True, capture_output=True, timeout=30,
         )
 
+    def test_four_nft_profiles_match_standalone_fallback(self):
+        config = Path(__file__).resolve().parents[1] / "config/nftables-profiles.conf"
+        report = """
+printf '%s|%s\\n' "$NFT_PROFILES_COUNT" "$NFT_DEFAULT_PROFILE"
+for i in $(seq 1 "$NFT_PROFILES_COUNT"); do
+    printf '%s|%s|%s|%s\\n' "${NFT_PROFILE_NAMES[$i]}" "${NFT_PROFILE_DESCRIPTIONS[$i]}" "${NFT_PROFILE_CONFIGS[$i]}" "${NFT_PROFILE_LOGSCRIPTS[$i]}"
+done
+"""
+        external = self.shell(function("validate_nft_profiles_config") +
+                              'validate_nft_profiles_config "$1" && . "$1"\n' + report, config)
+        embedded = SOURCE.split('# Embedded fallback', 1)[1].split(
+            'unset _NFT_PROFILES_LOADED _SCRIPT_DIR', 1)[0]
+        embedded = embedded[embedded.index('if ['):]
+        standalone = self.shell('_NFT_PROFILES_LOADED=false\n' + embedded + report)
+        self.assertEqual(external.returncode, 0, external.stderr)
+        self.assertEqual(standalone.returncode, 0, standalone.stderr)
+        self.assertEqual(external.stdout, standalone.stdout)
+        rows = external.stdout.splitlines()
+        self.assertEqual(rows[0], '4|1')
+        self.assertEqual([row.split('|')[0] for row in rows[1:]],
+                         ['pl', 'nuxt', 'relay-net0', 'relay-eth0'])
+        self.assertEqual(len({row.split('|')[2] for row in rows[1:]}), 4)
+
+    def test_nft_logging_reads_new_rules_only_after_success(self):
+        etc = self.root / "etc"
+        etc.mkdir()
+        profiles = self.root / "opt/nftables"
+        (profiles / "logging").mkdir(parents=True)
+        (profiles / "profile.conf").write_text("table inet replacement {}\n")
+        state = self.root / "runtime"
+        observed = self.root / "logger-observed"
+        logger = profiles / "logging/test.sh"
+        logger.write_text(f'#!/bin/bash\ncat "{state}" >> "{observed}"\n')
+        section = SOURCE.split("# ENABLE NFTABLES FIREWALL\n", 1)[1].split(
+            "# INSTALL NFT-DOCKER-WATCH SERVICE\n", 1)[0]
+        body = "".join(function(name) for name in (
+            "create_temp_dir", "build_nft_transaction", "restore_live_nft_ruleset")) + section
+        for prefix in ("/etc/", "/opt/", "/run/", "/var/backups"):
+            body = body.replace(prefix, str(self.root) + prefix)
+        stubs = """
+ENABLE_NFTABLES=y INSTALL_NFTABLES_CONF=y INSTALL_NFTABLES_LOGGING=y
+NFTABLES_CONF_FILE=profile.conf NFTABLES_PROFILE=test NFTABLES_LOG_SCRIPT=test.sh
+OPT_EXTRACTED_OK=true SYSTEM_SETUP_TEMP_DIRS=()
+TMPDIR=$1 state=$2 failure=$3
+print_header() { :; }
+flock() { :; }
+dpkg-query() { return 1; }
+disable_ufw_firewall() { return 0; }
+systemctl() { if [ "$1" = is-enabled ]; then printf 'disabled\n'; fi; }
+iptables() { printf 'nf_tables\n'; }
+ip6tables() { printf 'nf_tables\n'; }
+nft() {
+    case "$1" in
+        --version) printf 'fixture\n' ;;
+        list)
+            if [ "$(cat "$state")" = new ]; then
+                printf 'table ip filter {\n chain input { }\n}\n'
+            fi ;;
+        -c) : ;;
+        -f) [ "$failure" != apply ] || return 1; printf 'new\n' > "$state" ;;
+        *) return 1 ;;
+    esac
+}
+write_file_atomic() { cat > "$1" && chmod "$2" "$1"; }
+"""
+        for failure in ("none", "apply"):
+            with self.subTest(failure=failure):
+                state.write_text("old\n")
+                observed.unlink(missing_ok=True)
+                (etc / "nftables.conf").write_text("table inet previous {}\n")
+                result = self.shell(stubs + body, self.root, state, failure)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if failure == "none":
+                    self.assertEqual(observed.read_text(), "new\n")
+                    self.assertEqual((etc / "nftables.conf").stat().st_mode & 0o777, 0o600)
+                else:
+                    self.assertFalse(observed.exists())
+
     def test_tmux_choice_defaults_and_explicit_selection(self):
         body = function("is_yes") + function("prompt_read") + function("prompt_setup_user") + function("configure_tmux_choice") + """
 CREATE_USER=$1 NEW_USERNAME=$2 SUDO_USER=$3

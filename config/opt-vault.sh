@@ -4,7 +4,7 @@ set +x
 set -euo pipefail
 umask 077
 
-VC_VERSION=1.26.29
+VC_VERSION=1.26.30
 VC_FPR=5069A233D55A0EEB174A5FC3821ACD02680D16DE
 VAULT_BYTES=104857600
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -53,8 +53,13 @@ download() {
 }
 
 install_veracrypt() {
-    command -v veracrypt >/dev/null 2>&1 && return 0
-    local platform arch package base status signer url got=0
+    local platform arch package base status signer url current='' got=0
+    if command -v veracrypt >/dev/null 2>&1; then
+        current=$(veracrypt --text --version) || die 'Не удалось определить версию VeraCrypt'
+        current=${current#VeraCrypt }
+        [[ $current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Неизвестный формат версии VeraCrypt'
+        if dpkg --compare-versions "$current" ge "$VC_VERSION"; then return 0; fi
+    fi
     # shellcheck disable=SC1091
     . /etc/os-release
     arch=$(dpkg --print-architecture)
@@ -82,6 +87,10 @@ install_veracrypt() {
     [[ $signer == "$VC_FPR" ]] || die 'Подпись сделана неожиданным ключом'
     DEBIAN_FRONTEND=noninteractive apt-get -o APT::Sandbox::User=root install -y --no-install-recommends "$WORK/$package" < /dev/null
     command -v veracrypt >/dev/null || die 'VeraCrypt не установлен'
+    current=$(veracrypt --text --version) || die 'Не удалось проверить установленный VeraCrypt'
+    current=${current#VeraCrypt }
+    [[ $current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && dpkg --compare-versions "$current" ge "$VC_VERSION" \
+        || die 'После установки версия VeraCrypt ниже требуемой'
 }
 
 with_password() {

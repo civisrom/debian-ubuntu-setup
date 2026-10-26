@@ -189,8 +189,8 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="5fb868082dbf352a6447791b16b18d2057ebe8dd5698bd430c96bd3a9766b706"
-    local OPT_VAULT_HELPER_SHA256="c02a04445fa1e42a52134d2829d1c7d97326597cb5f6cbaa97543dee3f0c38ca"
+    local OPT_VAULT_SHA256="402b605f1bebe9751b86bb09df7480eeea907c9126ac3ad505bb3847aa57f950"
+    local OPT_VAULT_HELPER_SHA256="3f7003022d2a068faec9d775e8f53972b1d94aefe40a0c0ab468d113db429e82"
     local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
     create_temp_dir opt-download || return 1
     work=$SYSTEM_SETUP_CREATED_TEMP_DIR
@@ -1656,47 +1656,35 @@ fi
 
 # Embedded fallback — used when script is downloaded standalone (via install.sh)
 if [ "$_NFT_PROFILES_LOADED" != true ]; then
-    NFT_PROFILES_COUNT=7
-    NFT_DEFAULT_PROFILE=4
+    NFT_PROFILES_COUNT=4
+    NFT_DEFAULT_PROFILE=1
 
-    # ── Relay v4 family ──
-    NFT_PROFILE_NAMES=( [1]="relay-v4" [2]="relay-v4-eth0" [3]="relay-v4-net0" )
+    NFT_PROFILE_NAMES=(
+        [1]="pl"
+        [2]="nuxt"
+        [3]="relay-net0"
+        [4]="relay-eth0"
+    )
+
     NFT_PROFILE_DESCRIPTIONS=(
-        [1]="relay-v4       — relay host v4"
-        [2]="relay-v4-eth0  — relay host v4 + eth0 iface"
-        [3]="relay-v4-net0  — relay host v4 + net0 iface"
-    )
-    NFT_PROFILE_CONFIGS=(
-        [1]="relay_host_nftables_v4.conf"
-        [2]="relay_host_nftables_v4_eth0.conf"
-        [3]="relay_host_nftables_v4_net0.conf"
-    )
-    NFT_PROFILE_LOGSCRIPTS=(
-        [1]="relay_host_nftables_v4.sh"
-        [2]="relay_host_nftables_v4_eth0.sh"
-        [3]="relay_host_nftables_v4_net0.sh"
+        [1]="PL — VPN-бот, eth0, закрытое окно ACME"
+        [2]="NUXT — VPN-бот и видеобот, ens3, закрытое окно ACME"
+        [3]="Relay — NAT и локальные службы, net0"
+        [4]="Relay — NAT и локальные службы, eth0"
     )
 
-    # ── GE Docker host family ──
-    NFT_PROFILE_NAMES+=( [4]="ge-docker-v4" [5]="ge-docker-v4-eth0" [6]="ge-docker-v5" )
-    NFT_PROFILE_NAMES+=( [7]="nl-nginx-v4" )
-    NFT_PROFILE_DESCRIPTIONS+=(
-        [4]="ge-docker-v4       — GE Docker host v4 (default)"
-        [5]="ge-docker-v4-eth0  — GE Docker host v4 + eth0 iface"
-        [6]="ge-docker-v5       — GE Docker host v5"
-        [7]="nl-nginx-v4        — NL nginx host v4"
+    NFT_PROFILE_CONFIGS=(
+        [1]="pl_nftables_eth0.conf"
+        [2]="ge_nftables_ens3.conf"
+        [3]="relay_nftables_net0.conf"
+        [4]="relay_nftables_eth0.conf"
     )
-    NFT_PROFILE_CONFIGS+=(
-        [4]="ge_docker_host_nftables_v4.conf"
-        [5]="ge_docker_host_nftables_v4_eth0.conf"
-        [6]="ge_docker_host_nftables_v5.conf"
-        [7]="nl_nginx_host_nftables_v4.conf"
-    )
-    NFT_PROFILE_LOGSCRIPTS+=(
-        [4]="ge_docker_host_nftables_v4.sh"
-        [5]="ge_docker_host_nftables_v4_eth0.sh"
-        [6]="ge_docker_host_nftables_v5.sh"
-        [7]="nl_nginx_host_nftables_v4.sh"
+
+    NFT_PROFILE_LOGSCRIPTS=(
+        [1]="pl_nftables_eth0.sh"
+        [2]="ge_nftables_ens3.sh"
+        [3]="relay_nftables_net0.sh"
+        [4]="relay_nftables_eth0.sh"
     )
 fi
 unset _NFT_PROFILES_LOADED _SCRIPT_DIR
@@ -3691,6 +3679,7 @@ COMMON_PACKAGES=(
     curl
     git
     rsyslog
+    logrotate
     systemd
     auditd
     manpages
@@ -6804,7 +6793,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             # Mode 0755: the config carries a `#!/usr/sbin/nft -f` shebang and
             # is expected to be executable so it can be invoked directly.
             NFT_CONFIG_CHANGED=true
-            if ! write_file_atomic "$NFTABLES_DST" 0755 root:root < "$NFTABLES_SRC"; then
+            if ! write_file_atomic "$NFTABLES_DST" 0600 root:root < "$NFTABLES_SRC"; then
                 print_error "CRITICAL: Atomic nftables config installation failed"
                 INSTALL_NFTABLES_CONF="skipped"
                 NFTABLES_OK=false
@@ -6828,44 +6817,13 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         print_message "Step 5: Skipping config installation (not requested)"
     fi
 
-    # --- Step 6: Run logging setup script ---
-    if [ "$NFTABLES_OK" = true ] && { [ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ]; } && [ "$INSTALL_NFTABLES_CONF" != "skipped" ] && [ -n "$NFTABLES_LOG_SCRIPT" ]; then
-        echo ""
-        print_message "Step 6: Running logging setup (profile: ${NFTABLES_PROFILE}, script: ${NFTABLES_LOG_SCRIPT})..."
-
-        LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_LOG_SCRIPT}"
-
-        if [ -f "$LOGGING_SCRIPT" ] && [ -s "$LOGGING_SCRIPT" ]; then
-            # Make script executable
-            chmod +x "$LOGGING_SCRIPT"
-            print_message "Running: $LOGGING_SCRIPT"
-
-            # Execute logging setup script
-            if bash "$LOGGING_SCRIPT"; then
-                NFT_LOGGING_OK=true
-                print_success "Logging setup completed (${NFTABLES_LOG_SCRIPT})"
-            else
-                print_warning "Logging setup script returned an error (exit code: $?)"
-                print_message "You can run it manually later: bash $LOGGING_SCRIPT"
-            fi
-        else
-            print_warning "Logging script not found: $LOGGING_SCRIPT"
-            print_message "  File must exist in /opt/nftables/logging/ (from opt.hc or pre-installed)"
-            print_message "Available logging scripts:"
-            ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
-        fi
-    elif [ "$NFTABLES_OK" = true ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
-        echo ""
-        print_message "Step 6: Skipping logging setup (not requested)"
-    fi
-
-    # --- Step 7: Atomically apply and verify nftables configuration ---
+    # --- Step 6: Atomically apply and verify nftables configuration ---
     if [ "$NFTABLES_OK" = true ]; then
         echo ""
         NFTABLES_DST="/etc/nftables.conf"
 
         if [ -s "$NFTABLES_DST" ]; then
-            print_message "Step 7: Building one atomic nftables transaction..."
+            print_message "Step 6: Building one atomic nftables transaction..."
             if build_nft_transaction "$NFTABLES_DST" "$NFT_TRANSACTION" && \
                nft -c -f "$NFT_TRANSACTION" 2>"$NFT_SYNTAX_ERR"; then
                 print_success "Atomic transaction syntax check passed"
@@ -6963,6 +6921,38 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         esac
     fi
 
+    # The logger reads verdicts from the newly applied live ruleset.
+    # --- Step 7: Run logging setup script ---
+    if [ "$NFTABLES_OK" = true ] && { [ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ]; } && [ "$INSTALL_NFTABLES_CONF" != "skipped" ] && [ -n "$NFTABLES_LOG_SCRIPT" ]; then
+        echo ""
+        print_message "Step 7: Running logging setup (profile: ${NFTABLES_PROFILE}, script: ${NFTABLES_LOG_SCRIPT})..."
+
+        LOGGING_SCRIPT="/opt/nftables/logging/${NFTABLES_LOG_SCRIPT}"
+
+        if [ -f "$LOGGING_SCRIPT" ] && [ -s "$LOGGING_SCRIPT" ]; then
+            # Make script executable
+            chmod +x "$LOGGING_SCRIPT"
+            print_message "Running: $LOGGING_SCRIPT"
+
+            # Execute logging setup script
+            if bash "$LOGGING_SCRIPT"; then
+                NFT_LOGGING_OK=true
+                print_success "Logging setup completed (${NFTABLES_LOG_SCRIPT})"
+            else
+                print_warning "Logging setup script returned an error (exit code: $?)"
+                print_message "You can run it manually later: bash $LOGGING_SCRIPT"
+            fi
+        else
+            print_warning "Logging script not found: $LOGGING_SCRIPT"
+            print_message "  File must exist in /opt/nftables/logging/ (from opt.hc or pre-installed)"
+            print_message "Available logging scripts:"
+            ls -la /opt/nftables/logging/ 2>/dev/null || print_warning "  /opt/nftables/logging/ directory does not exist"
+        fi
+    elif [ "$NFTABLES_OK" = true ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
+        echo ""
+        print_message "Step 7: Skipping logging setup (not requested)"
+    fi
+
     if [ "$NFT_LOCK_HELD" = true ]; then
         flock -u 8 || true
         exec 8>&-
@@ -6977,7 +6967,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         if [ ! -z "$NFTABLES_PROFILE" ] && [ "$INSTALL_NFTABLES_CONF" != "skipped" ]; then
             print_message "  Profile: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
         fi
-        print_message "  Manage:  systemctl {start|stop|restart|status} nftables"
+        print_message "  Manage:  nft -c -f /etc/nftables.conf && systemctl reload nftables"
         print_message "  Rules:   nft list ruleset"
     else
         print_error "nftables setup failed — check errors above"
