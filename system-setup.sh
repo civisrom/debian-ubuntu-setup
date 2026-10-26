@@ -1661,14 +1661,14 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
 
     NFT_PROFILE_NAMES=(
         [1]="pl"
-        [2]="nuxt"
+        [2]="ge"
         [3]="relay-net0"
         [4]="relay-eth0"
     )
 
     NFT_PROFILE_DESCRIPTIONS=(
         [1]="PL — VPN-бот, eth0, закрытое окно ACME"
-        [2]="NUXT — VPN-бот и видеобот, ens3, закрытое окно ACME"
+        [2]="GE — VPN-бот и видеобот, ens3, закрытое окно ACME"
         [3]="Relay — NAT и локальные службы, net0"
         [4]="Relay — NAT и локальные службы, eth0"
     )

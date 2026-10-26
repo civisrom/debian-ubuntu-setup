@@ -60,7 +60,7 @@ done
         rows = external.stdout.splitlines()
         self.assertEqual(rows[0], '4|1')
         self.assertEqual([row.split('|')[0] for row in rows[1:]],
-                         ['pl', 'nuxt', 'relay-net0', 'relay-eth0'])
+                         ['pl', 'ge', 'relay-net0', 'relay-eth0'])
         self.assertEqual(len({row.split('|')[2] for row in rows[1:]}), 4)
 
     def test_nft_logging_reads_new_rules_only_after_success(self):
