@@ -25,7 +25,7 @@ set -euo pipefail
 readonly NFT_CONF="/etc/nftables.conf"
 readonly NFT_APPLY_SCRIPT="/usr/local/sbin/nft-apply.sh"
 readonly NFT_BACKUP_DIR="/var/backups/nftables"
-readonly NFT_APPLY_SHA256="794165f7d0d93c2aacc457e8a9d7d8d4f9bed12370fe4705fdddcb7a40a4f9dc"
+readonly NFT_APPLY_SHA256="b1659d2a2adbe5cccc067d521f131e8a782b89dd60f7698ff4284c3fb446537c"
 readonly NFT_APPLY_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/config/nft-apply.sh"
 INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly INSTALLER_DIR
@@ -73,7 +73,7 @@ check_root() {
 
 check_dependencies() {
     local missing=()
-    for cmd in nft systemctl docker flock sha256sum; do
+    for cmd in nft systemctl docker flock sha256sum python3; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -173,6 +173,7 @@ create_apply_script() {
     bash -n "$source_path"
     install -m 0755 -o root -g root "$source_path" "$NFT_APPLY_SCRIPT"
     [[ -n "$temp_path" ]] && rm -f -- "$temp_path"
+    return 0
 }
 
 create_service() {
@@ -246,6 +247,7 @@ do_install() {
         log_ok "Сервис запущен"
     else
         log_error "Сервис не запустился. Проверьте: journalctl -u $SERVICE_NAME"
+        journalctl -u "$SERVICE_NAME" -n 30 --no-pager >&2 || true
         return 1
     fi
 

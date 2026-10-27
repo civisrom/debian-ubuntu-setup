@@ -34,12 +34,48 @@ rollback_ruleset() {
     local rollback_file="$2"
 
     build_transaction "$backup_file" "$rollback_file"
-    nft -c -f "$rollback_file" >/dev/null 2>&1
+    nft -c -f "$rollback_file" >/dev/null 2>&1 || return 1
     nft -f "$rollback_file"
+}
+
+verify_ruleset() {
+    # Echo comes from nft itself, so includes and non-default table names work.
+    # Compare identities and base-chain policy, not counters or kernel handles.
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+def objects(path, echoed=False):
+    with open(path) as stream:
+        items = json.load(stream)['nftables']
+    result = {}
+    for item in items:
+        if echoed:
+            item = item.get('add', {})
+        for kind in ('table', 'chain'):
+            obj = item.get(kind)
+            if obj is not None:
+                key = (kind, obj['family'], obj.get('table'), obj['name'])
+                result[key] = {field: obj[field] for field in
+                               ('type', 'hook', 'prio', 'policy', 'dev') if field in obj}
+    return result
+
+try:
+    expected = objects(sys.argv[1], echoed=True)
+    actual = objects(sys.argv[2])
+    if not any(key[0] == 'chain' and 'hook' in value for key, value in expected.items()):
+        raise ValueError('No base chains were loaded; refusing an empty firewall')
+    if any(actual.get(key) != value for key, value in expected.items()):
+        raise ValueError('Loaded tables/chains do not match the applied configuration')
+except (OSError, ValueError, KeyError, TypeError) as error:
+    print('Ruleset verification failed: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 command -v nft >/dev/null 2>&1 || { log "ERROR: nft command not found" err; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "ERROR: flock command not found" err; exit 1; }
+command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 command not found" err; exit 1; }
 [ -s "$NFT_CONF" ] || { log "ERROR: missing or empty $NFT_CONF" err; exit 1; }
 
 mkdir -p "$NFT_BACKUP_DIR"
@@ -53,8 +89,10 @@ fi
 
 transaction_file=$(mktemp "${NFT_BACKUP_DIR}/transaction.XXXXXX.nft")
 rollback_file=$(mktemp "${NFT_BACKUP_DIR}/rollback.XXXXXX.nft")
+applied_file=$(mktemp "${NFT_BACKUP_DIR}/applied.XXXXXX.json")
+live_file=$(mktemp "${NFT_BACKUP_DIR}/live.XXXXXX.json")
 cleanup() {
-    rm -f -- "$transaction_file" "$rollback_file"
+    rm -f -- "$transaction_file" "$rollback_file" "$applied_file" "$live_file"
 }
 trap cleanup EXIT INT TERM HUP
 
@@ -90,7 +128,7 @@ if ! nft list ruleset > "$backup_file" 2>/dev/null; then
 fi
 log "Live ruleset backup: $backup_file"
 
-if ! nft_error=$(nft -f "$transaction_file" 2>&1); then
+if ! nft_error=$(nft -j -e -f "$transaction_file" 2>&1 >"$applied_file"); then
     log "Atomic nftables apply failed; restoring previous ruleset" err
     log "$nft_error" err
     if rollback_ruleset "$backup_file" "$rollback_file"; then
@@ -102,13 +140,12 @@ if ! nft_error=$(nft -f "$transaction_file" 2>&1); then
 fi
 
 verification_failed=false
-for table_spec in "ip filter" "ip dockernat" "ip6 filter"; do
-    read -r family table_name <<< "$table_spec"
-    if ! nft list table "$family" "$table_name" >/dev/null 2>&1; then
-        log "Required table is missing after apply: table $family $table_name" err
-        verification_failed=true
-    fi
-done
+if ! nft -j list ruleset >"$live_file"; then
+    log "Could not inspect the loaded ruleset" err
+    verification_failed=true
+elif ! verify_ruleset "$applied_file" "$live_file"; then
+    verification_failed=true
+fi
 
 if [ "$verification_failed" = true ]; then
     if rollback_ruleset "$backup_file" "$rollback_file"; then

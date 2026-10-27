@@ -68,6 +68,7 @@ if grep -qE '7z[[:space:]]+x[[:space:]]+-p[^[:space:]]' system-setup.sh; then
 fi
 
 python3 tests/setup_failures.py
+python3 tests/nft_watch.py
 python3 tests/opt_vault.py
 
 printf 'Regression checks passed\n'

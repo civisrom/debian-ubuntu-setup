@@ -6994,7 +6994,7 @@ if is_yes "$INSTALL_NFT_DOCKER_WATCH" && [ "${NFTABLES_OK:-false}" = true ]; the
     print_header "═══════════════════════════════════════════════════"
     echo ""
 
-    NFT_WATCH_INSTALLER_SHA256="b4c93556d95e20168d1a43f6e55298391728a8e24f4d401a3ea80537522600e3"
+    NFT_WATCH_INSTALLER_SHA256="04801def597885ad22a1f81b3a9d523496630e11a8a30fd0a8ad89438232a9c3"
     NFT_WATCH_INSTALLER_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/install-nft-docker-watch.sh"
     NFT_WATCH_LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     NFT_WATCH_INSTALLER="${NFT_WATCH_LOCAL_DIR}/install-nft-docker-watch.sh"
