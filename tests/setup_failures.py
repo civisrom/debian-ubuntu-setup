@@ -12,12 +12,14 @@ import tempfile
 import time
 import unittest
 
+from input_validation import INPUT_HELPERS
+
 
 SOURCE = (Path(__file__).resolve().parents[1] / "system-setup.sh").read_text()
 
 
 def function(name):
-    return re.search(rf"(?ms)^{name}\(\) \{{\n.*?^\}}$", SOURCE)[0] + "\n"
+    return re.search(rf"(?ms)^{name}\(\) \{{\n.*?^\}}$", SOURCE)[0] + "\n" + (INPUT_HELPERS if name == "prompt_read" else "")
 
 
 LOGGING = """
@@ -129,7 +131,7 @@ printf 'RESULT:%s|%s\\n' "$INSTALL_TMUX" "$TMUX_USER"
             ("n", "", "sudoer", "\n", "n|"),
             ("n", "", "sudoer", "n\n", "n|"),
             ("y", "newuser", "sudoer", "y\n\n", "y|newuser"),
-            ("existing", "existing", "sudoer", "Y\n\n", "Y|existing"),
+            ("existing", "existing", "sudoer", "Y\n\n", "y|existing"),
             ("n", "", "sudoer", "y\n\n", "y|sudoer"),
             ("n", "", "", "y\n\n", "y|root"),
             ("n", "", "sudoer", "y\nexisting\n", "y|existing"),
@@ -149,7 +151,7 @@ printf 'RESULT:%s\\n' "$TMUX_USER"
 """
         result = self.shell(body, input="y\ninvalid name\nmissing\nroot\n")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stderr.count("WARNING:"), 2)
+        self.assertEqual(result.stderr.count("Invalid input."), 2)
         self.assertNotIn("ERROR:", result.stdout + result.stderr)
         self.assertIn("RESULT:root", result.stdout)
         for answer in ("", "y\n", "y\nmissing\n"):

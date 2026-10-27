@@ -11,6 +11,8 @@
 # non-zero status codes to signal "changed" or "skipped". Critical failures
 # are handled with explicit exit calls at the relevant decision points.
 set -o pipefail
+# Interactive answers may contain credentials, even in the wrong field.
+set +x
 
 # Colors for output
 RED='\033[0;31m'
@@ -72,6 +74,299 @@ prompt_read() {
         print_error "Input ended before configuration was complete; setup cancelled"
         exit 1
     fi
+}
+
+# Invalid answers are recoverable: do not add them to SETUP_ERRORS/WARNINGS.
+# Never include the rejected value (it may be a password pasted into the wrong field).
+input_error() {
+    printf 'Invalid input. %s Please try again.\n' "$1" >&2
+}
+
+prompt_yes_no() {
+    local __input_target="$1" __input_label="$2" __input_default="$3" __input_answer
+    while true; do
+        prompt_read -r -p "$__input_label" __input_answer
+        __input_answer="${__input_answer#"${__input_answer%%[![:space:]]*}"}"
+        __input_answer="${__input_answer%"${__input_answer##*[![:space:]]}"}"
+        case "${__input_answer,,}" in
+            '') __input_answer="$__input_default" ;;
+            y|yes|да|д) __input_answer=y ;;
+            n|no|нет|н) __input_answer=n ;;
+            *) input_error "Enter y/yes or n/no (да/нет); Enter selects the displayed default."; continue ;;
+        esac
+        printf -v "$__input_target" '%s' "$__input_answer"
+        return 0
+    done
+}
+
+prompt_value() {
+    local __input_target="$1" __input_label="$2" __input_default="$3"
+    local __input_validator="$4" __input_hint="$5" __input_answer
+    shift 5
+    while true; do
+        prompt_read -r -p "$__input_label" __input_answer
+        __input_answer="${__input_answer#"${__input_answer%%[![:space:]]*}"}"
+        __input_answer="${__input_answer%"${__input_answer##*[![:space:]]}"}"
+        __input_answer=${__input_answer:-$__input_default}
+        if "$__input_validator" "$__input_answer" "$@"; then
+            printf -v "$__input_target" '%s' "$__input_answer"
+            return 0
+        fi
+        input_error "$__input_hint"
+    done
+}
+
+valid_choice() {
+    local candidate="$1" allowed
+    shift
+    for allowed in "$@"; do [ "$candidate" = "$allowed" ] && return 0; done
+    return 1
+}
+
+valid_root_login() {
+    valid_choice "${1,,}" y yes p prohibit-password n no
+}
+
+valid_uint() {
+    # Bound length before arithmetic; never evaluate arbitrary input/subscripts.
+    [[ "$1" =~ ^[0-9]{1,9}$ ]] && (( 10#$1 >= $2 && 10#$1 <= $3 ))
+}
+
+valid_username() {
+    [[ "$1" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]] && [ "${#1}" -le 32 ]
+}
+
+valid_new_username() {
+    [[ "$1" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] && [ "${#1}" -le 32 ]
+}
+
+valid_setup_user() {
+    valid_username "$1" || return 1
+    id -u -- "$1" >/dev/null 2>&1 ||
+        { is_yes "${CREATE_USER:-n}" && [ "$1" = "${NEW_USERNAME:-}" ]; }
+}
+
+valid_allow_users() {
+    local user
+    local -a users=()
+    [[ ! "${1//$'\t'/ }" =~ [[:cntrl:]] ]] || return 1
+    read -r -a users <<< "$1"
+    for user in "${users[@]}"; do valid_setup_user "$user" || return 1; done
+}
+
+prompt_secret() {
+    set +x
+    local __input_target="$1" __input_label="$2" __input_secret
+    while true; do
+        prompt_read -r -s -p "$__input_label" __input_secret
+        printf '\n'
+        if [ -n "$__input_secret" ] && [[ ! "$__input_secret" =~ [[:cntrl:]] ]]; then
+            printf -v "$__input_target" '%s' "$__input_secret"
+            return 0
+        fi
+        input_error "A non-empty password without control characters is required."
+    done
+}
+
+valid_public_key() {
+    local key="$1" mode="${2:-normal}" key_file result
+    if [ "$mode" = fido ]; then
+        [ -n "$key" ] || return 0  # Explicitly offered: server support without a key.
+        [[ "$key" =~ ^(sk-ssh-ed25519|sk-ecdsa-sha2-nistp256)(-cert-v01)?@openssh\.com[[:space:]] ]] || return 1
+    else
+        [[ "$key" =~ ^(ssh-|ecdsa-|sk-) ]] || return 1
+    fi
+    [[ ! "${key//$'\t'/ }" =~ [[:cntrl:]] ]] || return 1
+    command -v ssh-keygen >/dev/null 2>&1 || {
+        print_error "ssh-keygen is required to validate public keys (install openssh-client)"
+        exit 1
+    }
+    key_file=$(mktemp) || { print_error "Cannot create public key validation file"; exit 1; }
+    printf '%s\n' "$key" > "$key_file"
+    ssh-keygen -l -f "$key_file" >/dev/null 2>&1
+    result=$?
+    rm -f -- "$key_file"
+    [ "$result" -eq 0 ]
+}
+
+valid_venv_path() {
+    [[ "$1" = /* && "$1" != / && "$1" != */ && ! "$1" =~ [[:cntrl:]] ]] || return 1
+    [[ "/${1#/}/" != */../* && "/${1#/}/" != */./* && "$1" != *//* ]] || return 1
+    [ ! -e "$1" ] || [ -d "$1" ]
+}
+
+valid_ipv4() {
+    local part
+    local -a parts=()
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a parts <<< "$1"
+    for part in "${parts[@]}"; do
+        [[ "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] && valid_uint "$part" 0 255 || return 1
+    done
+}
+
+valid_dns_ip() {
+    local address="$1" part rest count=0 compressed=false
+    local -a groups=()
+    valid_ipv4 "$address" && return 0
+    # Accept an optional interface scope on IPv6; DNS expects an IP, not a URL.
+    if [[ "$address" = *%* ]]; then
+        [[ "${address#*%}" =~ ^[a-zA-Z0-9_.-]+$ ]] || return 1
+        address=${address%%%*}
+    fi
+    [[ "$address" = *:* ]] || return 1
+    if [[ "$address" = *.* ]]; then
+        valid_ipv4 "${address##*:}" || return 1
+        address="${address%:*}:0:0"
+    fi
+    [[ "$address" =~ ^[0-9a-fA-F:]+$ && "$address" != *:::* ]] || return 1
+    [[ "$address" != :* || "$address" = ::* ]] || return 1
+    [[ "$address" != *: || "$address" = *:: ]] || return 1
+    if [[ "$address" = *::* ]]; then
+        compressed=true
+        rest=${address#*::}
+        [[ "$rest" != *::* ]] || return 1
+    else
+        [[ "$address" != :* && "$address" != *: ]] || return 1
+    fi
+    IFS=: read -r -a groups <<< "$address"
+    for part in "${groups[@]}"; do
+        [ -n "$part" ] || continue
+        [[ "$part" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+        count=$((count + 1))
+    done
+    if [ "$compressed" = true ]; then [ "$count" -lt 8 ]; else [ "$count" -eq 8 ]; fi
+}
+
+valid_ntp_host() {
+    local host="${1%.}" label
+    local -a labels=()
+    [ -n "$host" ] && [ "${#host}" -le 253 ] || return 1
+    if [[ "$host" =~ ^[0-9.]+$ ]]; then valid_ipv4 "$host"; return; fi
+    [[ "$host" != .* && "$host" != *..* ]] || return 1
+    IFS=. read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+        [[ "$label" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$ ]] && [ "${#label}" -le 63 ] || return 1
+    done
+}
+
+valid_ports() {
+    local spec port
+    local -a specs=()
+    [ -n "$1" ] || return 0
+    [[ "$1" != ,* && "$1" != *, && "$1" != *,,* ]] || return 1
+    IFS=, read -r -a specs <<< "$1"
+    for spec in "${specs[@]}"; do
+        spec="${spec#"${spec%%[![:space:]]*}"}"
+        spec="${spec%"${spec##*[![:space:]]}"}"
+        [[ "$spec" =~ ^([0-9]{1,5})(/(tcp|udp))?$ ]] || return 1
+        port=${BASH_REMATCH[1]}
+        valid_uint "$port" 1 65535 || return 1
+    done
+}
+
+valid_packages() {
+    local packages="${1//,/ }" package
+    local -a names=()
+    [[ ! "${1//$'\t'/ }" =~ [[:cntrl:]] ]] || return 1
+    read -r -a names <<< "$packages"
+    [ "${2:-optional}" = optional ] || [ "${#names[@]}" -gt 0 ] || return 1
+    for package in "${names[@]}"; do
+        [[ "$package" =~ ^[a-z0-9][a-z0-9.+-]*(:[a-z0-9-]+)?(=[a-zA-Z0-9.+:~_-]+)?$ ]] || return 1
+    done
+}
+
+valid_nginx_preset() {
+    case "$1" in
+        1|2) is_yes "$ADD_NGINX_ORG" ;;
+        3|4) is_yes "$ADD_NGINX_ORG" && is_yes "$ADD_NGINX_MODULES" ;;
+        5|6|8) is_yes "$ADD_NGINX_MYGUARD" ;;
+        7) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_nft_profile() {
+    [[ "$1" =~ ^[1-9][0-9]{0,2}$ ]] && valid_uint "$1" 1 "$NFT_PROFILES_COUNT" || return 1
+    [ -n "${NFT_PROFILE_NAMES[$1]:-}" ]
+}
+
+valid_cron_field() {
+    local field="${1,,}" min="$2" max="$3" part range step start end
+    local -a parts=()
+    local atom='[0-9]{1,9}' entry
+    if [ "$max" = 12 ]; then
+        atom="($atom|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    elif [ "$max" = 7 ]; then
+        atom="($atom|sun|mon|tue|wed|thu|fri|sat)"
+    fi
+    entry="(\*|$atom(-$atom)?)(/[0-9]{1,9})?"
+    [[ "$field" =~ ^$entry(,$entry)*$ ]] || return 1
+    if [ "$max" = 12 ]; then
+        local -a months=(jan feb mar apr may jun jul aug sep oct nov dec)
+        local i
+        for i in "${!months[@]}"; do field=${field//${months[$i]}/$((i + 1))}; done
+    elif [ "$max" = 7 ]; then
+        local -a days=(sun mon tue wed thu fri sat)
+        local i
+        for i in "${!days[@]}"; do field=${field//${days[$i]}/$i}; done
+    fi
+    [[ "$field" != ,* && "$field" != *, && "$field" != *,,* ]] || return 1
+    IFS=, read -r -a parts <<< "$field"
+    [ "${#parts[@]}" -gt 0 ] || return 1
+    for part in "${parts[@]}"; do
+        range=${part%%/*}
+        if [[ "$part" = */* ]]; then
+            step=${part#*/}
+            valid_uint "$step" 1 999999999 || return 1
+        fi
+        [ "$range" = '*' ] && continue
+        start=${range%%-*}; end=${range#*-}
+        valid_uint "$start" "$min" "$max" && valid_uint "$end" "$min" "$max" || return 1
+        (( 10#$start <= 10#$end )) || return 1
+    done
+}
+
+valid_cron_line() {
+    local line="${1//$'\t'/ }" minute hour day month weekday command
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" = \#* ]] && return 0
+    [[ ! "$line" =~ [[:cntrl:]] ]] || return 1
+    [[ "$line" =~ ^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*= ]] && return 0
+    if [[ "$line" = @* ]]; then
+        read -r minute command <<< "$line"
+        valid_choice "$minute" @reboot @yearly @annually @monthly @weekly @daily @midnight @hourly && [ -n "$command" ]
+        return
+    fi
+    read -r minute hour day month weekday command <<< "$line"
+    [ -n "$command" ] && valid_cron_field "$minute" 0 59 && valid_cron_field "$hour" 0 23 &&
+        valid_cron_field "$day" 1 31 && valid_cron_field "$month" 1 12 && valid_cron_field "$weekday" 0 7
+}
+
+prompt_cron_tasks() {
+    local mode="$1" line tasks invalid
+    while true; do
+        tasks=""; invalid=false
+        while true; do
+            if ! IFS= read -r line; then
+                [ "$mode" = 1 ] && break
+                print_error "Input ended before END; setup cancelled"
+                exit 1
+            fi
+            if [ "$mode" = 2 ] && [[ "$line" = END || "$line" = end ]]; then break; fi
+            if ! valid_cron_line "$line"; then invalid=true; fi
+            tasks+="$line"$'\n'
+        done
+        if [ "$invalid" = false ]; then
+            CRONTAB_TASKS=${tasks%$'\n'}
+            return 0
+        fi
+        input_error "Invalid cron syntax: use five time fields and a command, or @reboot command. Re-enter the whole block."
+        if [ "$mode" = 1 ] && [ ! -t 0 ]; then
+            print_error "Invalid cron block at end of input; setup cancelled"
+            exit 1
+        fi
+    done
 }
 
 report_setup_result() {
@@ -637,28 +932,15 @@ validate_shell_script() {
 
 # Ask for an existing account or the new user selected above; stores it in $1.
 prompt_setup_user() {
-    local result_var="$1" label="$2" selected_user
     local default_user="${NEW_USERNAME:-${SUDO_USER:-root}}"
-    while true; do
-        prompt_read -r -p "$label (default: $default_user): " selected_user
-        selected_user=${selected_user:-$default_user}
-        if ! [[ "$selected_user" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]]; then
-            print_warning "Invalid username; enter an existing account or the new user selected above"
-            continue
-        fi
-        if id -u -- "$selected_user" >/dev/null 2>&1 ||
-           { is_yes "${CREATE_USER:-n}" && [ "$selected_user" = "${NEW_USERNAME:-}" ]; }; then
-            printf -v "$result_var" '%s' "$selected_user"
-            return 0
-        fi
-        print_warning "User $selected_user does not exist and is not scheduled for creation"
-    done
+    prompt_value "$1" "$2 (default: $default_user): " "$default_user" valid_setup_user \
+        "Enter an existing account or the new user selected above."
 }
 
 configure_tmux_choice() {
     INSTALL_TMUX="n"
     TMUX_USER=""
-    prompt_read -r -p "Install and configure tmux (native package + user systemd service)? (y/N): " INSTALL_TMUX
+    prompt_yes_no INSTALL_TMUX "Install and configure tmux (native package + user systemd service)? (y/N): " n
     INSTALL_TMUX=${INSTALL_TMUX:-n}
     is_yes "$INSTALL_TMUX" || return 0
     prompt_setup_user TMUX_USER "tmux service user"
@@ -667,7 +949,7 @@ configure_tmux_choice() {
 configure_ghx_choice() {
     INSTALL_GHX="n"
     GHX_USER=""
-    prompt_read -r -p "Install GitHub CLI (gh) and the ghx token router? (y/N): " INSTALL_GHX
+    prompt_yes_no INSTALL_GHX "Install GitHub CLI (gh) and the ghx token router? (y/N): " n
     INSTALL_GHX=${INSTALL_GHX:-n}
     is_yes "$INSTALL_GHX" || return 0
     prompt_setup_user GHX_USER "ghx user"
@@ -1383,6 +1665,7 @@ timesync_print_results() {
 # when nothing answers and no server is entered.
 timesync_choose_servers() {
     local answer token name custom row answered total rtt chosen confirm saved_recommended
+    local -a choices=()
     local -a saved=()
     print_message "Probing NTP servers over UDP 123 (up to $TIMESYNC_MAX_ADDRESSES addresses per name)..."
     timesync_probe_servers "${TIMESYNC_CANDIDATES[@]}" || return 1
@@ -1404,18 +1687,30 @@ timesync_choose_servers() {
             TIMESYNC_SERVERS="$TIMESYNC_RECOMMENDED"
             return 0
         fi
+        read -r -a choices <<< "${answer//,/ }"
+        if [ "${#choices[@]}" -eq 0 ]; then
+            input_error "Choose a displayed NTP number or c."
+            continue
+        fi
+        local invalid=false
+        for token in "${choices[@]}"; do
+            if ! valid_choice "$token" c C &&
+               ! { [[ "$token" =~ ^[1-9][0-9]{0,2}$ ]] && valid_uint "$token" 1 "${#TIMESYNC_RESULTS[@]}"; }; then
+                invalid=true
+            fi
+        done
+        if [ "$invalid" = true ]; then
+            input_error "Choose only displayed NTP numbers or c; repeat the whole selection."
+            continue
+        fi
         chosen=""
-        for token in ${answer//,/ }; do
+        for token in "${choices[@]}"; do
             name=""
             if [[ "$token" =~ ^[0-9]+$ ]] && [ "$token" -ge 1 ] && [ "$token" -le "${#TIMESYNC_RESULTS[@]}" ]; then
                 read -r name answered total _ <<< "${TIMESYNC_RESULTS[token - 1]}"
                 [ "$answered" -gt 0 ] || print_warning "$name did not answer the probe"
             elif [ "$token" = "c" ] || [ "$token" = "C" ]; then
-                prompt_read -r -p "Custom NTP server (host name or IPv4 address): " custom
-                if ! [[ "$custom" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
-                    print_warning "Invalid server name: $custom"
-                    continue
-                fi
+                prompt_value custom "Custom NTP server (host name or IPv4 address): " "" valid_ntp_host "Enter a valid hostname or IPv4 address, without scheme or port."
                 # Probe the custom server alone, keeping the candidate table
                 # so the numbers keep their meaning for the next prompt.
                 saved=("${TIMESYNC_RESULTS[@]}")
@@ -1427,7 +1722,7 @@ timesync_choose_servers() {
                 read -r name answered total rtt _ <<< "$row"
                 print_message "$name: answered $answered/$total, best RTT $(timesync_format_rtt "$rtt")"
                 if [ "$answered" -eq 0 ]; then
-                    prompt_read -r -p "$custom did not answer. Use it anyway? (y/N): " confirm
+                    prompt_yes_no confirm "$custom did not answer. Use it anyway? (y/N): " n
                     is_yes "$confirm" || continue
                 fi
             else
@@ -1848,7 +2143,7 @@ if [ -z "$DETECTED_OS" ] || ( [ "$OS" != "debian" ] && [ "$OS" != "ubuntu" ] ); 
         echo "  3) Ubuntu 24.04 LTS (Noble)"
         echo "  4) Ubuntu 26.04 LTS (Resolute)"
         echo ""
-        prompt_read -r -p "Enter your choice [1-4]: " OS_CHOICE
+        prompt_value OS_CHOICE "Enter your choice [1-4]: " "" valid_choice "Choose 1, 2, 3 or 4." 1 2 3 4
         
         case $OS_CHOICE in
             1)
@@ -1901,7 +2196,7 @@ else
         if [ "$VERSION" != "12" ] && [ "$VERSION" != "13" ]; then
             print_warning "Detected Debian version: $VERSION (officially supported: 12, 13)"
             if [ "$INTERACTIVE" = true ]; then
-                prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+                prompt_yes_no CONTINUE_ANYWAY "Continue anyway? (y/N): " n
                 CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
                 if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
                     exit 1
@@ -1915,7 +2210,7 @@ else
         if [ "$VERSION" != "24.04" ] && [ "$VERSION" != "26.04" ]; then
             print_warning "Detected Ubuntu version: $VERSION (officially supported: 24.04 LTS, 26.04 LTS)"
             if [ "$INTERACTIVE" = true ]; then
-                prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_ANYWAY
+                prompt_yes_no CONTINUE_ANYWAY "Continue anyway? (y/N): " n
                 CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-n}
                 if [ "$CONTINUE_ANYWAY" != "y" ] && [ "$CONTINUE_ANYWAY" != "Y" ]; then
                     exit 1
@@ -1949,7 +2244,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  - Creates /opt/rustdesk with docker-compose.yml"
     print_message "  - Registers systemd service (rustdesk-compose.service)"
     print_message "  - Containers: hbbs (signal) + hbbr (relay)"
-    prompt_read -r -p "Install RustDesk? (y/N): " INSTALL_RUSTDESK
+    prompt_yes_no INSTALL_RUSTDESK "Install RustDesk? (y/N): " n
     INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
 
     # Ask about weekly auto-update timer (only when RustDesk is being installed)
@@ -1959,7 +2254,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  - Creates rustdesk-update.service + rustdesk-update.timer"
         print_message "  - Runs every Sunday at 04:00 (with ±1h random delay)"
         print_message "  - Resolves an immutable image digest, verifies health, and rolls back on failure"
-        prompt_read -r -p "Install weekly auto-update timer? (Y/n): " INSTALL_RUSTDESK_UPDATE
+        prompt_yes_no INSTALL_RUSTDESK_UPDATE "Install weekly auto-update timer? (Y/n): " y
         INSTALL_RUSTDESK_UPDATE=${INSTALL_RUSTDESK_UPDATE:-y}
     else
         INSTALL_RUSTDESK_UPDATE="n"
@@ -1975,17 +2270,12 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  - Downloads and verifies opt.hc (100 MiB)"
     print_message "  - Installs signed VeraCrypt if needed; backs up replaced files"
     print_message "  - Restores root ownership, private configs and executable scripts"
-    prompt_read -r -p "Restore opt.hc to /opt? (y/N): " RESTORE_OPT_VAULT
+    prompt_yes_no RESTORE_OPT_VAULT "Restore opt.hc to /opt? (y/N): " n
     RESTORE_OPT_VAULT=${RESTORE_OPT_VAULT:-n}
     # Do not expose passwords even when the installer was started with bash -x.
     set +x
     if [[ "$RESTORE_OPT_VAULT" =~ ^[yY]$ ]]; then
-        prompt_read -r -s -p "VeraCrypt password: " OPT_VAULT_PASSWORD
-        echo ""
-        if [ -z "$OPT_VAULT_PASSWORD" ]; then
-            print_warning "No password provided. opt.hc restoration skipped."
-            RESTORE_OPT_VAULT="n"
-        fi
+        prompt_secret OPT_VAULT_PASSWORD "VeraCrypt password: "
     else
         OPT_VAULT_PASSWORD=""
     fi
@@ -1997,25 +2287,19 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Set a password for root user?"
-    prompt_read -r -p "Set root password? (y/N): " SET_ROOT_PASSWORD
+    prompt_yes_no SET_ROOT_PASSWORD "Set root password? (y/N): " n
     SET_ROOT_PASSWORD=${SET_ROOT_PASSWORD:-n}
     
     if [ "$SET_ROOT_PASSWORD" = "y" ] || [ "$SET_ROOT_PASSWORD" = "Y" ]; then
         while true; do
-            prompt_read -r -s -p "Enter new root password: " ROOT_PASSWORD
-            echo ""
-            prompt_read -r -s -p "Confirm root password: " ROOT_PASSWORD_CONFIRM
-            echo ""
+            prompt_secret ROOT_PASSWORD "Enter new root password: "
+            prompt_secret ROOT_PASSWORD_CONFIRM "Confirm root password: "
             
             if [ "$ROOT_PASSWORD" = "$ROOT_PASSWORD_CONFIRM" ]; then
-                if [ -z "$ROOT_PASSWORD" ]; then
-                    print_warning "Password cannot be empty"
-                    continue
-                fi
                 print_message "Root password will be set"
                 break
             else
-                print_warning "Passwords do not match. Please try again."
+                input_error "Passwords do not match."
             fi
         done
     else
@@ -2026,52 +2310,36 @@ if [ "$INTERACTIVE" = true ]; then
     
     # Ask about creating new user
     print_message "Do you want to create a new user?"
-    prompt_read -r -p "Create new user? (y/N): " CREATE_USER
+    prompt_yes_no CREATE_USER "Create new user? (y/N): " n
     CREATE_USER=${CREATE_USER:-n}
     
     if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
-        prompt_read -r -p "Enter username for new user: " NEW_USERNAME
+        prompt_value NEW_USERNAME "Enter username for new user: " "" valid_new_username "Use 1-32 characters: lowercase letters, digits, _ or -, starting with a letter or _; optional final $."
         
-        if [ -z "$NEW_USERNAME" ]; then
-            print_error "Username cannot be empty"
-            CREATE_USER="n"
-        elif ! [[ "$NEW_USERNAME" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
-            print_error "Invalid username: $NEW_USERNAME"
-            print_error "Use a Debian-compatible username: start with a lowercase letter or underscore, then lowercase letters, digits, underscores or hyphens"
-            CREATE_USER="n"
-            NEW_USERNAME=""
-        else
-            # Check if user already exists
-            if id "$NEW_USERNAME" &>/dev/null; then
-                print_warning "User $NEW_USERNAME already exists"
-                prompt_read -r -p "Continue with existing user? (y/N): " USE_EXISTING
-                USE_EXISTING=${USE_EXISTING:-n}
-                
-                if [ "$USE_EXISTING" != "y" ] && [ "$USE_EXISTING" != "Y" ]; then
-                    CREATE_USER="n"
-                    NEW_USERNAME=""
-                else
-                    CREATE_USER="existing"
-                fi
+        # Check if user already exists
+        if id "$NEW_USERNAME" &>/dev/null; then
+            print_warning "User $NEW_USERNAME already exists"
+            prompt_yes_no USE_EXISTING "Continue with existing user? (y/N): " n
+            USE_EXISTING=${USE_EXISTING:-n}
+
+            if [ "$USE_EXISTING" != "y" ] && [ "$USE_EXISTING" != "Y" ]; then
+                CREATE_USER="n"
+                NEW_USERNAME=""
             else
-                while true; do
-                    prompt_read -r -s -p "Enter password for $NEW_USERNAME: " NEW_USER_PASSWORD
-                    echo ""
-                    prompt_read -r -s -p "Confirm password: " NEW_USER_PASSWORD_CONFIRM
-                    echo ""
-                    
-                    if [ "$NEW_USER_PASSWORD" = "$NEW_USER_PASSWORD_CONFIRM" ]; then
-                        if [ -z "$NEW_USER_PASSWORD" ]; then
-                            print_warning "Password cannot be empty"
-                            continue
-                        fi
-                        print_message "User $NEW_USERNAME will be created"
-                        break
-                    else
-                        print_warning "Passwords do not match. Please try again."
-                    fi
-                done
+                CREATE_USER="existing"
             fi
+        else
+            while true; do
+                prompt_secret NEW_USER_PASSWORD "Enter password for $NEW_USERNAME: "
+                prompt_secret NEW_USER_PASSWORD_CONFIRM "Confirm password: "
+                
+                if [ "$NEW_USER_PASSWORD" = "$NEW_USER_PASSWORD_CONFIRM" ]; then
+                    print_message "User $NEW_USERNAME will be created"
+                    break
+                else
+                    input_error "Passwords do not match."
+                fi
+            done
         fi
     else
         NEW_USERNAME=""
@@ -2083,19 +2351,15 @@ if [ "$INTERACTIVE" = true ]; then
     # Ask about SSH key for new user
     if [ ! -z "$NEW_USERNAME" ]; then
         print_message "Do you want to configure SSH key for $NEW_USERNAME?"
-        prompt_read -r -p "Configure SSH key? (y/N): " CONFIGURE_USER_SSH_KEY
+        prompt_yes_no CONFIGURE_USER_SSH_KEY "Configure SSH key? (y/N): " n
         CONFIGURE_USER_SSH_KEY=${CONFIGURE_USER_SSH_KEY:-n}
         
         if [ "$CONFIGURE_USER_SSH_KEY" = "y" ] || [ "$CONFIGURE_USER_SSH_KEY" = "Y" ]; then
             echo ""
             print_message "Enter SSH public key for $NEW_USERNAME"
             print_message "Example: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB..."
-            prompt_read -r -p "SSH public key: " USER_SSH_KEY
+            prompt_value USER_SSH_KEY "SSH public key: " "" valid_public_key "Paste one complete OpenSSH public key (type and base64 data), not a private key."
             
-            if [ -z "$USER_SSH_KEY" ]; then
-                print_warning "No SSH key provided, skipping SSH key configuration"
-                CONFIGURE_USER_SSH_KEY="n"
-            fi
         else
             USER_SSH_KEY=""
         fi
@@ -2109,7 +2373,7 @@ if [ "$INTERACTIVE" = true ]; then
     # Ask about zsh installation for new user
     if [ ! -z "$NEW_USERNAME" ]; then
         print_message "Do you want to install and configure zsh with Oh My Zsh for $NEW_USERNAME?"
-        prompt_read -r -p "Install zsh? (y/N): " INSTALL_ZSH
+        prompt_yes_no INSTALL_ZSH "Install zsh? (y/N): " n
         INSTALL_ZSH=${INSTALL_ZSH:-n}
     else
         INSTALL_ZSH="n"
@@ -2125,7 +2389,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     # Ask about crontab configuration
     print_message "Do you want to configure crontab for root?"
-    prompt_read -r -p "Configure crontab? (y/N): " CONFIGURE_CRONTAB
+    prompt_yes_no CONFIGURE_CRONTAB "Configure crontab? (y/N): " n
     CONFIGURE_CRONTAB=${CONFIGURE_CRONTAB:-n}
     
     if [ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ]; then
@@ -2136,7 +2400,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "2) Paste tasks from clipboard (recommended for multiple tasks)"
         print_message "3) Skip adding tasks (only set environment variables)"
         echo ""
-        prompt_read -r -p "Choose option [1-3] (default: 3): " CRONTAB_MODE
+        prompt_value CRONTAB_MODE "Choose option [1-3] (default: 3): " "3" valid_choice "Choose 1, 2 or 3." 1 2 3
         CRONTAB_MODE=${CRONTAB_MODE:-3}
         
         case $CRONTAB_MODE in
@@ -2146,12 +2410,7 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "Example: 0 2 * * * /root/backup.sh"
                 print_message "Press CTRL+D when finished"
                 echo ""
-                CRONTAB_TASKS=""
-                while IFS= read -r line; do
-                    if [ ! -z "$line" ]; then
-                        CRONTAB_TASKS="${CRONTAB_TASKS}${line}"$'\n'
-                    fi
-                done
+                prompt_cron_tasks 1
                 ;;
             2)
                 print_message "Paste your cron tasks from clipboard"
@@ -2165,19 +2424,8 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message ""
                 print_message "Paste now and type END when done:"
                 echo ""
-                CRONTAB_TASKS=""
-                while IFS= read -r line; do
-                    # Stop on END marker
-                    if [ "$line" = "END" ] || [ "$line" = "end" ]; then
-                        break
-                    fi
-                    # Add line (including empty lines if they're part of the paste)
-                    CRONTAB_TASKS="${CRONTAB_TASKS}${line}"$'\n'
-                done
-                
-                # Remove trailing newline if exists
-                CRONTAB_TASKS="${CRONTAB_TASKS%$'\n'}"
-                
+                prompt_cron_tasks 2
+
                 if [ -z "$CRONTAB_TASKS" ]; then
                     print_warning "No tasks entered"
                 else
@@ -2207,12 +2455,12 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Configure SSH (change port, AllowUsers, authentication)?"
-    prompt_read -r -p "Configure SSH? (y/N): " CONFIGURE_SSH
+    prompt_yes_no CONFIGURE_SSH "Configure SSH? (y/N): " n
     CONFIGURE_SSH=${CONFIGURE_SSH:-n}
     
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         while true; do
-            prompt_read -r -p "Enter new SSH port (default 22): " SSH_PORT
+            prompt_value SSH_PORT "Enter new SSH port (default 22): " "22" valid_uint "Enter an integer port from 1 to 65535." 1 65535
             SSH_PORT=${SSH_PORT:-22}
 
             # Validate port number
@@ -2220,7 +2468,7 @@ if [ "$INTERACTIVE" = true ]; then
                 # Check if port is already in use
                 if ss -tuln | grep -q ":${SSH_PORT} "; then
                     print_warning "Port $SSH_PORT is already in use by another service"
-                    prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_PORT
+                    prompt_yes_no CONTINUE_PORT "Continue anyway? (y/N): " n
                     if [ "$CONTINUE_PORT" = "y" ] || [ "$CONTINUE_PORT" = "Y" ]; then
                         break
                     fi
@@ -2238,27 +2486,7 @@ if [ "$INTERACTIVE" = true ]; then
         if [ ! -z "$NEW_USERNAME" ]; then
             print_message "Suggestion: $NEW_USERNAME"
         fi
-        prompt_read -r -p "AllowUsers: " SSH_ALLOW_USERS
-
-        # Validate users exist
-        if [ ! -z "$SSH_ALLOW_USERS" ]; then
-            INVALID_USERS=""
-            for username in $SSH_ALLOW_USERS; do
-                if [ "$username" != "$NEW_USERNAME" ] && ! id "$username" &>/dev/null; then
-                    INVALID_USERS="$INVALID_USERS $username"
-                fi
-            done
-
-            if [ ! -z "$INVALID_USERS" ]; then
-                print_warning "The following users do not exist:$INVALID_USERS"
-                print_warning "Setting AllowUsers with non-existent users may lock you out of SSH!"
-                prompt_read -r -p "Continue anyway? (y/N): " CONTINUE_USERS
-                if [ "$CONTINUE_USERS" != "y" ] && [ "$CONTINUE_USERS" != "Y" ]; then
-                    SSH_ALLOW_USERS=""
-                    print_message "AllowUsers configuration skipped"
-                fi
-            fi
-        fi
+        prompt_value SSH_ALLOW_USERS "AllowUsers: " "" valid_allow_users "Enter existing usernames or the user selected for creation, separated by spaces; Enter skips."
 
         echo ""
         print_header "Advanced SSH Security Parameters"
@@ -2267,10 +2495,10 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PubkeyAuthentication
         print_message "PubkeyAuthentication - Enable public key authentication"
-        prompt_read -r -p "Configure PubkeyAuthentication? (y/N): " CONFIG_PUBKEY
+        prompt_yes_no CONFIG_PUBKEY "Configure PubkeyAuthentication? (y/N): " n
         CONFIG_PUBKEY=${CONFIG_PUBKEY:-n}
         if [ "$CONFIG_PUBKEY" = "y" ] || [ "$CONFIG_PUBKEY" = "Y" ]; then
-            prompt_read -r -p "Set PubkeyAuthentication to yes or no? (Y/n): " SSH_PUBKEY_AUTH
+            prompt_yes_no SSH_PUBKEY_AUTH "Set PubkeyAuthentication to yes or no? (Y/n): " y
             SSH_PUBKEY_AUTH=${SSH_PUBKEY_AUTH:-y}
             if [[ "${SSH_PUBKEY_AUTH,,}" =~ ^(y|yes)$ ]]; then
                 SSH_PUBKEY_AUTH="yes"
@@ -2283,10 +2511,10 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PasswordAuthentication
         print_message "PasswordAuthentication - Enable password authentication"
-        prompt_read -r -p "Configure PasswordAuthentication? (y/N): " CONFIG_PASSWORD
+        prompt_yes_no CONFIG_PASSWORD "Configure PasswordAuthentication? (y/N): " n
         CONFIG_PASSWORD=${CONFIG_PASSWORD:-n}
         if [ "$CONFIG_PASSWORD" = "y" ] || [ "$CONFIG_PASSWORD" = "Y" ]; then
-            prompt_read -r -p "Set PasswordAuthentication to yes or no? (Y/n): " SSH_PASSWORD_AUTH
+            prompt_yes_no SSH_PASSWORD_AUTH "Set PasswordAuthentication to yes or no? (Y/n): " y
             SSH_PASSWORD_AUTH=${SSH_PASSWORD_AUTH:-y}
             if [[ "${SSH_PASSWORD_AUTH,,}" =~ ^(y|yes)$ ]]; then
                 SSH_PASSWORD_AUTH="yes"
@@ -2299,7 +2527,7 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PermitEmptyPasswords - ALWAYS set to no, only ask about uncommenting
         print_message "PermitEmptyPasswords - Prevent empty password authentication (ALWAYS set to 'no')"
-        prompt_read -r -p "Configure PermitEmptyPasswords? (y/N): " CONFIG_EMPTY_PASS
+        prompt_yes_no CONFIG_EMPTY_PASS "Configure PermitEmptyPasswords? (y/N): " n
         CONFIG_EMPTY_PASS=${CONFIG_EMPTY_PASS:-n}
         if [ "$CONFIG_EMPTY_PASS" = "y" ] || [ "$CONFIG_EMPTY_PASS" = "Y" ]; then
             SSH_EMPTY_PASSWORDS="no"  # ALWAYS no for security
@@ -2309,13 +2537,13 @@ if [ "$INTERACTIVE" = true ]; then
         
         # PermitRootLogin
         print_message "PermitRootLogin - Allow root user to login via SSH"
-        prompt_read -r -p "Configure PermitRootLogin? (y/N): " CONFIG_ROOT_LOGIN
+        prompt_yes_no CONFIG_ROOT_LOGIN "Configure PermitRootLogin? (y/N): " n
         CONFIG_ROOT_LOGIN=${CONFIG_ROOT_LOGIN:-n}
         if [ "$CONFIG_ROOT_LOGIN" = "y" ] || [ "$CONFIG_ROOT_LOGIN" = "Y" ]; then
             print_message "  yes               - root may log in with any enabled method"
             print_message "  prohibit-password - root may log in with a key only, never with a password"
             print_message "  no                - root may not log in over SSH"
-            prompt_read -r -p "Set PermitRootLogin to yes, prohibit-password or no? (Y/p/n): " SSH_ROOT_LOGIN
+            prompt_value SSH_ROOT_LOGIN "Set PermitRootLogin to yes, prohibit-password or no? (Y/p/n): " y valid_root_login "Enter y/yes, p/prohibit-password or n/no."
             SSH_ROOT_LOGIN=${SSH_ROOT_LOGIN:-y}
             if [[ "${SSH_ROOT_LOGIN,,}" =~ ^(y|yes)$ ]]; then
                 SSH_ROOT_LOGIN="yes"
@@ -2333,10 +2561,10 @@ if [ "$INTERACTIVE" = true ]; then
 
         # PrintMotd
         print_message "PrintMotd - Display /etc/motd content on SSH login"
-        prompt_read -r -p "Configure PrintMotd? (y/N): " CONFIG_PRINT_MOTD
+        prompt_yes_no CONFIG_PRINT_MOTD "Configure PrintMotd? (y/N): " n
         CONFIG_PRINT_MOTD=${CONFIG_PRINT_MOTD:-n}
         if [ "$CONFIG_PRINT_MOTD" = "y" ] || [ "$CONFIG_PRINT_MOTD" = "Y" ]; then
-            prompt_read -r -p "Set PrintMotd to yes or no? (Y/n): " SSH_PRINT_MOTD
+            prompt_yes_no SSH_PRINT_MOTD "Set PrintMotd to yes or no? (Y/n): " y
             SSH_PRINT_MOTD=${SSH_PRINT_MOTD:-y}
             if [[ "${SSH_PRINT_MOTD,,}" =~ ^(y|yes)$ ]]; then
                 SSH_PRINT_MOTD="yes"
@@ -2365,20 +2593,11 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  - Installs OpenSSH/FIDO2 support packages"
     print_message "  - Adds sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com key to authorized_keys"
     print_message "  - Enables PubkeyAuthentication in sshd"
-    prompt_read -r -p "Configure YubiKey/FIDO2 SSH? (y/N): " CONFIGURE_YUBIKEY_SSH
+    prompt_yes_no CONFIGURE_YUBIKEY_SSH "Configure YubiKey/FIDO2 SSH? (y/N): " n
     CONFIGURE_YUBIKEY_SSH=${CONFIGURE_YUBIKEY_SSH:-n}
 
     if [ "$CONFIGURE_YUBIKEY_SSH" = "y" ] || [ "$CONFIGURE_YUBIKEY_SSH" = "Y" ]; then
-        if [ -n "$NEW_USERNAME" ]; then
-            YUBIKEY_SSH_DEFAULT_USER="$NEW_USERNAME"
-        elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-            YUBIKEY_SSH_DEFAULT_USER="$SUDO_USER"
-        else
-            YUBIKEY_SSH_DEFAULT_USER="root"
-        fi
-
-        prompt_read -r -p "Target user for YubiKey SSH (default: ${YUBIKEY_SSH_DEFAULT_USER}): " YUBIKEY_SSH_USER
-        YUBIKEY_SSH_USER=${YUBIKEY_SSH_USER:-$YUBIKEY_SSH_DEFAULT_USER}
+        prompt_setup_user YUBIKEY_SSH_USER "Target user for YubiKey SSH"
 
         echo ""
         print_message "Paste the YubiKey/FIDO2 SSH public key line."
@@ -2387,24 +2606,13 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Fallback for older YubiKey firmware:"
         print_message "  ssh-keygen -t ecdsa-sk -O resident -O verify-required -C \"${YUBIKEY_SSH_USER}@$(hostname -f 2>/dev/null || hostname)\""
         print_message "Leave empty to install/configure server-side FIDO2 support without adding a key."
-        prompt_read -r -p "YubiKey SSH public key: " YUBIKEY_SSH_PUBLIC_KEY
-
-        if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ] && \
-           ! [[ "$YUBIKEY_SSH_PUBLIC_KEY" =~ ^(sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|sk-ssh-ed25519-cert-v01@openssh\.com|sk-ecdsa-sha2-nistp256-cert-v01@openssh\.com)[[:space:]] ]]; then
-            print_warning "The provided key does not look like an OpenSSH FIDO2/YubiKey public key"
-            print_warning "Expected key type: sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com"
-            prompt_read -r -p "Continue anyway? (y/N): " YUBIKEY_SSH_CONTINUE_INVALID_KEY
-            YUBIKEY_SSH_CONTINUE_INVALID_KEY=${YUBIKEY_SSH_CONTINUE_INVALID_KEY:-n}
-            if [ "$YUBIKEY_SSH_CONTINUE_INVALID_KEY" != "y" ] && [ "$YUBIKEY_SSH_CONTINUE_INVALID_KEY" != "Y" ]; then
-                YUBIKEY_SSH_PUBLIC_KEY=""
-            fi
-        fi
+        prompt_value YUBIKEY_SSH_PUBLIC_KEY "YubiKey SSH public key: " "" valid_public_key "Paste a valid OpenSSH FIDO2 public key, or Enter for server support without a key." fido
 
         if [ -n "$YUBIKEY_SSH_PUBLIC_KEY" ]; then
             echo ""
             print_message "Disable password authentication after configuring YubiKey SSH?"
             print_warning "Only choose YES after verifying you have another working SSH session/key path."
-            prompt_read -r -p "Disable SSH password authentication? (y/N): " YUBIKEY_SSH_DISABLE_PASSWORD_AUTH
+            prompt_yes_no YUBIKEY_SSH_DISABLE_PASSWORD_AUTH "Disable SSH password authentication? (y/N): " n
             YUBIKEY_SSH_DISABLE_PASSWORD_AUTH=${YUBIKEY_SSH_DISABLE_PASSWORD_AUTH:-n}
         else
             YUBIKEY_SSH_DISABLE_PASSWORD_AUTH="n"
@@ -2421,11 +2629,11 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Create Python virtual environment?"
-    prompt_read -r -p "Create Python venv? (y/N): " CREATE_VENV
+    prompt_yes_no CREATE_VENV "Create Python venv? (y/N): " n
     CREATE_VENV=${CREATE_VENV:-n}
 
     if [ "$CREATE_VENV" = "y" ] || [ "$CREATE_VENV" = "Y" ]; then
-        prompt_read -r -p "Enter path for virtual environment (default: /root/skripts): " VENV_PATH
+        prompt_value VENV_PATH "Enter path for virtual environment (default: /root/skripts): " "/root/skripts" valid_venv_path "Use an absolute directory path, without . or .. components, trailing slash or control characters."
         VENV_PATH=${VENV_PATH:-/root/skripts}
     else
         VENV_PATH=""
@@ -2435,7 +2643,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     # Ask about Docker installation
     print_message "Install Docker (container runtime)?"
-    prompt_read -r -p "Install Docker? (y/N): " INSTALL_DOCKER
+    prompt_yes_no INSTALL_DOCKER "Install Docker? (y/N): " n
     INSTALL_DOCKER=${INSTALL_DOCKER:-n}
 
     if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
@@ -2446,7 +2654,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Recommended when using nftables or external firewall"
         print_message "  Docker will NOT create any iptables/nat rules"
         print_message "  userland-proxy=false uses iptables hairpin NAT (faster)"
-        prompt_read -r -p "Disable Docker iptables? (y/N): " DOCKER_DISABLE_IPTABLES
+        prompt_yes_no DOCKER_DISABLE_IPTABLES "Disable Docker iptables? (y/N): " n
         DOCKER_DISABLE_IPTABLES=${DOCKER_DISABLE_IPTABLES:-n}
     else
         DOCKER_DISABLE_IPTABLES="n"
@@ -2459,13 +2667,13 @@ if [ "$INTERACTIVE" = true ]; then
     else
         print_message "  Note: Go installation requires a user to be created"
     fi
-    prompt_read -r -p "Install Go? (y/N): " INSTALL_GO
+    prompt_yes_no INSTALL_GO "Install Go? (y/N): " n
     INSTALL_GO=${INSTALL_GO:-n}
     
     # Ask about ipset installation
     echo ""
     print_message "Install ipset from the distribution repository?"
-    prompt_read -r -p "Install ipset? (y/N): " INSTALL_IPSET
+    prompt_yes_no INSTALL_IPSET "Install ipset? (y/N): " n
     INSTALL_IPSET=${INSTALL_IPSET:-n}
 
     echo ""
@@ -2474,7 +2682,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Install rclone (cloud storage sync tool)?"
     print_message "  Supports: S3, Google Drive, Dropbox, SFTP, and 70+ backends"
     print_message "  Installed from the distribution repository"
-    prompt_read -r -p "Install rclone? (y/N): " INSTALL_RCLONE
+    prompt_yes_no INSTALL_RCLONE "Install rclone? (y/N): " n
     INSTALL_RCLONE=${INSTALL_RCLONE:-n}
 
     echo ""
@@ -2488,7 +2696,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  1) nftables — replace iptables/UFW with nftables"
     print_message "  2) UFW      — configure UFW firewall"
     print_message "  3) none     — skip firewall configuration"
-    prompt_read -r -p "Firewall backend [1-3] (default: 2): " FIREWALL_BACKEND_CHOICE
+    prompt_value FIREWALL_BACKEND_CHOICE "Firewall backend [1-3] (default: 2): " "2" valid_choice "Choose 1 (nftables), 2 (UFW) or 3 (none)." 1 2 3
     FIREWALL_BACKEND_CHOICE=${FIREWALL_BACKEND_CHOICE:-2}
 
     case "$FIREWALL_BACKEND_CHOICE" in
@@ -2521,7 +2729,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     print_message "Install ufw-docker (UFW integration for Docker)?"
     print_message "  Note: Can be installed even without Docker"
-    prompt_read -r -p "Install ufw-docker? (y/N): " INSTALL_UFW_DOCKER
+    prompt_yes_no INSTALL_UFW_DOCKER "Install ufw-docker? (y/N): " n
     INSTALL_UFW_DOCKER=${INSTALL_UFW_DOCKER:-n}
 
     # Ask about ICMP blocking (only if UFW is enabled)
@@ -2529,7 +2737,7 @@ if [ "$INTERACTIVE" = true ]; then
         echo ""
         print_message "Block ICMP (ping) requests?"
         print_message "  Note: Server will not respond to ping"
-        prompt_read -r -p "Block ICMP? (y/N): " BLOCK_ICMP
+        prompt_yes_no BLOCK_ICMP "Block ICMP? (y/N): " n
         BLOCK_ICMP=${BLOCK_ICMP:-n}
         
         # Ask about custom UFW Docker rules
@@ -2541,7 +2749,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Both versions support custom SSH port configuration"
         print_message "Both versions available from archive or repository"
         print_message "Note: The script will run AFTER all other installations complete"
-        prompt_read -r -p "Install custom UFW Docker rules? (y/N): " INSTALL_UFW_CUSTOM_RULES
+        prompt_yes_no INSTALL_UFW_CUSTOM_RULES "Install custom UFW Docker rules? (y/N): " n
         INSTALL_UFW_CUSTOM_RULES=${INSTALL_UFW_CUSTOM_RULES:-n}
 
         if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" ]; then
@@ -2549,13 +2757,8 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "Select version:"
             print_message "  4 - Standard version"
             print_message "  6 - Enhanced version with RustDesk support (recommended)"
-            prompt_read -r -p "Enter version (4 or 6, default: 6): " UFW_RULES_VERSION
+            prompt_value UFW_RULES_VERSION "Enter version (4 or 6, default: 6): " "6" valid_choice "Choose version 4 or 6." 4 6
             UFW_RULES_VERSION=${UFW_RULES_VERSION:-6}
-
-            if [ "$UFW_RULES_VERSION" != "4" ] && [ "$UFW_RULES_VERSION" != "6" ]; then
-                print_warning "Invalid version. Using v6 as default."
-                UFW_RULES_VERSION="6"
-            fi
 
             print_message "Selected version: v${UFW_RULES_VERSION}"
 
@@ -2565,32 +2768,20 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "  1 - Install from password-protected archive (ufw-docker-rules-v4.7z)"
             print_message "      Archive contains both v4 and v6 scripts"
             print_message "  2 - Install from public repository (https://raw.githubusercontent.com/civisrom/ufw-rules-docker/...)"
-            prompt_read -r -p "Choose source (1 or 2, default: 1): " UFW_INSTALL_SOURCE
+            prompt_value UFW_INSTALL_SOURCE "Choose source (1 or 2, default: 1): " "1" valid_choice "Choose 1 (archive) or 2 (repository)." 1 2
             UFW_INSTALL_SOURCE=${UFW_INSTALL_SOURCE:-1}
 
             if [ "$UFW_INSTALL_SOURCE" = "1" ]; then
                 echo ""
                 print_message "The archive is password-protected. Please enter the password:"
-                prompt_read -r -s -p "Password: " UFW_CUSTOM_RULES_PASSWORD
+                prompt_secret UFW_CUSTOM_RULES_PASSWORD "Password: "
                 echo ""
-                if [ -z "$UFW_CUSTOM_RULES_PASSWORD" ]; then
-                    print_warning "No password provided. Custom UFW rules will not be installed."
-                    INSTALL_UFW_CUSTOM_RULES="n"
-                    UFW_SSH_PORT=""
-                else
-                    echo ""
-                    print_message "Enter SSH port for UFW rules:"
-                    print_message "This port will be used instead of the default in the script"
-                    prompt_read -r -p "SSH Port (default: 22): " UFW_SSH_PORT
-                    UFW_SSH_PORT=${UFW_SSH_PORT:-22}
+                print_message "Enter SSH port for UFW rules:"
+                print_message "This port will be used instead of the default in the script"
+                prompt_value UFW_SSH_PORT "SSH Port (default: 22): " "22" valid_uint "Enter an integer port from 1 to 65535." 1 65535
+                UFW_SSH_PORT=${UFW_SSH_PORT:-22}
 
-                    if ! [[ "$UFW_SSH_PORT" =~ ^[0-9]+$ ]] || [ "$UFW_SSH_PORT" -lt 1 ] || [ "$UFW_SSH_PORT" -gt 65535 ]; then
-                        print_warning "Invalid port number. Using default port 22."
-                        UFW_SSH_PORT="22"
-                    fi
-
-                    print_message "SSH port set to: $UFW_SSH_PORT"
-                fi
+                print_message "SSH port set to: $UFW_SSH_PORT"
             else
                 # Repository installation - no password needed
                 UFW_CUSTOM_RULES_PASSWORD=""
@@ -2601,14 +2792,8 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "Enter SSH port for UFW rules:"
                 print_message "This port will be used instead of the default in the script"
                 print_message "Note: This keeps your actual SSH port private"
-                prompt_read -r -p "SSH Port (default: 22): " UFW_SSH_PORT
+                prompt_value UFW_SSH_PORT "SSH Port (default: 22): " "22" valid_uint "Enter an integer port from 1 to 65535." 1 65535
                 UFW_SSH_PORT=${UFW_SSH_PORT:-22}
-
-                # Validate port number
-                if ! [[ "$UFW_SSH_PORT" =~ ^[0-9]+$ ]] || [ "$UFW_SSH_PORT" -lt 1 ] || [ "$UFW_SSH_PORT" -gt 65535 ]; then
-                    print_warning "Invalid port number. Using default port 22."
-                    UFW_SSH_PORT="22"
-                fi
 
                 print_message "SSH port set to: $UFW_SSH_PORT"
             fi
@@ -2677,40 +2862,29 @@ if [ "$INTERACTIVE" = true ]; then
         if [ "$RESTORE_OPT_VAULT" != "y" ] && [ "$RESTORE_OPT_VAULT" != "Y" ]; then
             print_warning "opt.hc restoration not selected — config files must already exist in /opt/nftables/"
         fi
-        print_message "  Available profiles:"
-        # Generate menu dynamically from NFT_PROFILE_DESCRIPTIONS array
-        _prev_group=""
-        for _i in $(seq 1 "$NFT_PROFILES_COUNT"); do
-            # Insert group headers between basic (1-3) and v2 (4+) profiles
-            if [ "$_i" -le 3 ] && [ "$_prev_group" != "basic" ]; then
-                print_message "    ── Basic profiles ──"
-                _prev_group="basic"
-            elif [ "$_i" -eq 4 ] && [ "$_prev_group" != "v2" ]; then
-                echo ""
-                print_message "    ── v2 profiles (advanced) ──"
-                _prev_group="v2"
-            fi
-            print_message "    ${_i}) ${NFT_PROFILE_DESCRIPTIONS[$_i]}"
-        done
-        unset _i _prev_group
-        echo ""
-        prompt_read -r -p "Install nftables config profile? (y/N): " INSTALL_NFTABLES_CONF
+        prompt_yes_no INSTALL_NFTABLES_CONF "Install nftables config profile? (y/N): " n
         INSTALL_NFTABLES_CONF=${INSTALL_NFTABLES_CONF:-n}
 
         if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
-            prompt_read -r -p "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " NFTABLES_PROFILE_NUM
+            print_message "  Available profiles:"
+            # Generate menu dynamically from NFT_PROFILE_DESCRIPTIONS array
+            _prev_group=""
+            for _i in $(seq 1 "$NFT_PROFILES_COUNT"); do
+                # Insert group headers between basic (1-3) and v2 (4+) profiles
+                if [ "$_i" -le 3 ] && [ "$_prev_group" != "basic" ]; then
+                    print_message "    ── Basic profiles ──"
+                    _prev_group="basic"
+                elif [ "$_i" -eq 4 ] && [ "$_prev_group" != "v2" ]; then
+                    echo ""
+                    print_message "    ── v2 profiles (advanced) ──"
+                    _prev_group="v2"
+                fi
+                print_message "    ${_i}) ${NFT_PROFILE_DESCRIPTIONS[$_i]}"
+            done
+            unset _i _prev_group
+            echo ""
+            prompt_value NFTABLES_PROFILE_NUM "Select profile [1-${NFT_PROFILES_COUNT}] (default: ${NFT_DEFAULT_PROFILE}): " "$NFT_DEFAULT_PROFILE" valid_nft_profile "Enter a number from the displayed profile list."
             NFTABLES_PROFILE_NUM=${NFTABLES_PROFILE_NUM:-$NFT_DEFAULT_PROFILE}
-
-            # Validate selection: must be numeric AND within defined profile range.
-            # Non-numeric input would be evaluated as bash arithmetic when used as an
-            # array subscript, which can produce noisy errors under `set -e`.
-            if ! [[ "$NFTABLES_PROFILE_NUM" =~ ^[1-9][0-9]{0,2}$ ]] \
-               || [ "$NFTABLES_PROFILE_NUM" -lt 1 ] \
-               || [ "$NFTABLES_PROFILE_NUM" -gt "$NFT_PROFILES_COUNT" ] \
-               || [ -z "${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]+x}" ]; then
-                print_warning "Invalid selection: '${NFTABLES_PROFILE_NUM}', using default (${NFT_DEFAULT_PROFILE})"
-                NFTABLES_PROFILE_NUM=$NFT_DEFAULT_PROFILE
-            fi
 
             # Set variables from profile arrays
             NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
@@ -2724,7 +2898,7 @@ if [ "$INTERACTIVE" = true ]; then
                 print_message "Install nftables logging script for '${NFTABLES_PROFILE}' profile?"
                 print_message "  Script: ${NFTABLES_LOG_SCRIPT}"
                 print_message "  Configures rsyslog/journald rules for nftables log messages"
-                prompt_read -r -p "Install logging script? (Y/n): " INSTALL_NFTABLES_LOGGING
+                prompt_yes_no INSTALL_NFTABLES_LOGGING "Install logging script? (Y/n): " y
                 INSTALL_NFTABLES_LOGGING=${INSTALL_NFTABLES_LOGGING:-y}
             else
                 INSTALL_NFTABLES_LOGGING="n"
@@ -2747,7 +2921,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Applies nftables rules after Docker starts and on every Docker restart"
         print_message "  Creates systemd service + drop-in trigger for docker.service"
         print_message "  Includes: validation, backup, rollback, verification"
-        prompt_read -r -p "Install nft-docker-watch? (Y/n): " INSTALL_NFT_DOCKER_WATCH
+        prompt_yes_no INSTALL_NFT_DOCKER_WATCH "Install nft-docker-watch? (Y/n): " y
         INSTALL_NFT_DOCKER_WATCH=${INSTALL_NFT_DOCKER_WATCH:-y}
     else
         INSTALL_NFT_DOCKER_WATCH="n"
@@ -2770,7 +2944,7 @@ if [ "$INTERACTIVE" = true ]; then
     echo ""
     print_message "Optimize system parameters (sysctl)?"
     print_message "Includes: IPv6 disable, network tuning, BBR congestion control"
-    prompt_read -r -p "Configure sysctl? (Y/n): " CONFIGURE_SYSCTL
+    prompt_yes_no CONFIGURE_SYSCTL "Configure sysctl? (Y/n): " y
     CONFIGURE_SYSCTL=${CONFIGURE_SYSCTL:-y}
 
     if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
@@ -2778,14 +2952,8 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Choose sysctl configuration mode:"
         print_message "  1) Basic — static parameters (IPv6 disable, BBR, TCP/UDP tuning, security)"
         print_message "  2) Full  — run Linux NetworkOptimizer (bbr.sh) with adaptive RAM-based profiles"
-        prompt_read -r -p "Select mode [1/2] (default: 1): " SYSCTL_MODE
+        prompt_value SYSCTL_MODE "Select mode [1/2] (default: 1): " "1" valid_choice "Choose 1 (basic) or 2 (full)." 1 2
         SYSCTL_MODE=${SYSCTL_MODE:-1}
-
-        # Validate input
-        if [ "$SYSCTL_MODE" != "1" ] && [ "$SYSCTL_MODE" != "2" ]; then
-            print_warning "Invalid choice '$SYSCTL_MODE', using default: 1 (basic)"
-            SYSCTL_MODE="1"
-        fi
 
         # Set RUN_BBR_OPTIMIZER based on mode for backward compatibility
         if [ "$SYSCTL_MODE" = "2" ]; then
@@ -2803,17 +2971,17 @@ if [ "$INTERACTIVE" = true ]; then
 
             # Force IPv4 for APT
             print_message "1. Force IPv4 for APT (recommended for IPv6 connectivity issues)"
-            prompt_read -r -p "   Enable force_ipv4_apt? (Y/n): " BBR_FORCE_IPV4
+            prompt_yes_no BBR_FORCE_IPV4 "   Enable force_ipv4_apt? (Y/n): " y
             BBR_FORCE_IPV4=${BBR_FORCE_IPV4:-y}
 
             # Full system update
             print_message "2. Full system update and upgrade (apt update && upgrade)"
-            prompt_read -r -p "   Enable full_update_upgrade? (Y/n): " BBR_FULL_UPDATE
+            prompt_yes_no BBR_FULL_UPDATE "   Enable full_update_upgrade? (Y/n): " y
             BBR_FULL_UPDATE=${BBR_FULL_UPDATE:-y}
 
             # Fix /etc/hosts
             print_message "3. Fix /etc/hosts file (add hostname loopback entry 127.0.1.1)"
-            prompt_read -r -p "   Enable fix_etc_hosts? (Y/n): " BBR_FIX_HOSTS
+            prompt_yes_no BBR_FIX_HOSTS "   Enable fix_etc_hosts? (Y/n): " y
             BBR_FIX_HOSTS=${BBR_FIX_HOSTS:-y}
 
             # Fix DNS (skip if systemd-resolved is configured separately)
@@ -2822,7 +2990,7 @@ if [ "$INTERACTIVE" = true ]; then
                 BBR_FIX_DNS="n"
             else
                 print_message "4. Fix DNS (set Cloudflare 1.1.1.1/1.0.0.1 + Google 8.8.8.8/8.8.4.4)"
-                prompt_read -r -p "   Enable fix_dns? (Y/n): " BBR_FIX_DNS
+                prompt_yes_no BBR_FIX_DNS "   Enable fix_dns? (Y/n): " y
                 BBR_FIX_DNS=${BBR_FIX_DNS:-y}
             fi
 
@@ -2840,7 +3008,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Enable IP forwarding (net.ipv4.ip_forward = 1)?"
         print_message "Required for: Docker networks, NAT, VPN, routing between interfaces"
         print_message "If unsure — choose Y (recommended for servers with Docker)"
-        prompt_read -r -p "Enable IP forwarding? (Y/n): " ENABLE_IP_FORWARD
+        prompt_yes_no ENABLE_IP_FORWARD "Enable IP forwarding? (Y/n): " y
         ENABLE_IP_FORWARD=${ENABLE_IP_FORWARD:-y}
 
         # Systemd service for sysctl enforcement
@@ -2848,7 +3016,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Install systemd service for sysctl enforcement?"
         print_message "Creates disable-ipv6.service that reapplies the selected sysctl file after network is online"
         print_message "Ensures sysctl settings are always applied on boot"
-        prompt_read -r -p "Install sysctl enforcement service? (Y/n): " INSTALL_SYSCTL_SERVICE
+        prompt_yes_no INSTALL_SYSCTL_SERVICE "Install sysctl enforcement service? (Y/n): " y
         INSTALL_SYSCTL_SERVICE=${INSTALL_SYSCTL_SERVICE:-y}
     else
         SYSCTL_MODE=""
@@ -2868,7 +3036,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "  - Configures /etc/systemd/resolved.conf"
     print_message "  - Creates symlink /etc/resolv.conf -> /run/systemd/resolve/resolv.conf"
     print_message "  - Enables and starts systemd-resolved service"
-    prompt_read -r -p "Configure systemd-resolved? (y/N): " CONFIGURE_RESOLVED
+    prompt_yes_no CONFIGURE_RESOLVED "Configure systemd-resolved? (y/N): " n
     CONFIGURE_RESOLVED=${CONFIGURE_RESOLVED:-n}
 
     if [ "$CONFIGURE_RESOLVED" = "y" ] || [ "$CONFIGURE_RESOLVED" = "Y" ]; then
@@ -2878,21 +3046,21 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  8.8.8.8   — Google"
         print_message "  9.9.9.9   — Quad9"
         print_message "  127.0.0.1 — local DNS resolver (only if one is already installed)"
-        prompt_read -r -p "DNS server (default: 1.1.1.1): " RESOLVED_DNS
+        prompt_value RESOLVED_DNS "DNS server (default: 1.1.1.1): " "1.1.1.1" valid_dns_ip "Enter one valid IPv4 or IPv6 address (optional %interface for IPv6), not a hostname or URL."
         RESOLVED_DNS=${RESOLVED_DNS:-1.1.1.1}
 
         echo ""
         print_message "Disable DNS stub listener (DNSStubListener=no)?"
         print_message "  Recommended when using a local DNS resolver on port 53"
         print_message "  Frees port 53 for your local resolver (unbound, pihole, etc.)"
-        prompt_read -r -p "Disable DNSStubListener? (Y/n): " RESOLVED_STUB_LISTENER_OFF
+        prompt_yes_no RESOLVED_STUB_LISTENER_OFF "Disable DNSStubListener? (Y/n): " y
         RESOLVED_STUB_LISTENER_OFF=${RESOLVED_STUB_LISTENER_OFF:-y}
 
         echo ""
         print_message "Enable DNS over TLS (DoT)?"
         print_message "  Encrypts DNS queries to upstream resolver"
         print_message "  Note: Upstream DNS server must support DoT"
-        prompt_read -r -p "Enable DNSOverTLS? (y/N): " RESOLVED_DNS_OVER_TLS
+        prompt_yes_no RESOLVED_DNS_OVER_TLS "Enable DNSOverTLS? (y/N): " n
         RESOLVED_DNS_OVER_TLS=${RESOLVED_DNS_OVER_TLS:-n}
     else
         RESOLVED_DNS=""
@@ -2924,9 +3092,9 @@ if [ "$INTERACTIVE" = true ]; then
         TIMESYNC_DEFAULT="n"
     fi
     if is_yes "$TIMESYNC_DEFAULT"; then
-        prompt_read -r -p "Configure time synchronization? (Y/n): " CONFIGURE_TIMESYNC
+        prompt_yes_no CONFIGURE_TIMESYNC "Configure time synchronization? (Y/n): " y
     else
-        prompt_read -r -p "Configure time synchronization? (y/N): " CONFIGURE_TIMESYNC
+        prompt_yes_no CONFIGURE_TIMESYNC "Configure time synchronization? (y/N): " n
     fi
     CONFIGURE_TIMESYNC=${CONFIGURE_TIMESYNC:-$TIMESYNC_DEFAULT}
     if is_yes "$CONFIGURE_TIMESYNC"; then
@@ -2940,7 +3108,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "Adds 'ipv6.disable=1' to BOTH GRUB_CMDLINE_LINUX_DEFAULT"
         print_message "and GRUB_CMDLINE_LINUX (so recovery boot is also covered)."
         print_message "Note: This is in addition to sysctl IPv6 disable and requires reboot"
-        prompt_read -r -p "Disable IPv6 via GRUB? (y/N): " DISABLE_IPV6_GRUB
+        prompt_yes_no DISABLE_IPV6_GRUB "Disable IPv6 via GRUB? (y/N): " n
         DISABLE_IPV6_GRUB=${DISABLE_IPV6_GRUB:-n}
     else
         DISABLE_IPV6_GRUB="n"
@@ -2949,7 +3117,7 @@ if [ "$INTERACTIVE" = true ]; then
     # Ask about repository configuration
     if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
         print_message "Do you want to configure ${OS^} repositories?"
-        prompt_read -r -p "Configure repositories? (Y/n): " CONFIGURE_REPOS
+        prompt_yes_no CONFIGURE_REPOS "Configure repositories? (Y/n): " y
         CONFIGURE_REPOS=${CONFIGURE_REPOS:-y}
     fi
     
@@ -2961,7 +3129,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  1. ppa:ondrej/php - Latest PHP builds"
         print_message "  2. ppa:git-core/ppa - Latest Git version"
         print_message "  3. ppa:ubuntu-toolchain-r/test - Latest GCC toolchain"
-        prompt_read -r -p "Add PPA repositories? (y/N): " ADD_UBUNTU_PPAS
+        prompt_yes_no ADD_UBUNTU_PPAS "Add PPA repositories? (y/N): " n
         ADD_UBUNTU_PPAS=${ADD_UBUNTU_PPAS:-n}
         
         # Initialize PPA selection flags
@@ -2978,27 +3146,27 @@ if [ "$INTERACTIVE" = true ]; then
 
             # Ondrej PHP PPA
             print_message "1. ppa:ondrej/php - Latest PHP builds"
-            prompt_read -r -p "   Add Ondrej PHP PPA? (y/N): " ADD_PPA_PHP
+            prompt_yes_no ADD_PPA_PHP "   Add Ondrej PHP PPA? (y/N): " n
             ADD_PPA_PHP=${ADD_PPA_PHP:-n}
 
             if [ "$ADD_PPA_PHP" = "y" ] || [ "$ADD_PPA_PHP" = "Y" ]; then
-                prompt_read -r -p "   Install PHP CLI (php-cli)? (y/N): " INSTALL_PHP_CLI
+                prompt_yes_no INSTALL_PHP_CLI "   Install PHP CLI (php-cli)? (y/N): " n
                 INSTALL_PHP_CLI=${INSTALL_PHP_CLI:-n}
 
                 if [ "$INSTALL_PHP_CLI" = "y" ] || [ "$INSTALL_PHP_CLI" = "Y" ]; then
-                    prompt_read -r -p "   Install PHP extensions (mbstring, xml, curl, mysql)? (y/N): " INSTALL_PHP_EXTENSIONS
+                    prompt_yes_no INSTALL_PHP_EXTENSIONS "   Install PHP extensions (mbstring, xml, curl, mysql)? (y/N): " n
                     INSTALL_PHP_EXTENSIONS=${INSTALL_PHP_EXTENSIONS:-n}
                 fi
             fi
 
             # Git Core PPA
             print_message "2. ppa:git-core/ppa - Latest stable Git releases"
-            prompt_read -r -p "   Add Git Core PPA? (y/N): " ADD_PPA_GIT
+            prompt_yes_no ADD_PPA_GIT "   Add Git Core PPA? (y/N): " n
             ADD_PPA_GIT=${ADD_PPA_GIT:-n}
             
             # Ubuntu Toolchain PPA
             print_message "3. ppa:ubuntu-toolchain-r/test - Latest GCC, G++, and toolchain"
-            prompt_read -r -p "   Add Ubuntu Toolchain PPA? (y/N): " ADD_PPA_TOOLCHAIN
+            prompt_yes_no ADD_PPA_TOOLCHAIN "   Add Ubuntu Toolchain PPA? (y/N): " n
             ADD_PPA_TOOLCHAIN=${ADD_PPA_TOOLCHAIN:-n}
         fi
         
@@ -3023,7 +3191,7 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "Complete removal will back up /etc/nginx, then PURGE all nginx"
             print_message "packages and modules and delete configs, binaries, unused"
             print_message "dependencies, module symlinks and leftover directories."
-            prompt_read -r -p "Completely REMOVE nginx (purge everything)? (y/N): " REMOVE_NGINX
+            prompt_yes_no REMOVE_NGINX "Completely REMOVE nginx (purge everything)? (y/N): " n
             REMOVE_NGINX=${REMOVE_NGINX:-n}
         fi
 
@@ -3040,26 +3208,18 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  3. nginx-modules.com - Dynamic modules for Nginx stable (https://www.nginx-modules.com/)"
         print_warning "Pick only ONE Nginx package source (1 or 2); option 3 only adds modules and pairs with the official nginx.org repo."
 
-        # Official nginx.org repository
-        prompt_read -r -p "   Add official nginx.org repository? (y/N): " ADD_NGINX_ORG
-        ADD_NGINX_ORG=${ADD_NGINX_ORG:-n}
-
-        # Third-party deb.myguard.nl repository
-        prompt_read -r -p "   Add third-party deb.myguard.nl Nginx repository? (y/N): " ADD_NGINX_MYGUARD
-        ADD_NGINX_MYGUARD=${ADD_NGINX_MYGUARD:-n}
-
-        # nginx-modules.com (Blendbyte) dynamic modules repository
-        prompt_read -r -p "   Add nginx-modules.com (Blendbyte) modules repository? (y/N): " ADD_NGINX_MODULES
-        ADD_NGINX_MODULES=${ADD_NGINX_MODULES:-n}
-
-        if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
-           { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
-            print_warning "Both Nginx package repositories selected: deb.myguard.nl has the higher APT pin priority and will win."
-        fi
-        if { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; } && \
-           { [ "$ADD_NGINX_ORG" != "y" ] && [ "$ADD_NGINX_ORG" != "Y" ]; }; then
-            print_warning "nginx-modules.com modules are built for the official nginx.org build; enabling nginx.org (option 1) too is recommended."
-        fi
+        while true; do
+            prompt_yes_no ADD_NGINX_ORG "   Add official nginx.org repository? (y/N): " n
+            prompt_yes_no ADD_NGINX_MYGUARD "   Add third-party deb.myguard.nl Nginx repository? (y/N): " n
+            prompt_yes_no ADD_NGINX_MODULES "   Add nginx-modules.com (Blendbyte) modules repository? (y/N): " n
+            if is_yes "$ADD_NGINX_ORG" && is_yes "$ADD_NGINX_MYGUARD"; then
+                input_error "Choose only one Nginx package source; repeat the repository choices."
+            elif is_yes "$ADD_NGINX_MODULES" && ! is_yes "$ADD_NGINX_ORG"; then
+                input_error "Blendbyte modules require nginx.org; repeat the repository choices."
+            else
+                break
+            fi
+        done
 
         # Offer to install nginx now, with a flexible choice of module set.
         INSTALL_NGINX="n"
@@ -3068,7 +3228,7 @@ if [ "$INTERACTIVE" = true ]; then
         if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } || \
            { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
             echo ""
-            prompt_read -r -p "Install nginx now from the selected repository? (y/N): " INSTALL_NGINX
+            prompt_yes_no INSTALL_NGINX "Install nginx now from the selected repository? (y/N): " n
             INSTALL_NGINX=${INSTALL_NGINX:-n}
 
             if [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; then
@@ -3091,7 +3251,7 @@ if [ "$INTERACTIVE" = true ]; then
                     print_message "       http-dav-ext, http-auth-pam) — distro-nginx-full equivalent, x-ui-pro ready"
                 fi
                 print_message "  7) custom (install only the package names you list below)"
-                prompt_read -r -p "Preset [1-8]: " NGINX_INSTALL_VARIANT
+                prompt_value NGINX_INSTALL_VARIANT "Preset [1-8]: " "" valid_nginx_preset "Choose a displayed preset whose repositories are enabled."
 
                 if [ "$NGINX_INSTALL_VARIANT" = "7" ]; then
                     # Show a copy-paste catalogue of packages available from the
@@ -3125,11 +3285,11 @@ if [ "$INTERACTIVE" = true ]; then
                     echo ""
                     print_message "Enter packages separated by spaces OR commas"
                     print_message "  (e.g. 'nginx, nginx-module-njs nginx-module-brotli')."
-                    prompt_read -r -p "Packages to install: " NGINX_CUSTOM_PKGS
+                    prompt_value NGINX_CUSTOM_PKGS "Packages to install: " "" valid_packages "Enter at least one package name, separated by spaces or commas; no APT options or paths." required
                 else
                     echo ""
                     print_message "Optionally add extra packages (space- or comma-separated), or leave empty."
-                    prompt_read -r -p "Extra packages: " NGINX_CUSTOM_PKGS
+                    prompt_value NGINX_CUSTOM_PKGS "Extra packages: " "" valid_packages "Enter package names, separated by spaces or commas; Enter skips. No APT options or paths."
                 fi
 
                 # If nginx is already installed (e.g. from the distro repos), offer
@@ -3146,7 +3306,7 @@ if [ "$INTERACTIVE" = true ]; then
                     print_message "Before any change the script backs up /etc/nginx and the package list to"
                     print_message "/var/backups, stops nginx, swaps packages (keeping your configs), runs"
                     print_message "'nginx -t', and only starts nginx if the config test passes."
-                    prompt_read -r -p "Migrate existing nginx to the selected repository? (y/N): " MIGRATE_NGINX
+                    prompt_yes_no MIGRATE_NGINX "Migrate existing nginx to the selected repository? (y/N): " n
                     MIGRATE_NGINX=${MIGRATE_NGINX:-n}
                 fi
             fi
@@ -3171,7 +3331,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Disable IPv6 in /etc/network/interfaces?"
     print_message "  Comments out all inet6 configuration lines"
     print_message "  Useful for static network configuration"
-    prompt_read -r -p "Comment out IPv6 in /etc/network/interfaces? (y/N): " COMMENT_IPV6_INTERFACES
+    prompt_yes_no COMMENT_IPV6_INTERFACES "Comment out IPv6 in /etc/network/interfaces? (y/N): " n
     COMMENT_IPV6_INTERFACES=${COMMENT_IPV6_INTERFACES:-n}
 
     # Ask about disabling IPv6 in netplan (Ubuntu default, also possible on Debian)
@@ -3185,7 +3345,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Validates with 'netplan generate' before keeping changes"
         print_warning "  Will NOT auto-apply — run 'sudo netplan apply' yourself when ready"
         print_warning "  (avoids losing SSH if IPv6 connectivity was active)"
-        prompt_read -r -p "Disable IPv6 in netplan? (y/N): " DISABLE_IPV6_NETPLAN
+        prompt_yes_no DISABLE_IPV6_NETPLAN "Disable IPv6 in netplan? (y/N): " n
         DISABLE_IPV6_NETPLAN=${DISABLE_IPV6_NETPLAN:-n}
     else
         DISABLE_IPV6_NETPLAN="n"
@@ -3195,7 +3355,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     # Ask about MOTD installation
     print_message "Install custom MOTD (Message of the Day)?"
-    prompt_read -r -p "Install MOTD? (y/N): " INSTALL_MOTD
+    prompt_yes_no INSTALL_MOTD "Install MOTD? (y/N): " n
     INSTALL_MOTD=${INSTALL_MOTD:-n}
 
     # Ask for UFW ports (if UFW is enabled)
@@ -3213,7 +3373,7 @@ if [ "$INTERACTIVE" = true ]; then
         print_message "  Multiple ports:  8080,8443,9000"
         print_message "  Mixed:           8080/tcp,53/udp,3000"
         echo ""
-        prompt_read -r -p "Enter additional ports (comma-separated, press Enter to skip): " CUSTOM_PORTS
+        prompt_value CUSTOM_PORTS "Enter additional ports (comma-separated, press Enter to skip): " "" valid_ports "Use comma-separated ports 1-65535, optionally /tcp or /udp; Enter skips."
 
         if [ ! -z "$CUSTOM_PORTS" ]; then
             print_message "Custom ports will be configured: $CUSTOM_PORTS"
@@ -3233,7 +3393,7 @@ if [ "$INTERACTIVE" = true ]; then
     print_message "Detected RAM: ${TOTAL_RAM_MB} MB (~${TOTAL_RAM_GB} GB)"
     print_message "This will configure hybrid swap: swapfile (disk) + zram (compressed RAM)"
     print_message "Recommended for VPS with limited memory"
-    prompt_read -r -p "Configure Swap? (y/N): " CONFIGURE_SWAP
+    prompt_yes_no CONFIGURE_SWAP "Configure Swap? (y/N): " n
     CONFIGURE_SWAP=${CONFIGURE_SWAP:-n}
 
     if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
@@ -3242,7 +3402,7 @@ if [ "$INTERACTIVE" = true ]; then
         echo "  1) Auto-detect (choose template based on RAM size)"
         echo "  2) Interactive wizard (full control over settings)"
         echo ""
-        prompt_read -r -p "Select mode [1-2] (default: 1): " SWAP_MODE
+        prompt_value SWAP_MODE "Select mode [1-2] (default: 1): " "1" valid_choice "Choose 1 (automatic) or 2 (interactive)." 1 2
         SWAP_MODE=${SWAP_MODE:-1}
 
         if [ "$SWAP_MODE" = "2" ]; then
@@ -3558,7 +3718,7 @@ print_header "══════════════════════
 echo ""
 
 if [ "$INTERACTIVE" = true ]; then
-    prompt_read -r -p "Continue with these settings? (Y/n): " CONFIRM
+    prompt_yes_no CONFIRM "Continue with these settings? (Y/n): " y
     CONFIRM=${CONFIRM:-y}
     
     if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
@@ -5541,7 +5701,7 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     if command -v docker &> /dev/null; then
         DOCKER_VERSION=$(docker --version 2>/dev/null || echo "unknown")
         print_warning "Docker is already installed: $DOCKER_VERSION"
-        prompt_read -r -p "Do you want to reinstall Docker? (y/N): " REINSTALL_DOCKER
+        prompt_yes_no REINSTALL_DOCKER "Do you want to reinstall Docker? (y/N): " n
         REINSTALL_DOCKER=${REINSTALL_DOCKER:-n}
         
         if [ "$REINSTALL_DOCKER" != "y" ] && [ "$REINSTALL_DOCKER" != "Y" ]; then
@@ -6994,7 +7154,7 @@ if is_yes "$INSTALL_NFT_DOCKER_WATCH" && [ "${NFTABLES_OK:-false}" = true ]; the
     print_header "═══════════════════════════════════════════════════"
     echo ""
 
-    NFT_WATCH_INSTALLER_SHA256="04801def597885ad22a1f81b3a9d523496630e11a8a30fd0a8ad89438232a9c3"
+    NFT_WATCH_INSTALLER_SHA256="f8d21169ee5d294cbf6e225e1435bde6a9f125f621801434d14c68488fe5bd66"
     NFT_WATCH_INSTALLER_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/install-nft-docker-watch.sh"
     NFT_WATCH_LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     NFT_WATCH_INSTALLER="${NFT_WATCH_LOCAL_DIR}/install-nft-docker-watch.sh"

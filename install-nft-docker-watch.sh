@@ -352,8 +352,18 @@ show_menu() {
     echo "  0) Выход"
     echo ""
 
-    read -p "Выберите [0-5] (по умолчанию: 0): " choice
-    choice=${choice:-0}
+    local choice confirm
+    while true; do
+        if ! IFS= read -r -p "Выберите [0-5] (по умолчанию: 0): " choice; then
+            log_error "Ввод завершён; действие отменено"
+            return 1
+        fi
+        choice="${choice#"${choice%%[![:space:]]*}"}"
+        choice="${choice%"${choice##*[![:space:]]}"}"
+        choice=${choice:-0}
+        [[ "$choice" =~ ^[0-5]$ ]] && break
+        log_warn "Неверный ввод. Введите число от 0 до 5; Enter — выход. Повторите ввод."
+    done
 
     case "$choice" in
         1)
@@ -364,9 +374,20 @@ show_menu() {
             ;;
         3)
             echo ""
-            read -p "Вы уверены? Это удалит сервис и все файлы (y/N): " confirm
-            confirm=${confirm:-n}
-            if [[ "$confirm" = "y" || "$confirm" = "Y" ]]; then
+            while true; do
+                if ! IFS= read -r -p "Вы уверены? Это удалит сервис и все файлы (y/N): " confirm; then
+                    log_error "Ввод завершён; удаление отменено"
+                    return 1
+                fi
+                confirm="${confirm#"${confirm%%[![:space:]]*}"}"
+                confirm="${confirm%"${confirm##*[![:space:]]}"}"
+                case "${confirm,,}" in
+                    y|yes|да|д) confirm=y; break ;;
+                    ''|n|no|нет|н) confirm=n; break ;;
+                    *) log_warn "Неверный ввод. Введите y/yes или n/no (да/нет); Enter — отмена." ;;
+                esac
+            done
+            if [[ "$confirm" = y ]]; then
                 do_uninstall
             else
                 log_info "Удаление отменено"
