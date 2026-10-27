@@ -91,24 +91,35 @@ sudo bash /opt/nftables/logging/ge_nftables_ens3.sh
 # Relay: выберите свой интерфейс
 sudo bash /opt/nftables/logging/relay_nftables_net0.sh
 sudo bash /opt/nftables/logging/relay_nftables_eth0.sh
+# FR (3x-ui) net0, IPv4 и IPv6
+sudo bash /opt/nftables/logging/fr_nftables_net0.sh
 ```
 
 Общие `install-nft-logging.sh` и `nft-log-verdicts.py` должны находиться рядом
-с оболочками. Они создают восемь тематических журналов для PL, девять для NUXT
-и девять для Relay, сохраняют полные сообщения
+с оболочками. Они создают восемь тематических журналов для PL, девять для NUXT,
+девять для Relay и девять для FR (с отдельным `ipv6.log`), сохраняют полные сообщения
 без дублирования, переносят прежнюю историю в `legacy/`, а новые архивы ротации
 складывают в `archive/`. Подробности и команды чтения:
 `/opt/nftables/logging/LOGGING_RU.md` и раздел 12 мануала NFT Full.
 
-В установщике доступны только четыре конфигурации:
+В установщике доступны пять конфигураций:
 `pl_nftables_eth0.conf`, `ge_nftables_ens3.conf`,
-`relay_nftables_net0.conf` и `relay_nftables_eth0.conf`.
+`relay_nftables_net0.conf`, `relay_nftables_eth0.conf` и
+`fr_nftables_net0.conf`.
 Имя каждой оболочки журналирования совпадает с именем конфигурации без `.conf`.
 Логирование настраивается после успешного применения выбранных правил.
 
 Каталог `/opt/2026-10-22-acme` содержит файлы окна ACME для ручной установки.
 Восстановление контейнера только копирует их: службы, таймеры и автоматическое
 обновление не включаются. Наборы ACME в конфигурациях PL/NUXT изначально пусты.
+
+Профиль FR содержит правила IPv4 и IPv6, но установщик IPv6 не включает:
+базовый режим sysctl по-прежнему пишет `disable_ipv6`, включение IPv6
+выполняется вручную. Сопутствующие файлы FR только копируются и ставятся
+вручную: `/opt/nftables/fr_sysctl_98-fr-hardening.conf`
+(`/etc/sysctl.d/98-fr-hardening.conf`), `/opt/nftables/fr_acme/`
+(хуки certbot для окна TCP/80 и webroot nginx) и `/opt/nftables/fr_server/`
+(несекретный снимок настроек сервера FR; соответствие путей в `README_RU.txt`).
 
 Отдельные обновления файлов без применения firewall:
 

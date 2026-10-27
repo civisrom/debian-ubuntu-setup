@@ -40,7 +40,7 @@ class SetupFailures(unittest.TestCase):
             input=input, text=True, capture_output=True, timeout=30,
         )
 
-    def test_four_nft_profiles_match_standalone_fallback(self):
+    def test_five_nft_profiles_match_standalone_fallback(self):
         config = Path(__file__).resolve().parents[1] / "config/nftables-profiles.conf"
         report = """
 printf '%s|%s\\n' "$NFT_PROFILES_COUNT" "$NFT_DEFAULT_PROFILE"
@@ -58,10 +58,10 @@ done
         self.assertEqual(standalone.returncode, 0, standalone.stderr)
         self.assertEqual(external.stdout, standalone.stdout)
         rows = external.stdout.splitlines()
-        self.assertEqual(rows[0], '4|1')
+        self.assertEqual(rows[0], '5|1')
         self.assertEqual([row.split('|')[0] for row in rows[1:]],
-                         ['pl', 'ge', 'relay-net0', 'relay-eth0'])
-        self.assertEqual(len({row.split('|')[2] for row in rows[1:]}), 4)
+                         ['pl', 'ge', 'relay-net0', 'relay-eth0', 'fr'])
+        self.assertEqual(len({row.split('|')[2] for row in rows[1:]}), 5)
 
     def test_nft_logging_reads_new_rules_only_after_success(self):
         etc = self.root / "etc"

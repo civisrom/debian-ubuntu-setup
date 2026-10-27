@@ -189,7 +189,7 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="402b605f1bebe9751b86bb09df7480eeea907c9126ac3ad505bb3847aa57f950"
+    local OPT_VAULT_SHA256="6142d4c36b47ed4dedeecb1a9798fc591c45aa2aeb3442f2538548800ba5a6e0"
     local OPT_VAULT_HELPER_SHA256="3f7003022d2a068faec9d775e8f53972b1d94aefe40a0c0ab468d113db429e82"
     local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
     create_temp_dir opt-download || return 1
@@ -1656,7 +1656,7 @@ fi
 
 # Embedded fallback — used when script is downloaded standalone (via install.sh)
 if [ "$_NFT_PROFILES_LOADED" != true ]; then
-    NFT_PROFILES_COUNT=4
+    NFT_PROFILES_COUNT=5
     NFT_DEFAULT_PROFILE=1
 
     NFT_PROFILE_NAMES=(
@@ -1664,6 +1664,7 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [2]="ge"
         [3]="relay-net0"
         [4]="relay-eth0"
+        [5]="fr"
     )
 
     NFT_PROFILE_DESCRIPTIONS=(
@@ -1671,6 +1672,7 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [2]="GE — VPN-бот и видеобот, ens3, закрытое окно ACME"
         [3]="Relay — NAT и локальные службы, net0"
         [4]="Relay — NAT и локальные службы, eth0"
+        [5]="FR — 3x-ui, net0, IPv4 и IPv6, окно ACME"
     )
 
     NFT_PROFILE_CONFIGS=(
@@ -1678,6 +1680,7 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [2]="ge_nftables_ens3.conf"
         [3]="relay_nftables_net0.conf"
         [4]="relay_nftables_eth0.conf"
+        [5]="fr_nftables_net0.conf"
     )
 
     NFT_PROFILE_LOGSCRIPTS=(
@@ -1685,6 +1688,7 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [2]="ge_nftables_ens3.sh"
         [3]="relay_nftables_net0.sh"
         [4]="relay_nftables_eth0.sh"
+        [5]="fr_nftables_net0.sh"
     )
 fi
 unset _NFT_PROFILES_LOADED _SCRIPT_DIR
