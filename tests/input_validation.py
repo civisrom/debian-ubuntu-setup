@@ -164,7 +164,7 @@ NFT_PROFILE_DESCRIPTIONS=([1]=PL [2]=GE)
 NFT_PROFILE_CONFIGS=([1]=pl.conf [2]=ge.conf)
 NFT_PROFILE_LOGSCRIPTS=([1]=pl.sh [2]=ge.sh)
 '''+section+'\nprintf "RESULT:%s|%s|%s" "$INSTALL_NFTABLES_CONF" "$NFTABLES_PROFILE" "$INSTALL_NFTABLES_LOGGING"'
-        result = self.shell(body, '1\nyes\npl\n9\n1\nwat\nyes\n')
+        result = self.shell(body, '1\nyes\npl\n9\n1\nn\nwat\nyes\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('RESULT:y|pl|y', result.stdout)
         self.assertEqual(result.stderr.count('Invalid input.'), 4)
@@ -258,7 +258,7 @@ prompt_read() {
         case "$key" in
             ROOT_PASSWORD|ROOT_PASSWORD_CONFIRM|NEW_USER_PASSWORD|NEW_USER_PASSWORD_CONFIRM|OPT_VAULT_PASSWORD|UFW_CUSTOM_RULES_PASSWORD) reply='synthetic fixture' ;;
             NEW_USERNAME|TMUX_USER|GHX_USER|YUBIKEY_SSH_USER|SSH_ALLOW_USERS) reply=planned ;;
-            CONFIGURE_USER_SSH_KEY|ADD_NGINX_MYGUARD|REMOVE_NGINX) reply=n ;;
+            CONFIGURE_USER_SSH_KEY|ADD_NGINX_MYGUARD|REMOVE_NGINX|CONFIGURE_TELEGRAM_TUNNEL|CONFIGURE_NFT_IPV6) reply=n ;;
             CRONTAB_MODE) reply=3 ;;
             SSH_ROOT_LOGIN) reply=prohibit-password ;;
             SSH_PORT|UFW_SSH_PORT) reply=7384 ;;

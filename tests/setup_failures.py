@@ -42,7 +42,7 @@ class SetupFailures(unittest.TestCase):
             input=input, text=True, capture_output=True, timeout=30,
         )
 
-    def test_five_nft_profiles_match_standalone_fallback(self):
+    def test_nft_profiles_match_standalone_fallback(self):
         config = Path(__file__).resolve().parents[1] / "config/nftables-profiles.conf"
         report = """
 printf '%s|%s\\n' "$NFT_PROFILES_COUNT" "$NFT_DEFAULT_PROFILE"
@@ -60,17 +60,20 @@ done
         self.assertEqual(standalone.returncode, 0, standalone.stderr)
         self.assertEqual(external.stdout, standalone.stdout)
         rows = external.stdout.splitlines()
-        self.assertEqual(rows[0], '5|1')
+        self.assertEqual(rows[0], '9|1')
         self.assertEqual([row.split('|')[0] for row in rows[1:]],
-                         ['pl', 'ge', 'relay-net0', 'relay-eth0', 'fr'])
-        self.assertEqual(len({row.split('|')[2] for row in rows[1:]}), 5)
+                         ['pl', 'ge', 'relay-net0', 'relay-eth0', 'fr', 'noda-nuxt-youtube',
+                          'relayvpnbot-ens3', 'relayvpnbot-eth0', 'relayvpnbot-net0'])
+        self.assertEqual(len({row.split('|')[2] for row in rows[1:]}), 9)
 
     def test_nft_logging_reads_new_rules_only_after_success(self):
         etc = self.root / "etc"
         etc.mkdir()
         profiles = self.root / "opt/nftables"
         (profiles / "logging").mkdir(parents=True)
-        (profiles / "profile.conf").write_text("table inet replacement {}\n")
+        # Skipping IPv6 preparation must preserve both empty and populated sets.
+        profile_text = "table inet replacement {}\ntable ip6 filter { set node6_sources { type ipv6_addr; } set node6_public { type ipv6_addr; elements = { 2606:4700:4700::1111 }; } }\n"
+        (profiles / "profile.conf").write_text(profile_text)
         state = self.root / "runtime"
         observed = self.root / "logger-observed"
         logger = profiles / "logging/test.sh"
@@ -83,6 +86,7 @@ done
             body = body.replace(prefix, str(self.root) + prefix)
         stubs = """
 ENABLE_NFTABLES=y INSTALL_NFTABLES_CONF=y INSTALL_NFTABLES_LOGGING=y
+CONFIGURE_NFT_IPV6=n
 NFTABLES_CONF_FILE=profile.conf NFTABLES_PROFILE=test NFTABLES_LOG_SCRIPT=test.sh
 OPT_EXTRACTED_OK=true SYSTEM_SETUP_TEMP_DIRS=()
 TMPDIR=$1 state=$2 failure=$3
@@ -117,6 +121,7 @@ write_file_atomic() { cat > "$1" && chmod "$2" "$1"; }
                 if failure == "none":
                     self.assertEqual(observed.read_text(), "new\n")
                     self.assertEqual((etc / "nftables.conf").stat().st_mode & 0o777, 0o600)
+                    self.assertEqual((etc / "nftables.conf").read_text(), profile_text)
                 else:
                     self.assertFalse(observed.exists())
 
@@ -360,7 +365,7 @@ repository_has_release https://example.invalid/Release trixie
 
     def test_sysctl_skips_ipv6_keys_when_kernel_has_no_ipv6(self):
         guard = re.search(r"(?ms)^        if \[ -d /proc/sys/net/ipv6 \]; then\n.*?^        fi\n", SOURCE)[0]
-        body = guard.replace("/proc/sys/net/ipv6", '"$1"') + 'printf "%s" "$SYSCTL_MANAGED_BLOCK"'
+        body = function('is_yes') + guard.replace("/proc/sys/net/ipv6", '"$1"') + 'printf "%s" "$SYSCTL_MANAGED_BLOCK"'
         present = self.root / "ipv6"
         present.mkdir()
         result = self.shell(body, present)
@@ -371,6 +376,16 @@ repository_has_release https://example.invalid/Release trixie
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("disable_ipv6 =", result.stdout)
         self.assertIn("already disabled by the kernel", result.stdout)
+
+    def test_sysctl_keeps_ipv6_for_node_sets_and_tunnel(self):
+        guard = re.search(r"(?ms)^        if \[ -d /proc/sys/net/ipv6 \]; then\n.*?^        fi\n", SOURCE)[0]
+        body = function('is_yes') + guard.replace('/proc/sys/net/ipv6', '"$1"') + 'printf "%s" "$SYSCTL_MANAGED_BLOCK"'
+        present = self.root/'ipv6'
+        present.mkdir()
+        for selection in ['CONFIGURE_NFT_IPV6=y', 'CONFIGURE_TELEGRAM_TUNNEL=y TELEGRAM_IPV6_FALLBACK=y']:
+            result = self.shell(selection+'\n'+body, present)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn('disable_ipv6 = 1', result.stdout)
 
     def test_pinned_commit_is_fetched_from_shallow_checkout(self):
         # This creates only disposable local repositories, with an explicit

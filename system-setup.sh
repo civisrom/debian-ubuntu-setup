@@ -238,6 +238,34 @@ valid_dns_ip() {
     if [ "$compressed" = true ]; then [ "$count" -lt 8 ]; else [ "$count" -eq 8 ]; fi
 }
 
+valid_nft_ipv6() {
+    [[ "$1" == *:* && "$1" != *%* ]] && valid_dns_ip "$1"
+}
+
+valid_nft_ipv6_list() {
+    local address
+    local -a addresses=()
+    [[ ! "$1" =~ [[:cntrl:]] ]] || return 1
+    read -r -a addresses <<< "$1"
+    for address in "${addresses[@]}"; do valid_nft_ipv6 "$address" || return 1; done
+}
+
+valid_nft_interface() {
+    [[ "$1" =~ ^[a-zA-Z0-9_.:-]{1,15}$ && -d "/sys/class/net/$1" ]]
+}
+
+valid_telegram_host() {
+    [[ "$1" != *%* ]] && { valid_dns_ip "$1" || valid_ntp_host "$1"; }
+}
+
+valid_telegram_user() {
+    [[ "$1" =~ ^[a-z][a-z0-9_-]{0,30}$ && "$1" != root ]]
+}
+
+valid_telegram_key_file() {
+    [[ "$1" == /*.pub && -f "$1" && ! -L "$1" && ! "$1" =~ [[:cntrl:]] ]]
+}
+
 valid_ntp_host() {
     local host="${1%.}" label
     local -a labels=()
@@ -1876,6 +1904,10 @@ configure_time_sync() {
     fi
 }
 
+CONFIGURE_TELEGRAM_TUNNEL="n"
+TELEGRAM_TUNNEL_ROLE=""
+CONFIGURE_NFT_IPV6="n"
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root"
@@ -1951,7 +1983,7 @@ fi
 
 # Embedded fallback — used when script is downloaded standalone (via install.sh)
 if [ "$_NFT_PROFILES_LOADED" != true ]; then
-    NFT_PROFILES_COUNT=5
+    NFT_PROFILES_COUNT=9
     NFT_DEFAULT_PROFILE=1
 
     NFT_PROFILE_NAMES=(
@@ -1960,6 +1992,10 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [3]="relay-net0"
         [4]="relay-eth0"
         [5]="fr"
+        [6]="noda-nuxt-youtube"
+        [7]="relayvpnbot-ens3"
+        [8]="relayvpnbot-eth0"
+        [9]="relayvpnbot-net0"
     )
 
     NFT_PROFILE_DESCRIPTIONS=(
@@ -1968,6 +2004,10 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [3]="Relay — NAT и локальные службы, net0"
         [4]="Relay — NAT и локальные службы, eth0"
         [5]="FR — 3x-ui, net0, IPv4 и IPv6, окно ACME"
+        [6]="Управляемая нода — ens3, Xray, IPv4/IPv6 и окно ACME"
+        [7]="RelayVPNBot — реле и VPN-бот, ens3"
+        [8]="RelayVPNBot — реле и VPN-бот, eth0"
+        [9]="RelayVPNBot — реле и VPN-бот, net0"
     )
 
     NFT_PROFILE_CONFIGS=(
@@ -1976,6 +2016,10 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [3]="relay_nftables_net0.conf"
         [4]="relay_nftables_eth0.conf"
         [5]="fr_nftables_net0.conf"
+        [6]="noda-nuxt-youtube.conf"
+        [7]="RelayVPNBot/RelayVPNBot_ens3.conf"
+        [8]="RelayVPNBot/RelayVPNBot_eth0.conf"
+        [9]="RelayVPNBot/RelayVPNBot_net0.conf"
     )
 
     NFT_PROFILE_LOGSCRIPTS=(
@@ -1984,6 +2028,10 @@ if [ "$_NFT_PROFILES_LOADED" != true ]; then
         [3]="relay_nftables_net0.sh"
         [4]="relay_nftables_eth0.sh"
         [5]="fr_nftables_net0.sh"
+        [6]="noda-nuxt-youtube.sh"
+        [7]="RelayVPNBot_ens3.sh"
+        [8]="RelayVPNBot_eth0.sh"
+        [9]="RelayVPNBot_net0.sh"
     )
 fi
 unset _NFT_PROFILES_LOADED _SCRIPT_DIR
@@ -2585,6 +2633,30 @@ if [ "$INTERACTIVE" = true ]; then
     fi
 
     echo ""
+    print_header "   Telegram over restricted SSH"
+    prompt_yes_no CONFIGURE_TELEGRAM_TUNNEL "Configure a Telegram SSH tunnel? (y/N): " n
+    if is_yes "$CONFIGURE_TELEGRAM_TUNNEL"; then
+        print_message "1: node, 2: relay server, 3: prepare node public key only"
+        prompt_value TELEGRAM_TUNNEL_ROLE "Role (1/2/3): " 1 valid_choice "Choose 1, 2 or 3." 1 2 3
+        if [ "$TELEGRAM_TUNNEL_ROLE" = 1 ]; then
+            prompt_value TELEGRAM_RELAY_HOST "Relay IP or hostname: " "" valid_telegram_host "Use an IP or hostname without a scheme, port or IPv6 scope."
+            prompt_value TELEGRAM_RELAY_PORT "Relay SSH port: " 22 valid_uint "Use a port from 1 to 65535." 1 65535
+            prompt_value TELEGRAM_RELAY_USER "Dedicated relay account: " vpb-tg-relay valid_telegram_user "Use a dedicated lowercase non-root account."
+            print_message "Obtain the relay's public host key through a trusted channel; do not use an unverified ssh-keyscan result."
+            prompt_value TELEGRAM_HOST_KEY_FILE "Relay public host key (.pub file): " "" valid_telegram_key_file "Use an existing absolute .pub file path, not a private key or symlink."
+            prompt_yes_no TELEGRAM_IPV6_FALLBACK "Enable local IPv6 fallback? (y/N): " n
+            TELEGRAM_LOCAL_SSH_PORT="${SSH_PORT:-22}"
+            if is_yes "$TELEGRAM_IPV6_FALLBACK"; then
+                prompt_value TELEGRAM_LOCAL_SSH_PORT "Local SSH daemon port after this setup: " "$TELEGRAM_LOCAL_SSH_PORT" valid_uint "Use the local SSH port, 1..65535." 1 65535
+            fi
+        elif [ "$TELEGRAM_TUNNEL_ROLE" = 2 ]; then
+            prompt_value TELEGRAM_NODE_SOURCE "Public source IP of the node: " "" valid_dns_ip "Use one IPv4 or IPv6 address, without a subnet."
+            prompt_value TELEGRAM_RELAY_USER "Dedicated relay account: " vpb-tg-relay valid_telegram_user "Use a dedicated lowercase non-root account."
+            prompt_value TELEGRAM_NODE_KEY_FILE "Node public key (.pub file): " "" valid_telegram_key_file "Use an existing absolute .pub file path, not a private key or symlink."
+        fi
+    fi
+
+    echo ""
     print_header "───────────────────────────────────────────────"
     print_header "   YubiKey / FIDO2 SSH Authentication"
     print_header "───────────────────────────────────────────────"
@@ -2890,6 +2962,20 @@ if [ "$INTERACTIVE" = true ]; then
             NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
             NFTABLES_CONF_FILE="${NFT_PROFILE_CONFIGS[$NFTABLES_PROFILE_NUM]}"
             NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]:-}"
+            prompt_yes_no CONFIGURE_NFT_IPV6 "Configure the IPv6 node sets in this firewall profile? (y/N): " n
+            if is_yes "$CONFIGURE_NFT_IPV6"; then
+                print_message "The public IPv6 must already be assigned to this server. An empty trusted source list keeps IPv6 ingress closed."
+                print_message "node6_sources: public IPv6 addresses of trusted source servers; node6_public: this node's public IPv6."
+                print_message "Full bot profiles use egress6_snat: fd42:7662:6::9 -> public IPv6; minimal nodes need no container SNAT. ipv6_routers: trusted link-local RA routers."
+                print_message "egress6_reserved and the existing firewall policies are preserved. Provider routing is not changed."
+                prompt_value NFT_IPV6_INTERFACE "WAN interface: " "" valid_nft_interface "Use an existing interface name."
+                prompt_value NFT_PUBLIC_IPV6 "Stable public IPv6 of this server: " "" valid_nft_ipv6 "Use one IPv6 address without a prefix or scope."
+                prompt_value NFT_TRUSTED_IPV6 "Trusted source server IPv6 addresses (space-separated; Enter closes ingress): " "" valid_nft_ipv6_list "Use IPv6 addresses separated by spaces, not networks."
+                prompt_value NFT_ROUTER_IPV6 "Trusted link-local IPv6 router for RA (Enter for static routing): " "" valid_nft_ipv6_list "Use link-local IPv6 addresses without a scope, or Enter."
+            else
+                print_message "IPv6 setup skipped: installing the selected profile with its existing sets and addresses unchanged."
+            fi
+
             print_message "Selected: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
 
             # Ask about logging script (only if profile has one)
@@ -3429,6 +3515,8 @@ else
     CONFIGURE_CRONTAB="n"
     CRONTAB_MODE="3"
     CRONTAB_TASKS=""
+    CONFIGURE_TELEGRAM_TUNNEL="n"
+    TELEGRAM_TUNNEL_ROLE=""
     CONFIGURE_SSH="n"
     SSH_PORT="22"
     SSH_ALLOW_USERS=""
@@ -3885,6 +3973,10 @@ fi
 # Add zsh if requested
 if [ "$INSTALL_ZSH" = "y" ] || [ "$INSTALL_ZSH" = "Y" ]; then
     COMMON_PACKAGES+=(zsh)
+fi
+
+if is_yes "${CONFIGURE_TELEGRAM_TUNNEL:-n}"; then
+    COMMON_PACKAGES+=(openssh-client openssh-server haproxy nftables curl)
 fi
 
 # Add OpenSSH server/client when the script will manage SSH settings
@@ -5448,6 +5540,41 @@ else
     print_message "Skipping SSH configuration (not requested)"
 fi
 
+# Configure dedicated forwarding accounts only after global SSH settings.
+if is_yes "${CONFIGURE_TELEGRAM_TUNNEL:-n}"; then
+    TELEGRAM_HELPER=/usr/local/sbin/telegram-ssh-tunnel
+    TELEGRAM_HELPER_SHA256="df9a1d2d181fb454cd50bb9295590325806a9a2134217d3fdee6803313b5bda1"
+    TELEGRAM_TUNNEL_OK=true
+    if install_verified_repo_asset "config/telegram-ssh-tunnel.py" "$TELEGRAM_HELPER" "$TELEGRAM_HELPER_SHA256" 0755; then
+        TELEGRAM_ARGS=()
+        case "$TELEGRAM_TUNNEL_ROLE" in
+            1)
+                TELEGRAM_ARGS=(node --relay-host "$TELEGRAM_RELAY_HOST" --relay-port "$TELEGRAM_RELAY_PORT" --relay-user "$TELEGRAM_RELAY_USER" --host-key-file "$TELEGRAM_HOST_KEY_FILE")
+                if is_yes "${TELEGRAM_IPV6_FALLBACK:-n}"; then
+                    if is_yes "${DISABLE_IPV6_GRUB:-n}" || is_yes "${DISABLE_IPV6_NETPLAN:-n}" || is_yes "${COMMENT_IPV6_INTERFACES:-n}"; then
+                        print_error "IPv6 fallback conflicts with the selected IPv6 disable settings"
+                        TELEGRAM_TUNNEL_OK=false
+                    else
+                        TELEGRAM_ARGS+=(--ipv6-fallback --local-ssh-port "$TELEGRAM_LOCAL_SSH_PORT")
+                    fi
+                fi
+                ;;
+            2) TELEGRAM_ARGS=(relay --source "$TELEGRAM_NODE_SOURCE" --user "$TELEGRAM_RELAY_USER" --public-key-file "$TELEGRAM_NODE_KEY_FILE") ;;
+            3) TELEGRAM_ARGS=(key) ;;
+            *) TELEGRAM_TUNNEL_OK=false ;;
+        esac
+        if [ "$TELEGRAM_TUNNEL_OK" = true ] && python3 "$TELEGRAM_HELPER" "${TELEGRAM_ARGS[@]}"; then
+            print_success "Telegram SSH configuration installed; no bot token was needed"
+            print_message "Check both endpoints: sudo telegram-ssh-tunnel check"
+        else
+            print_error "Telegram SSH setup did not complete; previous global SSH settings were preserved"
+            CONFIGURE_TELEGRAM_TUNNEL=failed
+        fi
+    else
+        CONFIGURE_TELEGRAM_TUNNEL=failed
+    fi
+fi
+
 # ============================================
 # CONFIGURE UFW
 # ============================================
@@ -6946,6 +7073,24 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             print_warning "Skipping config installation — using default nftables.conf"
             INSTALL_NFTABLES_CONF="skipped"
         else
+            # Prepare a private candidate; never modify the source from the vault.
+            if is_yes "${CONFIGURE_NFT_IPV6:-n}"; then
+                NFT_IPV6_HELPER=/usr/local/sbin/nft-ipv6-profile
+                NFT_IPV6_HELPER_SHA256="caf988f324e14f0a0e9136c96f2cafec6887c01775c08ab94fe03e5a259c54b9"
+                NFT_IPV6_PREPARED=$(mktemp /run/nft-ipv6-profile.XXXXXX)
+                SYSTEM_SETUP_TEMP_FILES+=("$NFT_IPV6_PREPARED")
+                read -r -a NFT_IPV6_SOURCES <<< "$NFT_TRUSTED_IPV6"
+                read -r -a NFT_IPV6_ROUTERS <<< "$NFT_ROUTER_IPV6"
+                if is_yes "${DISABLE_IPV6_GRUB:-n}" || is_yes "${DISABLE_IPV6_NETPLAN:-n}" || is_yes "${COMMENT_IPV6_INTERFACES:-n}" ||
+                   ! install_verified_repo_asset "config/nft-ipv6-profile.py" "$NFT_IPV6_HELPER" "$NFT_IPV6_HELPER_SHA256" 0755 ||
+                   ! python3 "$NFT_IPV6_HELPER" "$NFTABLES_SRC" "$NFT_IPV6_PREPARED" --public-ipv6 "$NFT_PUBLIC_IPV6" --interface "$NFT_IPV6_INTERFACE" --trusted-ipv6 "${NFT_IPV6_SOURCES[@]}" --router-ipv6 "${NFT_IPV6_ROUTERS[@]}"; then
+                    print_error "IPv6 firewall preparation failed; current firewall is preserved"
+                    NFTABLES_OK=false
+                else
+                    NFTABLES_SRC="$NFT_IPV6_PREPARED"
+                fi
+            fi
+
             # Backup existing nftables.conf
             if [ -f "$NFTABLES_DST" ]; then
                 NFTABLES_CONFIG_BACKUP="${NFTABLES_DST}.backup.$(date +%Y%m%d-%H%M%S)~"
@@ -6957,7 +7102,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             # Mode 0755: the config carries a `#!/usr/sbin/nft -f` shebang and
             # is expected to be executable so it can be invoked directly.
             NFT_CONFIG_CHANGED=true
-            if ! write_file_atomic "$NFTABLES_DST" 0600 root:root < "$NFTABLES_SRC"; then
+            if [ "$NFTABLES_OK" != true ] || ! write_file_atomic "$NFTABLES_DST" 0600 root:root < "$NFTABLES_SRC"; then
                 print_error "CRITICAL: Atomic nftables config installation failed"
                 INSTALL_NFTABLES_CONF="skipped"
                 NFTABLES_OK=false
@@ -7120,6 +7265,22 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     if [ "$NFT_LOCK_HELD" = true ]; then
         flock -u 8 || true
         exec 8>&-
+    fi
+
+    # This helper shares the nft lock and only adds missing empty IPv6 sets.
+    # Existing elements, rule chains, NAT and selected addresses are retained.
+    if [ "$NFTABLES_OK" = true ]; then
+        NFT_NODE_SETS_HELPER=/usr/local/sbin/nft-node-sets
+        NFT_NODE_SETS_SHA256="a19da2620b2037f1c2b1e94487b3ec6e40dac13b3bae8e37be7b66fb02d2cdc3"
+        if ! install_verified_repo_asset "config/nft-node-sets.py" "$NFT_NODE_SETS_HELPER" "$NFT_NODE_SETS_SHA256" 0755 ||
+           ! python3 "$NFT_NODE_SETS_HELPER"; then
+            print_warning "IPv6 node sets were not initialized; existing firewall remains active"
+        fi
+        if [ -f /root/vpnbot/scripts/setup_acme.py ]; then
+            if ! python3 /root/vpnbot/scripts/setup_acme.py ensure --bot-dir /root/vpnbot --wait-lock 30; then
+                print_warning "VPNBot ACME setup needs attention; run scripts/setup_acme.py check"
+            fi
+        fi
     fi
 
     # --- Summary ---
@@ -7502,6 +7663,9 @@ if [ "$CONFIGURE_SYSCTL" = "y" ] || [ "$CONFIGURE_SYSCTL" = "Y" ]; then
         # Kernels booted with ipv6.disable=1 have no net.ipv6 keys at all;
         # writing them would make every "sysctl -p" (and the boot service) fail.
         if [ -d /proc/sys/net/ipv6 ]; then
+            if is_yes "${CONFIGURE_NFT_IPV6:-n}" || { is_yes "${CONFIGURE_TELEGRAM_TUNNEL:-n}" && is_yes "${TELEGRAM_IPV6_FALLBACK:-n}"; }; then
+                print_message "Keeping IPv6 enabled for the selected node sets or Telegram fallback"
+            else
             SYSCTL_MANAGED_BLOCK="${SYSCTL_MANAGED_BLOCK}
 
 # IPv6 Disable
@@ -7509,6 +7673,7 @@ net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 "
+            fi
         else
             print_message "IPv6 is already disabled by the kernel; skipping disable_ipv6 keys"
         fi

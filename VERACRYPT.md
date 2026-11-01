@@ -289,3 +289,18 @@ sudo tar -xzpf /var/backups/system-setup/opt-before-ИМЯ/previous.tar.gz -C /o
 
 Эта команда не удаляет новые файлы: при полном ручном откате отдельно проверьте
 `new-paths.txt` и удалите только соответствующие пути. Не удаляйте весь `/opt`.
+
+
+### Дополнительные профили ноды и RelayVPNBot
+
+Меню установщика поддерживает `/opt/nftables/noda-nuxt-youtube.conf`,
+`RelayVPNBot/RelayVPNBot_ens3.conf`, `RelayVPNBot/RelayVPNBot_eth0.conf`,
+`RelayVPNBot/RelayVPNBot_net0.conf`. Добавьте эти конфиги в пользовательский
+архив вместе с соответствующими `logging/noda-nuxt-youtube.sh` и
+`logging/RelayVPNBot_*.sh`, общим `logging/install-nft-logging.sh` и его
+зависимостями. Полный мануал лежит в `/opt/nftables/SSH_TELEGRAM_NODE_RU.md`.
+
+Обновление меню не перепаковывает существующий VeraCrypt-контейнер. После
+самостоятельного обновления архива обновите его контрольную сумму штатным
+способом. Ключи SSH-туннеля и токен Telegram в этот набор исходных профилей
+добавлять не нужно.
