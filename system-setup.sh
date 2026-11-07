@@ -132,6 +132,42 @@ valid_uint() {
     [[ "$1" =~ ^[0-9]{1,9}$ ]] && (( 10#$1 >= $2 && 10#$1 <= $3 ))
 }
 
+valid_port_list() {
+    local port
+    local -A seen=()
+    local -a ports=()
+    [[ ! "${1//$'\t'/ }" =~ [[:cntrl:]] ]] || return 1
+    read -r -a ports <<< "$1"
+    for port in "${ports[@]}"; do
+        valid_uint "$port" 1 65535 || return 1
+        port=$((10#$port))
+        [ -z "${seen[$port]:-}" ] || return 1
+        seen[$port]=1
+    done
+}
+
+valid_ssh_extra_ports() {
+    local port
+    valid_port_list "$1" || return 1
+    for port in $1; do [ "$((10#$port))" != "$((10#$2))" ] || return 1; done
+}
+
+# Print a profile with its single "define SERVER_SSH_PORTS = { ... }" replaced.
+set_nft_server_ssh_ports() {
+    local profile="$1" port_list="$2"
+    [ "$(grep -cE '^[[:space:]]*define[[:space:]]+SERVER_SSH_PORTS[[:space:]]*=' "$profile")" = 1 ] || return 1
+    awk -v ports="${port_list// /, }" '
+        /^[[:space:]]*define[[:space:]]+SERVER_SSH_PORTS[[:space:]]*=/ { print "define SERVER_SSH_PORTS = { " ports " }"; next }
+        { print }
+    ' "$profile"
+}
+
+normalize_ssh_ports() {
+    local port result=""
+    for port in $1; do result+="${result:+ }$((10#$port))"; done
+    printf '%s' "$result"
+}
+
 valid_username() {
     [[ "$1" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]] && [ "${#1}" -le 32 ]
 }
@@ -512,7 +548,7 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="54f25586e7bd7d78bee20b455c1e9e0ec839318712753f1c92055a7ddd457476"
+    local OPT_VAULT_SHA256="97f7b56ee2eed771f514a87d722512c04809f72dfea8a437f0752c208238ee74"
     local OPT_VAULT_HELPER_SHA256="3f7003022d2a068faec9d775e8f53972b1d94aefe40a0c0ab468d113db429e82"
     local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
     create_temp_dir opt-download || return 1
@@ -589,9 +625,17 @@ pin_user_git_checkout() {
 # otherwise silently override the choices shown in the final summary.
 verify_sshd_parameters() {
     local managed_file="$1" effective parameter expected actual
+    local -A expected_values=()
+    local -a parameters=()
     effective=$(sshd -T) || return 1
+    # Repeated directives (several Port lines) accumulate: compare all values.
     while read -r parameter expected; do
         [ -n "$parameter" ] && [[ "$parameter" != \#* ]] || continue
+        [ -n "${expected_values[${parameter,,}]+set}" ] || parameters+=("$parameter")
+        expected_values[${parameter,,}]+="${expected_values[${parameter,,}]:+ }$expected"
+    done < "$managed_file"
+    for parameter in "${parameters[@]}"; do
+        expected=${expected_values[${parameter,,}]}
         actual=$(awk -v key="${parameter,,}" '$1 == key {$1=""; sub(/^ /, ""); print}' <<< "$effective")
         # sshd may output an accumulating directive on several lines.
         actual=$(xargs <<< "$actual")
@@ -604,7 +648,7 @@ verify_sshd_parameters() {
             print_error "Effective SSH $parameter is '$actual'; requested '$expected'. Resolve conflicting drop-ins or Match settings"
             return 1
         fi
-    done < "$managed_file"
+    done
 }
 
 remove_sshd_accumulating_parameters() {
@@ -1245,6 +1289,18 @@ ssh_port_is_listening() {
     fi
 
     return 1
+}
+
+# The same listener restart starts every Port directive; verify the extra ones.
+ssh_extra_ports_listening() {
+    local port
+    for port in ${SSH_EXTRA_PORTS:-}; do
+        if ! ssh_port_is_listening "$port"; then
+            print_warning "SSH is not listening on additional port $port"
+            return 1
+        fi
+        print_success "SSH is listening on additional port $port"
+    done
 }
 
 restart_ssh_daemon_service() {
@@ -1907,6 +1963,7 @@ configure_time_sync() {
 CONFIGURE_TELEGRAM_TUNNEL="n"
 TELEGRAM_TUNNEL_ROLE=""
 CONFIGURE_NFT_IPV6="n"
+NFT_SERVER_SSH_PORTS=""
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -2528,6 +2585,11 @@ if [ "$INTERACTIVE" = true ]; then
             fi
         done
 
+        # Extra Port directives, e.g. node management plus a separate admin SSH port.
+        print_message "Additional SSH ports keep sshd listening on more than one port (firewall decides who may connect)"
+        prompt_value SSH_EXTRA_PORTS "Additional SSH ports, space-separated (empty to skip): " "" valid_ssh_extra_ports "Enter distinct ports 1-65535 separated by spaces, not equal to $SSH_PORT." "$SSH_PORT"
+        SSH_EXTRA_PORTS=$(normalize_ssh_ports "$SSH_EXTRA_PORTS")
+
         echo ""
         print_message "Enter usernames for AllowUsers (space-separated, leave empty to skip)"
         print_message "Example: user1 user2 user3"
@@ -2624,6 +2686,7 @@ if [ "$INTERACTIVE" = true ]; then
         fi
     else
         SSH_PORT="22"
+        SSH_EXTRA_PORTS=""
         SSH_ALLOW_USERS=""
         SSH_PUBKEY_AUTH=""
         SSH_PASSWORD_AUTH=""
@@ -2962,6 +3025,10 @@ if [ "$INTERACTIVE" = true ]; then
             NFTABLES_PROFILE="${NFT_PROFILE_NAMES[$NFTABLES_PROFILE_NUM]}"
             NFTABLES_CONF_FILE="${NFT_PROFILE_CONFIGS[$NFTABLES_PROFILE_NUM]}"
             NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]:-}"
+            # Node profiles keep server-management SSH ports in a variable.
+            print_message "SERVER_SSH_PORTS: server-management SSH ports for profiles that define this variable (sshd ports: ${SSH_PORT:-22}${SSH_EXTRA_PORTS:+ $SSH_EXTRA_PORTS})"
+            prompt_value NFT_SERVER_SSH_PORTS "SERVER_SSH_PORTS, space-separated (Enter keeps the profile value): " "" valid_port_list "Enter distinct ports 1-65535 separated by spaces, or Enter."
+            NFT_SERVER_SSH_PORTS=$(normalize_ssh_ports "$NFT_SERVER_SSH_PORTS")
             prompt_yes_no CONFIGURE_NFT_IPV6 "Configure the IPv6 node sets in this firewall profile? (y/N): " n
             if is_yes "$CONFIGURE_NFT_IPV6"; then
                 print_message "The public IPv6 must already be assigned to this server. An empty trusted source list keeps IPv6 ingress closed."
@@ -2991,6 +3058,7 @@ if [ "$INTERACTIVE" = true ]; then
             fi
         else
             NFTABLES_PROFILE=""
+            NFT_SERVER_SSH_PORTS=""
             INSTALL_NFTABLES_LOGGING="n"
         fi
     else
@@ -3519,6 +3587,7 @@ else
     TELEGRAM_TUNNEL_ROLE=""
     CONFIGURE_SSH="n"
     SSH_PORT="22"
+    SSH_EXTRA_PORTS=""
     SSH_ALLOW_USERS=""
     SSH_PUBKEY_AUTH=""
     SSH_PASSWORD_AUTH=""
@@ -3644,7 +3713,7 @@ else
     print_message "  gh + ghx: NO"
 fi
 print_message "  Crontab: $([ "$CONFIGURE_CRONTAB" = "y" ] || [ "$CONFIGURE_CRONTAB" = "Y" ] && echo "YES" || echo "NO")"
-print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT, Users: ${SSH_ALLOW_USERS:-none})" || echo "NO")"
+print_message "  SSH Configuration: $([ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ] && echo "YES (Port: $SSH_PORT${SSH_EXTRA_PORTS:+ $SSH_EXTRA_PORTS}, Users: ${SSH_ALLOW_USERS:-none})" || echo "NO")"
 if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
     if [ ! -z "$SSH_PUBKEY_AUTH" ]; then
         print_message "    - PubkeyAuthentication: $SSH_PUBKEY_AUTH"
@@ -3679,6 +3748,7 @@ print_message "  nftables: $([ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES
 if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     if [ "$INSTALL_NFTABLES_CONF" = "y" ] || [ "$INSTALL_NFTABLES_CONF" = "Y" ]; then
         print_message "    - Config profile: ${NFTABLES_PROFILE} (${NFTABLES_CONF_FILE})"
+        [ -z "$NFT_SERVER_SSH_PORTS" ] || print_message "    - SERVER_SSH_PORTS: ${NFT_SERVER_SSH_PORTS}"
         if [ -n "$NFTABLES_LOG_SCRIPT" ]; then
             print_message "    - Logging script: $([ "$INSTALL_NFTABLES_LOGGING" = "y" ] || [ "$INSTALL_NFTABLES_LOGGING" = "Y" ] && echo "YES (${NFTABLES_LOG_SCRIPT})" || echo "NO")"
         else
@@ -5442,6 +5512,9 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
             # systemctl daemon-reload runs. restart_ssh_listener verifies that
             # ssh.socket or ssh.service is actually listening afterward.
             append_ssh_parameter "Port" "$SSH_PORT"
+            for SSH_EXTRA_PORT in ${SSH_EXTRA_PORTS:-}; do
+                append_ssh_parameter "Port" "$SSH_EXTRA_PORT"
+            done
         fi
 
         # Configure PubkeyAuthentication
@@ -5498,7 +5571,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
             # Restart the listener and verify the selected port. On Ubuntu
             # 24.04/26.04, ssh.socket may be the unit that owns the port.
             print_message "Restarting SSH listener..."
-            if ! restart_ssh_listener "$SSH_PORT"; then
+            if ! restart_ssh_listener "$SSH_PORT" || ! ssh_extra_ports_listening; then
                 print_error "New SSH listener failed verification; rolling back SSH configuration"
                 if [ -n "$SSHD_DROPIN_BACKUP" ]; then
                     rm -f -- "$SSHD_DROPIN"
@@ -5515,6 +5588,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
                     print_error "CRITICAL: SSH rollback failed; keep the current session open and use console access"
                 fi
                 SSH_PORT="$ORIGINAL_SSH_PORT"
+                SSH_EXTRA_PORTS=""
                 CONFIGURE_SSH="failed"
             fi
         else
@@ -5533,6 +5607,7 @@ if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
             [ -n "$SSHD_LEGACY_BACKUP" ] && cp -a -- "$SSHD_LEGACY_BACKUP" "$SSHD_LEGACY_DROPIN"
             restore_ssh_activation_state
             SSH_PORT="$ORIGINAL_SSH_PORT"
+            SSH_EXTRA_PORTS=""
             CONFIGURE_SSH="failed"
         fi
     fi
@@ -7088,6 +7163,17 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
                     NFTABLES_OK=false
                 else
                     NFTABLES_SRC="$NFT_IPV6_PREPARED"
+                fi
+            fi
+            if [ "$NFTABLES_OK" = true ] && [ -n "${NFT_SERVER_SSH_PORTS:-}" ]; then
+                NFT_SSH_PREPARED=$(mktemp /run/nft-ssh-profile.XXXXXX)
+                SYSTEM_SETUP_TEMP_FILES+=("$NFT_SSH_PREPARED")
+                if set_nft_server_ssh_ports "$NFTABLES_SRC" "$NFT_SERVER_SSH_PORTS" > "$NFT_SSH_PREPARED"; then
+                    NFTABLES_SRC="$NFT_SSH_PREPARED"
+                    print_message "SERVER_SSH_PORTS set to { ${NFT_SERVER_SSH_PORTS// /, } }"
+                else
+                    print_error "Profile ${NFTABLES_CONF_FILE} has no single 'define SERVER_SSH_PORTS'; current firewall is preserved"
+                    NFTABLES_OK=false
                 fi
             fi
 

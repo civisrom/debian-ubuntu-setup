@@ -445,6 +445,45 @@ verify_sshd_parameters "$1"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Effective SSH PasswordAuthentication", result.stderr)
 
+    def test_ssh_extra_ports_validated_and_all_ports_verified(self):
+        body = function("valid_uint") + function("valid_port_list") + function("valid_ssh_extra_ports") + function("normalize_ssh_ports") + """
+for value in '' '2201' '2201 2202' '22' '2201 2201' '02201 2201' '0' '70000' 'abc' '2201,2202'; do
+    if valid_ssh_extra_ports "$value" 22; then echo "OK:$value"; else echo "BAD:$value"; fi
+done
+printf 'NORM:%s\n' "$(normalize_ssh_ports '02201 022')"
+"""
+        result = self.shell(body)
+        for value in ("", "2201", "2201 2202"):
+            self.assertIn(f"OK:{value}\n", result.stdout, result.stdout + result.stderr)
+        for value in ("22", "2201 2201", "02201 2201", "0", "70000", "abc", "2201,2202"):
+            self.assertIn(f"BAD:{value}\n", result.stdout)
+        self.assertIn("NORM:2201 22\n", result.stdout)
+
+        managed = self.root / "managed.conf"
+        managed.write_text("# Managed by system-setup.sh\nPort 22\nPort 2201\nPasswordAuthentication no\n")
+        body = function("verify_sshd_parameters") + """
+sshd() { printf "$fixture"; }
+fixture=$2
+verify_sshd_parameters "$1"
+"""
+        ok = self.shell(body, managed, "port 22\nport 2201\npasswordauthentication no\n")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        missing = self.shell(body, managed, "port 22\npasswordauthentication no\n")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("Effective SSH Port is '22'; requested '22 2201'", missing.stderr)
+
+    def test_nft_server_ssh_ports_replace_single_define(self):
+        profile = self.root / "profile.nft"
+        body = function("set_nft_server_ssh_ports") + 'set_nft_server_ssh_ports "$1" "$2"'
+        profile.write_text("define NODE_SSH_PORTS = { 22 }\n  define SERVER_SSH_PORTS = { 2201 }\nflush ruleset\n")
+        result = self.shell(body, profile, "2201 2202")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "define NODE_SSH_PORTS = { 22 }\ndefine SERVER_SSH_PORTS = { 2201, 2202 }\nflush ruleset\n")
+        for text in ("define NODE_SSH_PORTS = { 22 }\n", "define SERVER_SSH_PORTS = { 1 }\ndefine SERVER_SSH_PORTS = { 2 }\n",
+                     "# define SERVER_SSH_PORTS = { 2201 }\n"):
+            profile.write_text(text)
+            self.assertNotEqual(self.shell(body, profile, "2201").returncode, 0, text)
+
     def test_prompt_eof_aborts_and_preserves_literal_input(self):
         body = function("prompt_read") + 'prompt_read -r value\nprintf "%s" "$value"'
         self.assertNotEqual(self.shell(body, input="").returncode, 0)
@@ -505,32 +544,34 @@ restore_live_nft_ruleset "$1" "$2"
         section = section.split("# CONFIGURE UFW\n", 1)[0]
         helpers = "".join(function(name) for name in (
             "ensure_sshd_include_first", "remove_sshd_accumulating_parameters",
-            "verify_sshd_parameters", "warn_sshd_dropin_conflicts",
+            "verify_sshd_parameters", "warn_sshd_dropin_conflicts", "ssh_extra_ports_listening",
         ))
         body = (helpers + section).replace("/etc/ssh", str(ssh_dir))
         stubs = f"""
-CONFIGURE_SSH=y SSH_PORT=7384 SSH_ALLOW_USERS=codex SSH_PASSWORD_AUTH=no
+CONFIGURE_SSH=y SSH_PORT=7384 SSH_EXTRA_PORTS=2201 SSH_ALLOW_USERS=codex SSH_PASSWORD_AUTH=no
 SSH_PUBKEY_AUTH=yes SSH_EMPTY_PASSWORDS=no SSH_ROOT_LOGIN=no SSH_PRINT_MOTD=yes
 sshd() {{ {shutil.which('sshd')} -f '{config}' "$@"; }}
 write_file_atomic() {{ local temporary; temporary=$(mktemp); cat > "$temporary" && mv -- "$temporary" "$1"; }}
-restart_ssh_listener() {{ [ "$1" = 22 ] || [ "$fail_restart" = no ]; }}
+restart_ssh_listener() {{ [ "$1" = 22 ] || [ "$fail_restart" != yes ]; }}
+ssh_port_is_listening() {{ [ "$1" != 2201 ] || [ "$fail_restart" != extra ]; }}
 restore_ssh_activation_state() {{ :; }}
 fail_restart=$1
 """
-        for fail_restart in ("no", "yes"):
+        for fail_restart in ("no", "yes", "extra"):
             config.write_text(main_text)
             legacy.write_text(legacy_text)
             managed = dropins / "10-system-setup.conf"
             managed.unlink(missing_ok=True)
-            result = self.shell(stubs + body + '\nprintf "RESULT:%s" "$CONFIGURE_SSH"', fail_restart)
+            result = self.shell(stubs + body + '\nprintf "RESULT:%s:%s" "$CONFIGURE_SSH" "$SSH_EXTRA_PORTS"', fail_restart)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(cloud.read_text(), "PasswordAuthentication yes\n")
             if fail_restart == "no":
-                self.assertIn("RESULT:y", result.stdout, result.stdout + result.stderr)
-                self.assertTrue(managed.exists())
+                self.assertIn("RESULT:y:2201", result.stdout, result.stdout + result.stderr)
+                self.assertIn("Port 7384\nPort 2201\n", managed.read_text())
                 self.assertFalse(legacy.exists())
             else:
-                self.assertIn("RESULT:failed", result.stdout)
+                self.assertIn("RESULT:failed:", result.stdout)
+                self.assertNotIn("RESULT:failed:2201", result.stdout)
                 self.assertEqual(config.read_text(), main_text)
                 self.assertEqual(legacy.read_text(), legacy_text)
                 self.assertFalse(managed.exists())

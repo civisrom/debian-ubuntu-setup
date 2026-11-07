@@ -164,10 +164,10 @@ NFT_PROFILE_DESCRIPTIONS=([1]=PL [2]=GE)
 NFT_PROFILE_CONFIGS=([1]=pl.conf [2]=ge.conf)
 NFT_PROFILE_LOGSCRIPTS=([1]=pl.sh [2]=ge.sh)
 '''+section+'\nprintf "RESULT:%s|%s|%s" "$INSTALL_NFTABLES_CONF" "$NFTABLES_PROFILE" "$INSTALL_NFTABLES_LOGGING"'
-        result = self.shell(body, '1\nyes\npl\n9\n1\nn\nwat\nyes\n')
+        result = self.shell(body, '1\nyes\npl\n9\n1\n2201,22\n\nn\nwat\nyes\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('RESULT:y|pl|y', result.stdout)
-        self.assertEqual(result.stderr.count('Invalid input.'), 4)
+        self.assertEqual(result.stderr.count('Invalid input.'), 5)
         result = self.shell(body, 'n\n')
         self.assertIn('RESULT:n||n', result.stdout)
 
@@ -262,6 +262,8 @@ prompt_read() {
             CRONTAB_MODE) reply=3 ;;
             SSH_ROOT_LOGIN) reply=prohibit-password ;;
             SSH_PORT|UFW_SSH_PORT) reply=7384 ;;
+            SSH_EXTRA_PORTS) reply=022 ;;
+            NFT_SERVER_SSH_PORTS) reply='2201 02202' ;;
             YUBIKEY_SSH_PUBLIC_KEY) reply='' ;;
             VENV_PATH) reply=/root/fixture-venv ;;
             RESOLVED_DNS) reply=2001:db8::1 ;;
@@ -280,13 +282,14 @@ prompt_read() {
     printf -v "$target" '%s' "$reply"
 }
 ''' + helpers + section + r'''
-printf 'RESULT:%s|%s|%s|%s|%s|%s|%s|%s|%s' "$FIREWALL_BACKEND" "$NFTABLES_PROFILE" "$INSTALL_NFTABLES_LOGGING" "$SSH_PORT" "$SSH_ALLOW_USERS" "$SSH_ROOT_LOGIN" "$SWAP_INTERACTIVE" "$NGINX_INSTALL_VARIANT" "$CREATE_USER"
+printf 'RESULT:%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' "$FIREWALL_BACKEND" "$NFTABLES_PROFILE" "$INSTALL_NFTABLES_LOGGING" "$SSH_PORT" "$SSH_ALLOW_USERS" "$SSH_ROOT_LOGIN" "$SWAP_INTERACTIVE" "$NGINX_INSTALL_VARIANT" "$CREATE_USER" "$SSH_EXTRA_PORTS" "$NFT_SERVER_SSH_PORTS"
 '''
         for mode, backend in [('1', 'nftables'), ('2', 'ufw'), ('3', 'none')]:
             result = self.shell(body, args=('true', mode))
             self.assertEqual(result.returncode, 0, result.stderr)
             profile = 'pl|y' if mode == '1' else '|n'
-            self.assertIn(f'RESULT:{backend}|{profile}|7384|planned|prohibit-password|true|3|y', result.stdout)
+            nft_ports = '2201 2202' if mode == '1' else ''
+            self.assertIn(f'RESULT:{backend}|{profile}|7384|planned|prohibit-password|true|3|y|22|{nft_ports}', result.stdout)
             self.assertNotIn('ERROR:', result.stderr)
             self.assertGreater(result.stderr.count('Invalid input.'), 50)
         result = self.shell(body, args=('false', '2'))
