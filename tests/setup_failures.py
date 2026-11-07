@@ -499,7 +499,11 @@ sysctl() { echo "SYSCTL:$*"; }
         text = target.read_text()
         for line in ("net.ipv4.conf.all.arp_ignore = 1", "net.ipv4.conf.default.arp_ignore = 1",
                      "net.ipv4.conf.all.arp_announce = 2", "net.ipv4.conf.all.send_redirects = 0",
-                     "net.ipv4.conf.eth0.send_redirects = 0"):
+                     "net.ipv4.conf.all.accept_redirects = 0", "net.ipv4.conf.default.secure_redirects = 0",
+                     "net.ipv4.conf.all.accept_source_route = 0", "net.ipv4.conf.eth0.send_redirects = 0",
+                     "net.ipv4.conf.eth0.accept_redirects = 0", "net.ipv4.conf.eth0.secure_redirects = 0",
+                     "net.ipv4.icmp_echo_ignore_broadcasts = 1", "net.ipv4.icmp_ignore_bogus_error_responses = 1",
+                     "net.ipv4.tcp_syncookies = 1"):
             self.assertIn(line + "\n", text)
         self.assertIn("SYSCTL:-q -p " + str(target), result.stdout)
         result = self.shell(body, "eth0.100;x")
@@ -515,7 +519,7 @@ sysctl() { echo "SYSCTL:$*"; }
 SYSCTL_TARGET_FILE=$1
 write_file_atomic() { cat > "$1"; }
 modprobe() { echo "MODPROBE:$*"; }
-""" + SOURCE[start:end].replace("/etc/modules-load.d", str(modules))
+""" + SOURCE[start:end].replace("/etc/modules-load.d", str(modules)).replace("/etc/sysctl.conf", str(self.root / "sysctl.conf"))
         target = self.root / "99-system-setup.conf"
         target.write_text("net.ipv4.ip_forward = 1\nnet.netfilter.nf_conntrack_tcp_loose = 0\n")
         result = self.shell(body, target)
@@ -528,6 +532,34 @@ modprobe() { echo "MODPROBE:$*"; }
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((modules / "system-setup-conntrack.conf").exists())
         self.assertNotIn("MODPROBE", result.stdout)
+        # Full mode: Linux NetworkOptimizer keeps the conntrack keys in /etc/sysctl.conf.
+        (self.root / "sysctl.conf").write_text("net.netfilter.nf_conntrack_max = 131072\n")
+        result = self.shell(body, target)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((modules / "system-setup-conntrack.conf").read_text(), "nf_conntrack\n")
+        self.assertIn("MODPROBE:nf_conntrack", result.stdout)
+
+    def test_llmnr_and_mdns_off_only_with_resolved(self):
+        start = SOURCE.index("# LLMNR / mDNS OFF (systemd-resolved)")
+        end = SOURCE.index("# TIME SYNCHRONIZATION (NTP)", start)
+        dropins = self.root / "resolved.conf.d"
+        body = """
+enabled=$1
+systemctl() { echo "SYSTEMCTL:$*"; [ "$1" != is-enabled ] || [ "$enabled" = yes ]; }
+write_file_atomic() { cat > "$1"; }
+ensure_dns_works() { echo "DNSCHECK:$1"; }
+""" + SOURCE[start:end].replace("/etc/systemd/resolved.conf.d", str(dropins))
+        result = self.shell(body, "yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = (dropins / "90-system-setup-no-llmnr.conf").read_text()
+        self.assertIn("[Resolve]\nLLMNR=no\nMulticastDNS=no\n", text)
+        self.assertIn("SYSTEMCTL:try-restart systemd-resolved", result.stdout)
+        self.assertIn("DNSCHECK:llmnr-off", result.stdout)
+        (dropins / "90-system-setup-no-llmnr.conf").unlink()
+        result = self.shell(body, "no")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((dropins / "90-system-setup-no-llmnr.conf").exists())
+        self.assertNotIn("try-restart", result.stdout)
 
     def test_prompt_eof_aborts_and_preserves_literal_input(self):
         body = function("prompt_read") + 'prompt_read -r value\nprintf "%s" "$value"'

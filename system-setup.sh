@@ -7567,8 +7567,8 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     print_header "═══════════════════════════════════════════════════"
     echo ""
     
-    BBR_SCRIPT_COMMIT="0007bdbd3c5014b307354b12f53ca3de086d9469"
-    BBR_SCRIPT_SHA256="99f315d6f3b36c46c3a3b5d394355a3bc346fa39d3d0ea7c7f696d734d3f291f"
+    BBR_SCRIPT_COMMIT="d97fd79bac63dfd98f0d0f4f6d626395b16e31c9"
+    BBR_SCRIPT_SHA256="c0ed6d9f0de9d97f363d5a4ae91e4e4287ab8aa5317ad92de27a520dc19cf49c"
     BBR_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/Linux_NetworkOptimizer/${BBR_SCRIPT_COMMIT}/bbr.sh"
     if create_temp_dir "bbr-optimizer"; then
         BBR_TMP_DIR="$SYSTEM_SETUP_CREATED_TEMP_DIR"
@@ -7834,20 +7834,25 @@ net.ipv4.ip_forward = 1
     print_message "sysctl configuration written to ${SYSCTL_TARGET_FILE} (mode: $([ "$SYSCTL_MODE" = "2" ] && echo "full/BBR" || echo "basic/static"))"
 
     # Hosting-segment neighbours: answer ARP only for addresses of the receiving
-    # interface, never announce internal addresses, send no ICMP redirects.
-    # Independent of the tuning mode. A live interface ignores "default", so
-    # the WAN interface is set by name.
+    # interface, never announce internal addresses, never send or accept ICMP
+    # redirects, no source routing, SYN cookies. Independent of the tuning mode.
+    # A live interface ignores "default", and send/secure redirects use the OR
+    # of conf.all and the interface, so the WAN interface is set by name.
     SYSCTL_NEIGHBOR_FILE=/etc/sysctl.d/97-system-setup-neighbor.conf
     SYSCTL_WAN=$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
     if {
         printf '%s\n' "# Managed by system-setup.sh: protection from hosting-segment neighbours"
-        for SYSCTL_KEY in arp_ignore=1 arp_announce=2 send_redirects=0; do
+        for SYSCTL_KEY in arp_ignore=1 arp_announce=2 send_redirects=0 accept_redirects=0 secure_redirects=0 accept_source_route=0; do
             printf 'net.ipv4.conf.all.%s = %s\nnet.ipv4.conf.default.%s = %s\n' \
                 "${SYSCTL_KEY%%=*}" "${SYSCTL_KEY#*=}" "${SYSCTL_KEY%%=*}" "${SYSCTL_KEY#*=}"
         done
         if [[ "$SYSCTL_WAN" =~ ^[A-Za-z0-9_-]{1,15}$ ]]; then
-            printf 'net.ipv4.conf.%s.send_redirects = 0\n' "$SYSCTL_WAN"
+            for SYSCTL_KEY in send_redirects accept_redirects secure_redirects; do
+                printf 'net.ipv4.conf.%s.%s = 0\n' "$SYSCTL_WAN" "$SYSCTL_KEY"
+            done
         fi
+        printf '%s\n' 'net.ipv4.icmp_echo_ignore_broadcasts = 1' 'net.ipv4.icmp_ignore_bogus_error_responses = 1' \
+            'net.ipv4.tcp_syncookies = 1'
     } | write_file_atomic "$SYSCTL_NEIGHBOR_FILE" 0644 root:root; then
         sysctl -q -p "$SYSCTL_NEIGHBOR_FILE" || print_warning "Neighbour protection sysctl partially applied"
     else
@@ -7856,7 +7861,8 @@ net.ipv4.ip_forward = 1
 
     # net.netfilter.* keys exist only after nf_conntrack is loaded. systemd-sysctl
     # runs early at boot and silently skips them unless modules-load loads it first.
-    if grep -q '^net\.netfilter\.nf_conntrack_' "$SYSCTL_TARGET_FILE"; then
+    # Linux NetworkOptimizer (full mode) writes them to /etc/sysctl.conf.
+    if grep -qs '^net\.netfilter\.nf_conntrack_' "$SYSCTL_TARGET_FILE" /etc/sysctl.conf; then
         if printf 'nf_conntrack\n' | write_file_atomic /etc/modules-load.d/system-setup-conntrack.conf 0644 root:root; then
             modprobe nf_conntrack || print_warning "nf_conntrack is not loadable now; netfilter sysctl keys apply after it loads"
         else
@@ -8031,6 +8037,28 @@ if is_yes "$CONFIGURE_RESOLVED"; then
     fi
 else
     print_message "Skipping systemd-resolved configuration (not requested)"
+fi
+
+# ============================================
+# LLMNR / mDNS OFF (systemd-resolved)
+# ============================================
+# A server needs neither responder. LLMNR listens on 0.0.0.0:5355 (TCP/UDP)
+# and answers name queries from the hosting segment whenever the firewall is
+# not loaded. Independent of the resolver step; DNS is verified afterwards.
+if systemctl is-enabled --quiet systemd-resolved 2>/dev/null; then
+    if mkdir -p /etc/systemd/resolved.conf.d &&
+       printf '%s\n' '# Managed by system-setup.sh: no LLMNR/mDNS responders on a server' \
+           '[Resolve]' 'LLMNR=no' 'MulticastDNS=no' |
+           write_file_atomic /etc/systemd/resolved.conf.d/90-system-setup-no-llmnr.conf 0644 root:root; then
+        if systemctl try-restart systemd-resolved; then
+            print_message "LLMNR and mDNS disabled in systemd-resolved (port 5355 closed)"
+        else
+            print_warning "systemd-resolved restart failed; LLMNR/mDNS settings apply after its next start"
+        fi
+        ensure_dns_works "llmnr-off"
+    else
+        print_error "Failed to install /etc/systemd/resolved.conf.d/90-system-setup-no-llmnr.conf"
+    fi
 fi
 
 # ============================================
