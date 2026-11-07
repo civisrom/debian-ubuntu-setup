@@ -548,7 +548,7 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="97f7b56ee2eed771f514a87d722512c04809f72dfea8a437f0752c208238ee74"
+    local OPT_VAULT_SHA256="eb37bfc99ac5a9e53914db7d16681065a6b003ba922de9df2370c6da41764769"
     local OPT_VAULT_HELPER_SHA256="3f7003022d2a068faec9d775e8f53972b1d94aefe40a0c0ab468d113db429e82"
     local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
     create_temp_dir opt-download || return 1
@@ -7832,6 +7832,37 @@ net.ipv4.ip_forward = 1
     }
     rm -f -- "${SYSCTL_TARGET_FILE}.new"
     print_message "sysctl configuration written to ${SYSCTL_TARGET_FILE} (mode: $([ "$SYSCTL_MODE" = "2" ] && echo "full/BBR" || echo "basic/static"))"
+
+    # Hosting-segment neighbours: answer ARP only for addresses of the receiving
+    # interface, never announce internal addresses, send no ICMP redirects.
+    # Independent of the tuning mode. A live interface ignores "default", so
+    # the WAN interface is set by name.
+    SYSCTL_NEIGHBOR_FILE=/etc/sysctl.d/97-system-setup-neighbor.conf
+    SYSCTL_WAN=$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+    if {
+        printf '%s\n' "# Managed by system-setup.sh: protection from hosting-segment neighbours"
+        for SYSCTL_KEY in arp_ignore=1 arp_announce=2 send_redirects=0; do
+            printf 'net.ipv4.conf.all.%s = %s\nnet.ipv4.conf.default.%s = %s\n' \
+                "${SYSCTL_KEY%%=*}" "${SYSCTL_KEY#*=}" "${SYSCTL_KEY%%=*}" "${SYSCTL_KEY#*=}"
+        done
+        if [[ "$SYSCTL_WAN" =~ ^[A-Za-z0-9_-]{1,15}$ ]]; then
+            printf 'net.ipv4.conf.%s.send_redirects = 0\n' "$SYSCTL_WAN"
+        fi
+    } | write_file_atomic "$SYSCTL_NEIGHBOR_FILE" 0644 root:root; then
+        sysctl -q -p "$SYSCTL_NEIGHBOR_FILE" || print_warning "Neighbour protection sysctl partially applied"
+    else
+        print_error "Failed to install $SYSCTL_NEIGHBOR_FILE"
+    fi
+
+    # net.netfilter.* keys exist only after nf_conntrack is loaded. systemd-sysctl
+    # runs early at boot and silently skips them unless modules-load loads it first.
+    if grep -q '^net\.netfilter\.nf_conntrack_' "$SYSCTL_TARGET_FILE"; then
+        if printf 'nf_conntrack\n' | write_file_atomic /etc/modules-load.d/system-setup-conntrack.conf 0644 root:root; then
+            modprobe nf_conntrack || print_warning "nf_conntrack is not loadable now; netfilter sysctl keys apply after it loads"
+        else
+            print_error "Failed to install /etc/modules-load.d/system-setup-conntrack.conf"
+        fi
+    fi
 
     # Apply sysctl settings (|| true to prevent set -e exit on unsupported params)
     print_message "Applying sysctl settings from ${SYSCTL_TARGET_FILE}..."

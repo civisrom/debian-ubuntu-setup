@@ -484,6 +484,51 @@ verify_sshd_parameters "$1"
             profile.write_text(text)
             self.assertNotEqual(self.shell(body, profile, "2201").returncode, 0, text)
 
+    def test_neighbor_sysctl_names_live_wan_interface(self):
+        start = SOURCE.index("    # Hosting-segment neighbours: answer ARP only")
+        end = SOURCE.index("    # net.netfilter.* keys exist only after nf_conntrack is loaded.", start)
+        target = self.root / "97-system-setup-neighbor.conf"
+        body = """
+wan=$1
+ip() { echo "default via 192.0.2.1 dev $wan proto static"; }
+write_file_atomic() { cat > "$1"; }
+sysctl() { echo "SYSCTL:$*"; }
+""" + SOURCE[start:end].replace("/etc/sysctl.d/97-system-setup-neighbor.conf", str(target))
+        result = self.shell(body, "eth0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = target.read_text()
+        for line in ("net.ipv4.conf.all.arp_ignore = 1", "net.ipv4.conf.default.arp_ignore = 1",
+                     "net.ipv4.conf.all.arp_announce = 2", "net.ipv4.conf.all.send_redirects = 0",
+                     "net.ipv4.conf.eth0.send_redirects = 0"):
+            self.assertIn(line + "\n", text)
+        self.assertIn("SYSCTL:-q -p " + str(target), result.stdout)
+        result = self.shell(body, "eth0.100;x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("eth0.100", target.read_text())
+
+    def test_conntrack_module_loads_before_netfilter_sysctl(self):
+        start = SOURCE.index("    # net.netfilter.* keys exist only after nf_conntrack is loaded.")
+        end = SOURCE.index("    # Apply sysctl settings (|| true", start)
+        modules = self.root / "modules-load.d"
+        modules.mkdir()
+        body = """
+SYSCTL_TARGET_FILE=$1
+write_file_atomic() { cat > "$1"; }
+modprobe() { echo "MODPROBE:$*"; }
+""" + SOURCE[start:end].replace("/etc/modules-load.d", str(modules))
+        target = self.root / "99-system-setup.conf"
+        target.write_text("net.ipv4.ip_forward = 1\nnet.netfilter.nf_conntrack_tcp_loose = 0\n")
+        result = self.shell(body, target)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((modules / "system-setup-conntrack.conf").read_text(), "nf_conntrack\n")
+        self.assertIn("MODPROBE:nf_conntrack", result.stdout)
+        (modules / "system-setup-conntrack.conf").unlink()
+        target.write_text("net.ipv4.ip_forward = 1\n")
+        result = self.shell(body, target)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((modules / "system-setup-conntrack.conf").exists())
+        self.assertNotIn("MODPROBE", result.stdout)
+
     def test_prompt_eof_aborts_and_preserves_literal_input(self):
         body = function("prompt_read") + 'prompt_read -r value\nprintf "%s" "$value"'
         self.assertNotEqual(self.shell(body, input="").returncode, 0)
