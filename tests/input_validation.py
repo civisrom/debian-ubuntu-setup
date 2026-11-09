@@ -171,6 +171,23 @@ NFT_PROFILE_LOGSCRIPTS=([1]=pl.sh [2]=ge.sh)
         result = self.shell(body, 'n\n')
         self.assertIn('RESULT:n||n', result.stdout)
 
+    def test_minimal_node_menu_keeps_current_ssh_administrator(self):
+        section = SOURCE.split('        # Ask about nftables config profile\n', 1)[1].split('\n    else\n        INSTALL_NFTABLES_CONF="n"', 1)[0]
+        body = '''
+RESTORE_OPT_VAULT=y NFT_PROFILES_COUNT=1 NFT_DEFAULT_PROFILE=1
+NFT_PROFILE_NAMES=([1]=noda-nuxt-youtube)
+NFT_PROFILE_DESCRIPTIONS=([1]=Node)
+NFT_PROFILE_CONFIGS=([1]=node.conf)
+NFT_PROFILE_LOGSCRIPTS=([1]='')
+SSH_CONNECTION='11.77.0.3 12345 11.77.0.4 22'
+'''+section+'\nprintf "RESULT:%s" "$NFT_NODE_ADMINS"'
+        result = self.shell(body, 'y\n\n\n\nn\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('RESULT:11.77.0.3', result.stdout)
+        result = self.shell(body, 'y\n\n\n11.77.0.3 11.77.0.5\nn\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('RESULT:11.77.0.3 11.77.0.5', result.stdout)
+
     def test_cron_validation_and_pasted_block_retry(self):
         self.assert_validity('valid_cron_line', ['', '# comment', 'MAILTO=""', '@reboot sh -c "echo ok"',
                     '*/5 0-23 * jan,dec mon-fri /bin/true', '0\t3\t*\t*\t6\t/bin/true'],

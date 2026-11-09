@@ -70,8 +70,10 @@ fi
 assert_embedded_hash system-setup.sh TELEGRAM_HELPER_SHA256 config/telegram-ssh-tunnel.py
 assert_embedded_hash system-setup.sh NFT_IPV6_HELPER_SHA256 config/nft-ipv6-profile.py
 assert_embedded_hash system-setup.sh NFT_NODE_SETS_SHA256 config/nft-node-sets.py
+assert_embedded_hash system-setup.sh NFT_NODE_HOST_SHA256 config/nft-node-host.py
 
 python3 tests/node_setup_test.py
+python3 tests/node_host_test.py
 python3 tests/input_validation.py
 python3 tests/setup_failures.py
 python3 tests/nft_watch.py

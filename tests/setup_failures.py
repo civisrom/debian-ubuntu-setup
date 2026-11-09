@@ -739,6 +739,55 @@ write_file_atomic() { local temporary; temporary=$(mktemp); cat > "$temporary" &
                     self.assertEqual(resolver.is_symlink(), kind == "symlink")
                     self.assertEqual(resolver.read_text(), old_target.read_text())
 
+    def test_minimal_profile_is_prepared_before_preflight_and_copy(self):
+        from node_host_test import host, PROFILE, FACTS
+        from unittest.mock import patch
+        etc = self.root/'etc'; etc.mkdir()
+        profiles = self.root/'opt/nftables'; profiles.mkdir(parents=True)
+        profile = profiles/'node.conf'; profile.write_text(PROFILE)
+        config = etc/'nftables.conf'
+        candidate = self.root/'prepared.conf'
+        with patch.dict(host.os.environ, {'SSH_CONNECTION': '11.77.0.3 12345 11.77.0.4 22'}):
+            candidate.write_text(host.prepare(PROFILE, FACTS, ['11.77.0.3']))
+        section = SOURCE.split('    # Fail closed: do not disable an existing firewall until there is a valid\n', 1)[1].split('    # --- Step 6: Atomically apply', 1)[0]
+        section = ''.join(function(n) for n in ('build_nft_transaction',))+section
+        for prefix in ('/etc/', '/opt/', '/run/'):
+            section = section.replace(prefix, str(self.root)+prefix)
+        stubs = '''
+NFTABLES_OK=true INSTALL_NFTABLES_CONF=y NFTABLES_CONF_FILE=node.conf NFTABLES_PROFILE=noda-nuxt-youtube
+NFT_NODE_ADMINS=11.77.0.3 NFT_SERVER_SSH_PORTS='' NFT_NODE_PREPARED='' CONFIGURE_NFT_IPV6=n
+NFTABLES_DST=$1/etc/nftables.conf NFT_TMP_DIR=$1 NFT_TRANSACTION=$1/transaction.nft
+NFT_PREFLIGHT_ERR=$1/preflight.err NFT_LIVE_BACKUP=$1/live.nft NFTABLES_CONFIG_BACKUP=''
+prepared=$1/prepared.conf failure=$2
+is_yes() { [ "$1" = y ]; }
+install_verified_repo_asset() { [ "$1" = config/nft-node-host.py ]; }
+python3() {
+    [ "$failure" != prepare ] || return 1
+    [ "$4" = --admins ] && [ "$5" = 11.77.0.3 ] || return 1
+    cp "$prepared" "$3"
+}
+nft() {
+    case "$1" in
+        --version) printf 'fixture nft\n' ;;
+        list) printf 'table inet previous {}\n' ;;
+        -c) grep -q 'define WAN = "eth0.100"' "$3" && grep -q 'SERVER_SSH_PORTS = { 7384 }' "$3" ;;
+        *) return 1 ;;
+    esac
+}
+write_file_atomic() { cat > "$1"; }
+'''
+        for failure in ('none', 'prepare'):
+            config.write_text('table inet previous {}\n')
+            result = self.shell(stubs+section+'\nprintf "RESULT:%s" "$NFTABLES_OK"', self.root, failure)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            self.assertEqual(profile.read_text(), PROFILE)
+            if failure == 'none':
+                self.assertIn('RESULT:true', result.stdout)
+                self.assertEqual(config.read_text(), candidate.read_text())
+            else:
+                self.assertIn('RESULT:false', result.stdout)
+                self.assertEqual(config.read_text(), 'table inet previous {}\n')
+
     def test_nftables_failure_restores_config_and_empty_runtime(self):
         etc = self.root / "etc"
         etc.mkdir()

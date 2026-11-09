@@ -286,6 +286,17 @@ valid_nft_ipv6_list() {
     for address in "${addresses[@]}"; do valid_nft_ipv6 "$address" || return 1; done
 }
 
+valid_nft_admins() {
+    local address
+    local -a addresses=()
+    [[ ! "$1" =~ [[:cntrl:]] ]] || return 1
+    read -r -a addresses <<< "$1"
+    [ "${#addresses[@]}" -ge 1 ] && [ "${#addresses[@]}" -le 32 ] || return 1
+    for address in "${addresses[@]}"; do
+        [[ "$address" != *%* ]] && valid_dns_ip "$address" || return 1
+    done
+}
+
 valid_nft_interface() {
     [[ "$1" =~ ^[a-zA-Z0-9_.:-]{1,15}$ && -d "/sys/class/net/$1" ]]
 }
@@ -548,7 +559,7 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="0b1a4f719a35c6b332d5c49361febb00c23f39b5a2d93c12d586008bada29aaa"
+    local OPT_VAULT_SHA256="229a1355b287fa89a17b94ec2f5e9f08e109854e1fa3f30d4a699f7a8a9ce2f6"
     local OPT_VAULT_HELPER_SHA256="3f7003022d2a068faec9d775e8f53972b1d94aefe40a0c0ab468d113db429e82"
     local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
     create_temp_dir opt-download || return 1
@@ -1964,6 +1975,7 @@ CONFIGURE_TELEGRAM_TUNNEL="n"
 TELEGRAM_TUNNEL_ROLE=""
 CONFIGURE_NFT_IPV6="n"
 NFT_SERVER_SSH_PORTS=""
+NFT_NODE_ADMINS=""
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -3027,8 +3039,20 @@ if [ "$INTERACTIVE" = true ]; then
             NFTABLES_LOG_SCRIPT="${NFT_PROFILE_LOGSCRIPTS[$NFTABLES_PROFILE_NUM]:-}"
             # Node profiles keep server-management SSH ports in a variable.
             print_message "SERVER_SSH_PORTS: server-management SSH ports for profiles that define this variable (sshd ports: ${SSH_PORT:-22}${SSH_EXTRA_PORTS:+ $SSH_EXTRA_PORTS})"
-            prompt_value NFT_SERVER_SSH_PORTS "SERVER_SSH_PORTS, space-separated (Enter keeps the profile value): " "" valid_port_list "Enter distinct ports 1-65535 separated by spaces, or Enter."
+            _nft_ports_default="profile value"
+            [ "$NFTABLES_PROFILE" != noda-nuxt-youtube ] || _nft_ports_default="effective sshd ports"
+            prompt_value NFT_SERVER_SSH_PORTS "SERVER_SSH_PORTS, space-separated (Enter uses $_nft_ports_default): " "" valid_port_list "Enter distinct ports 1-65535 separated by spaces, or Enter."
+            unset _nft_ports_default
             NFT_SERVER_SSH_PORTS=$(normalize_ssh_ports "$NFT_SERVER_SSH_PORTS")
+            if [ "$NFTABLES_PROFILE" = noda-nuxt-youtube ]; then
+                _nft_current_admin=${SSH_CONNECTION:-}
+                _nft_current_admin=${_nft_current_admin%% *}
+                valid_nft_admins "$_nft_current_admin" || _nft_current_admin=""
+                print_message "Minimal node: WAN, public IP and SSH ports will be read from the host before applying the profile."
+                print_message "Explicit SSH administrators are preserved for reboot and the later VPNBot node installer. Include the current SSH source."
+                prompt_value NFT_NODE_ADMINS "Public SSH administrator IPs, space-separated (Enter keeps current source): " "$_nft_current_admin" valid_nft_admins "Enter 1-32 public IPv4/IPv6 addresses, without prefixes or ports."
+                unset _nft_current_admin
+            fi
             prompt_yes_no CONFIGURE_NFT_IPV6 "Configure the IPv6 node sets in this firewall profile? (y/N): " n
             if is_yes "$CONFIGURE_NFT_IPV6"; then
                 print_message "The public IPv6 must already be assigned to this server. An empty trusted source list keeps IPv6 ingress closed."
@@ -7020,6 +7044,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     NFTABLES_CONFIG_BACKUP=""
     NFT_CONFIG_CHANGED=false
     NFT_RUNTIME_CHANGED=false
+    NFT_NODE_PREPARED=""
     NFT_UFW_CHANGED=false
     NFT_SERVICE_PREVIOUS_STATE=$(systemctl is-enabled nftables.service 2>/dev/null || true)
     NFT_UFW_PREVIOUS_STATE=$(systemctl is-enabled ufw.service 2>/dev/null || true)
@@ -7065,13 +7090,29 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             print_error "nftables config preflight failed: source file not found: $NFTABLES_SRC"
             print_error "UFW/iptables will not be disabled"
             NFTABLES_OK=false
-        elif ! build_nft_transaction "$NFTABLES_SRC" "$NFT_TRANSACTION" || \
-             ! nft -c -f "$NFT_TRANSACTION" 2>"$NFT_PREFLIGHT_ERR"; then
+        fi
+        if [ "$NFTABLES_OK" = true ] && grep -qx '# VPNBOT_MANAGED_NODE_HOST' "$NFTABLES_SRC"; then
+            NFT_NODE_HOST_HELPER=/usr/local/sbin/nft-node-host
+            NFT_NODE_HOST_SHA256="a73d7e408891b4bc2d70731f7e50aaf47f1f5f6f4d3930e084d4622ca5f6406e"
+            NFT_NODE_PREPARED=$(mktemp "${NFT_TMP_DIR}/node-profile.XXXXXX")
+            read -r -a NFT_NODE_ADMIN_VALUES <<< "${NFT_NODE_ADMINS:-}"
+            read -r -a NFT_NODE_SSH_VALUES <<< "${NFT_SERVER_SSH_PORTS:-}"
+            if ! install_verified_repo_asset "config/nft-node-host.py" "$NFT_NODE_HOST_HELPER" "$NFT_NODE_HOST_SHA256" 0755 || \
+               ! python3 "$NFT_NODE_HOST_HELPER" "$NFTABLES_SRC" "$NFT_NODE_PREPARED" \
+                    --admins "${NFT_NODE_ADMIN_VALUES[@]}" --ssh-ports "${NFT_NODE_SSH_VALUES[@]}"; then
+                print_error "Minimal node network/SSH preparation failed; the current firewall is preserved"
+                NFTABLES_OK=false
+            else
+                NFTABLES_SRC="$NFT_NODE_PREPARED"
+            fi
+        fi
+        if [ "$NFTABLES_OK" = true ] && { ! build_nft_transaction "$NFTABLES_SRC" "$NFT_TRANSACTION" || \
+             ! nft -c -f "$NFT_TRANSACTION" 2>"$NFT_PREFLIGHT_ERR"; }; then
             print_error "nftables config preflight failed: syntax error in $NFTABLES_SRC"
             [ -s "$NFT_PREFLIGHT_ERR" ] && cat "$NFT_PREFLIGHT_ERR"
             print_error "UFW/iptables will not be disabled"
             NFTABLES_OK=false
-        else
+        elif [ "$NFTABLES_OK" = true ]; then
             print_success "nftables preflight passed for $NFTABLES_SRC"
         fi
         rm -f "$NFT_PREFLIGHT_ERR"
@@ -7131,7 +7172,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
         echo ""
         print_message "Step 5: Installing nftables config (profile: ${NFTABLES_PROFILE}, file: ${NFTABLES_CONF_FILE})..."
 
-        NFTABLES_SRC="/opt/nftables/${NFTABLES_CONF_FILE}"
+        NFTABLES_SRC="${NFT_NODE_PREPARED:-/opt/nftables/${NFTABLES_CONF_FILE}}"
         NFTABLES_DST="/etc/nftables.conf"
 
         # Check if config file exists (from opt.hc restoration or pre-installed)
