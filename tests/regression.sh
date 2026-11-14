@@ -71,6 +71,10 @@ assert_embedded_hash system-setup.sh TELEGRAM_HELPER_SHA256 config/telegram-ssh-
 assert_embedded_hash system-setup.sh NFT_IPV6_HELPER_SHA256 config/nft-ipv6-profile.py
 assert_embedded_hash system-setup.sh NFT_NODE_SETS_SHA256 config/nft-node-sets.py
 assert_embedded_hash system-setup.sh NFT_NODE_HOST_SHA256 config/nft-node-host.py
+assert_embedded_hash system-setup.sh GHX_SHA256 config/ghx
+assert_embedded_hash system-setup.sh UFW_DOCKER_SHA256 config/vendor/ufw-docker
+assert_embedded_hash system-setup.sh SWAP_SCRIPT_SHA256 config/vendor/swap-setup.sh
+assert_embedded_hash system-setup.sh BBR_SCRIPT_SHA256 config/vendor/bbr.sh
 
 python3 tests/node_setup_test.py
 python3 tests/node_host_test.py
@@ -78,5 +82,11 @@ python3 tests/input_validation.py
 python3 tests/setup_failures.py
 python3 tests/nft_watch.py
 python3 tests/opt_vault.py
+python3 tests/installer_core.py
+python3 tests/installer_features.py
+python3 tests/network_helpers.py
+python3 tests/shell_config.py
+python3 tests/external_installers.py
+python3 tests/ghx.py
 
 printf 'Regression checks passed\n'

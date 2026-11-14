@@ -76,6 +76,8 @@ PY
 command -v nft >/dev/null 2>&1 || { log "ERROR: nft command not found" err; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "ERROR: flock command not found" err; exit 1; }
 command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 command not found" err; exit 1; }
+command -v timeout >/dev/null 2>&1 || { log "ERROR: timeout command not found" err; exit 1; }
+[[ "$DOCKER_WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || { log "ERROR: invalid Docker wait timeout" err; exit 1; }
 [ -s "$NFT_CONF" ] || { log "ERROR: missing or empty $NFT_CONF" err; exit 1; }
 
 mkdir -p "$NFT_BACKUP_DIR"
@@ -91,25 +93,47 @@ transaction_file=$(mktemp "${NFT_BACKUP_DIR}/transaction.XXXXXX.nft")
 rollback_file=$(mktemp "${NFT_BACKUP_DIR}/rollback.XXXXXX.nft")
 applied_file=$(mktemp "${NFT_BACKUP_DIR}/applied.XXXXXX.json")
 live_file=$(mktemp "${NFT_BACKUP_DIR}/live.XXXXXX.json")
+rollback_pending=false
 cleanup() {
+    local status=$?
+    trap - EXIT
+    if [ "$rollback_pending" = true ]; then
+        if rollback_ruleset "$backup_file" "$rollback_file"; then
+            log "Interrupted before verification; previous ruleset restored" warning
+        else
+            log "CRITICAL: interrupted apply rollback failed" crit
+        fi
+    fi
     rm -f -- "$transaction_file" "$rollback_file" "$applied_file" "$live_file"
+    exit "$status"
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 log "Waiting for Docker readiness (timeout: ${DOCKER_WAIT_TIMEOUT}s)..."
 waited=0
-while ! docker info >/dev/null 2>&1; do
-    if [ "$waited" -ge "$DOCKER_WAIT_TIMEOUT" ]; then
-        log "Docker did not become ready in ${DOCKER_WAIT_TIMEOUT}s; applying rules without it" warning
+wait_started=$SECONDS
+docker_ready=false
+while [ "$waited" -lt "$DOCKER_WAIT_TIMEOUT" ]; do
+    remaining=$((DOCKER_WAIT_TIMEOUT - waited))
+    if timeout --kill-after=1 "$remaining" docker info >/dev/null 2>&1; then
+        docker_ready=true
         break
     fi
-    sleep 1
-    ((++waited))
+    waited=$((SECONDS - wait_started))
+    if [ "$waited" -lt "$DOCKER_WAIT_TIMEOUT" ]; then
+        sleep 1
+        waited=$((SECONDS - wait_started))
+    fi
 done
 
-if [ "$waited" -lt "$DOCKER_WAIT_TIMEOUT" ]; then
+if [ "$docker_ready" = true ]; then
     log "Docker ready after ${waited}s; waiting ${DOCKER_SETTLE_DELAY}s for networks"
     sleep "$DOCKER_SETTLE_DELAY"
+else
+    log "Docker did not become ready in ${DOCKER_WAIT_TIMEOUT}s; applying rules without it" warning
 fi
 
 build_transaction "$NFT_CONF" "$transaction_file"
@@ -128,6 +152,7 @@ if ! nft list ruleset > "$backup_file" 2>/dev/null; then
 fi
 log "Live ruleset backup: $backup_file"
 
+rollback_pending=true
 if ! nft_error=$(nft -j -e -f "$transaction_file" 2>&1 >"$applied_file"); then
     log "Atomic nftables apply failed; restoring previous ruleset" err
     log "$nft_error" err
@@ -136,6 +161,7 @@ if ! nft_error=$(nft -j -e -f "$transaction_file" 2>&1 >"$applied_file"); then
     else
         log "CRITICAL: rollback failed; use console access immediately" crit
     fi
+    rollback_pending=false
     exit 1
 fi
 
@@ -153,8 +179,10 @@ if [ "$verification_failed" = true ]; then
     else
         log "CRITICAL: postcondition failed and rollback failed" crit
     fi
+    rollback_pending=false
     exit 1
 fi
+rollback_pending=false
 
 # Keep only the ten newest persistent snapshots. Temporary transaction files
 # use different names and are removed by the trap.

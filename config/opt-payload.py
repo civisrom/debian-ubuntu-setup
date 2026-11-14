@@ -20,15 +20,26 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def mode(name, directory=False):
+def mode(name, directory=False, original=None):
     path = PurePosixPath(name)
     if directory:
-        return 0o700 if ".git" in path.parts else 0o755
-    if (".git" in path.parts or path.name in ("environment", "geolite_config")
+        result = 0o700 if any(p in (".git", ".ssh") for p in path.parts) else 0o755
+    elif (any(p in (".git", ".ssh") for p in path.parts)
+            or path.name in ("environment", "geolite_config")
             or path.name.startswith(".env")
             or path.suffix.lower() in (".env", ".ini", ".json", ".yaml", ".yml", ".toml", ".conf", ".key", ".pem")):
-        return 0o600
-    return 0o755 if path.suffix.lower() in (".sh", ".py", ".pl") else 0o644
+        result = 0o600
+    else:
+        result = 0o755 if path.suffix.lower() in (".sh", ".py", ".pl") else 0o644
+    # A private file/directory must stay private regardless of its filename.
+    # Keep the conventional executable bits, but never grant access to a
+    # group/class that could not read the original entry.
+    if original is not None:
+        if not original & 0o040:
+            result &= ~0o070
+        if not original & 0o004:
+            result &= ~0o007
+    return result
 
 
 def clean_name(name):
@@ -64,7 +75,7 @@ def pack(source, vault):
             member = archive.gettarinfo(str(path), arcname=name)
             member.uid = member.gid = 0
             member.uname = member.gname = "root"
-            member.mode = mode(name, member.isdir())
+            member.mode = mode(name, member.isdir(), member.mode)
             if member.isfile():
                 with path.open("rb") as stream:
                     archive.addfile(member, stream)
@@ -145,7 +156,7 @@ def restore(vault, target, backup_root):
                         shutil.copyfileobj(src, dst)
                     if dest.stat().st_size != member.size:
                         raise ValueError("incomplete payload file")
-                dest.chmod(mode(name, member.isdir()))
+                dest.chmod(mode(name, member.isdir(), member.mode))
             target = check_target(target, members)
             backup_root = Path(backup_root)
             for p in (backup_root, *backup_root.absolute().parents):
@@ -167,15 +178,19 @@ def restore(vault, target, backup_root):
                 target.mkdir(parents=True, exist_ok=True)
                 for name, member in sorted(members.items(), key=lambda item: (len(PurePosixPath(item[0]).parts), item[0])):
                     dest = target / name
+                    original_mode = member.mode
+                    if dest.exists():
+                        original_mode &= dest.stat().st_mode
+                    restored_mode = mode(name, member.isdir(), original_mode)
                     if member.isdir():
                         if not dest.exists():
-                            dest.mkdir(mode=mode(name, True))
+                            dest.mkdir(mode=restored_mode)
                             created_dirs.append(dest)
                         else:
                             changed_dirs.append(name)
                         if os.geteuid() == 0:
                             os.chown(dest, 0, 0)
-                        dest.chmod(mode(name, True))
+                        dest.chmod(restored_mode)
                         continue
                     fd, temporary = tempfile.mkstemp(prefix=".opt-vault-", dir=dest.parent)
                     try:
@@ -183,7 +198,7 @@ def restore(vault, target, backup_root):
                             shutil.copyfileobj(src, stream)
                             stream.flush()
                             os.fsync(stream.fileno())
-                        os.chmod(temporary, mode(name))
+                        os.chmod(temporary, restored_mode)
                         if os.geteuid() == 0:
                             os.chown(temporary, 0, 0)
                         os.replace(temporary, dest)

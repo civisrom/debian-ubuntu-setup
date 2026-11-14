@@ -19,16 +19,23 @@ jobs:
 
       - name: Bash syntax
         run: |
-          bash -n install.sh system-setup.sh install-nft-docker-watch.sh update-checksum.sh
-          bash -n config/nft-apply.sh config/rustdesk-safe-update.sh tests/regression.sh
-          bash -n config/opt-vault.sh
+          for script in install.sh system-setup.sh install-nft-docker-watch.sh update-checksum.sh config/*.sh config/vendor/*.sh config/vendor/ufw-docker tests/*.sh; do
+            bash -n "$script"
+          done
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          for script in [*Path('config').glob('*.py'), *Path('tests').glob('*.py'), Path('config/ghx')]:
+              ast.parse(script.read_text(), filename=str(script))
+          PY
 
       - name: ShellCheck
         run: |
           shellcheck --severity=warning install.sh install-nft-docker-watch.sh update-checksum.sh
           shellcheck --severity=warning config/nft-apply.sh config/rustdesk-safe-update.sh tests/regression.sh
           shellcheck --severity=warning config/opt-vault.sh
-          timeout 180 shellcheck --severity=error system-setup.sh
+          shellcheck --severity=error config/vendor/*.sh config/vendor/ufw-docker
+          timeout 600 shellcheck --severity=error system-setup.sh
 
       - name: Docker Compose validation
         run: docker compose -f config/docker-compose.yml config -q
@@ -47,6 +54,8 @@ jobs:
       - name: Regression checks
         run: |
           sudo apt-get update
-          sudo apt-get install -y 7zip openssh-server
+          sudo apt-get install -y 7zip openssh-server zsh
           sudo mkdir -p /run/sshd
+          zsh -n config/.zshenv
+          zsh -n config/.zshrc
           bash tests/regression.sh

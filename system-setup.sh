@@ -559,9 +559,9 @@ extract_7z_archive() {
 # All assets come from the same immutable commit as system-setup.sh.
 restore_opt_vault() {
     local work base result
-    local OPT_VAULT_SHA256="229a1355b287fa89a17b94ec2f5e9f08e109854e1fa3f30d4a699f7a8a9ce2f6"
-    local OPT_VAULT_HELPER_SHA256="3f7003022d2a068faec9d775e8f53972b1d94aefe40a0c0ab468d113db429e82"
-    local OPT_PAYLOAD_SHA256="1a0a79e722c82b8de8c53272e5f1a382a69bee5ab0e59a025c233239501663b6"
+    local OPT_VAULT_SHA256="94d06250f1fca44749d8c370bc02ada437f97178e3fd87bdd0b39949ce7222fb"
+    local OPT_VAULT_HELPER_SHA256="a47c231fa9d52adc367896d04cec896ab9fe0c2ba43c689582fa05d8051f7727"
+    local OPT_PAYLOAD_SHA256="4a88de0a3ee9e2c0ee67d60117cf351927a3b29637f096652bff24cd27e95fa1"
     create_temp_dir opt-download || return 1
     work=$SYSTEM_SETUP_CREATED_TEMP_DIR
     base="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config"
@@ -647,6 +647,7 @@ verify_sshd_parameters() {
     done < "$managed_file"
     for parameter in "${parameters[@]}"; do
         expected=${expected_values[${parameter,,}]}
+        expected=$(xargs <<< "$expected")
         actual=$(awk -v key="${parameter,,}" '$1 == key {$1=""; sub(/^ /, ""); print}' <<< "$effective")
         # sshd may output an accumulating directive on several lines.
         actual=$(xargs <<< "$actual")
@@ -938,7 +939,8 @@ configure_apt_lock_timeout() {
         cat -- "$APT_CONFIG" > "$config" || return 1
     fi
     printf 'DPkg::Lock::Timeout "%s";\n' "$APT_LOCK_WAIT_SECONDS" >> "$config" || return 1
-    chmod 0644 "$config" || return 1
+    # An inherited APT_CONFIG may contain authenticated proxy settings.
+    chmod 0600 "$config" || return 1
     export APT_CONFIG="$config"
 }
 
@@ -946,10 +948,26 @@ configure_apt_lock_timeout() {
 # so a busy package manager is reported instead of looking like a hang.
 wait_for_apt_locks() {
     local deadline=$((SECONDS + APT_LOCK_WAIT_SECONDS)) lock reported=false
-    command -v flock >/dev/null 2>&1 || return 0
+    command -v python3 >/dev/null 2>&1 || {
+        print_error "python3 is required to check APT record locks"
+        return 1
+    }
     for lock in "${APT_LOCK_FILES[@]}"; do
         [ -e "$lock" ] || continue
-        while ! flock -n "$lock" true 2>/dev/null; do
+        # APT/dpkg use POSIX record locks, which do not conflict with flock.
+        while ! python3 - "$lock" <<'PYLOCK'
+import fcntl
+import sys
+
+try:
+    with open(sys.argv[1], "r+") as stream:
+        fcntl.lockf(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except FileNotFoundError:
+    pass
+except OSError:
+    sys.exit(1)
+PYLOCK
+        do
             if [ "$SECONDS" -ge "$deadline" ]; then
                 print_error "APT lock still held after ${APT_LOCK_WAIT_SECONDS}s: $lock"
                 return 1
@@ -1043,7 +1061,7 @@ configure_ghx_choice() {
 # user into ~/.config/secrets.env, never by this script.
 install_ghx() {
     local target_user="$1" user_home rc rc_tmp
-    local GHX_SHA256="1b76764f0ccc011b5219e847fdb516206a635d2cd2ad6d921b3ef2832dc349e6"
+    local GHX_SHA256="7b961f1c52be82f830436a67ea3c339e1e27fbd92964f681fe1688664d2adaa0"
 
     if ! id -u -- "$target_user" >/dev/null 2>&1; then
         print_error "Cannot install ghx: user $target_user does not exist"
@@ -1122,12 +1140,18 @@ install_tmux_service() {
 }
 
 # Atomically replace a file with the given content (read from stdin).
-# Preserves owner/mode of an existing target; falls back to root:root 0644 for new files.
+# Explicit owner/mode take precedence; otherwise preserve existing metadata,
+# falling back to root:root 0644 for new files.
 write_file_atomic() {
     local target="$1"
     local mode="${2:-}"
     local owner="${3:-}"
     local tmp
+
+    if [ -d "$target" ]; then
+        print_error "Refusing to replace a directory with a file: $target"
+        return 1
+    fi
 
     tmp=$(mktemp "${target}.XXXXXX") || {
         print_error "Failed to create temporary file for $target"
@@ -1140,15 +1164,19 @@ write_file_atomic() {
         return 1
     fi
 
-    if [ -e "$target" ]; then
-        chmod --reference="$target" "$tmp" 2>/dev/null || chmod "${mode:-0644}" "$tmp"
-        chown --reference="$target" "$tmp" 2>/dev/null || chown "${owner:-root:root}" "$tmp"
-    else
-        chmod "${mode:-0644}" "$tmp"
-        chown "${owner:-root:root}" "$tmp"
+    if [ -z "$mode" ] && [ -e "$target" ]; then
+        mode=$(stat -Lc '%a' -- "$target") || { rm -f -- "$tmp"; return 1; }
+    fi
+    if [ -z "$owner" ] && [ -e "$target" ]; then
+        owner=$(stat -Lc '%u:%g' -- "$target") || { rm -f -- "$tmp"; return 1; }
+    fi
+    if ! chown "${owner:-root:root}" "$tmp" || ! chmod "${mode:-0644}" "$tmp"; then
+        rm -f -- "$tmp"
+        print_error "Failed to set file metadata for $target; original preserved"
+        return 1
     fi
 
-    if ! mv "$tmp" "$target"; then
+    if ! mv -T -- "$tmp" "$target"; then
         rm -f "$tmp"
         print_error "Failed to move temporary file into place: $target"
         return 1
@@ -1474,6 +1502,17 @@ ensure_dns_works() {
     local caller_context="${1:-unknown}"
     local RESOLV_FILE="/etc/resolv.conf"
     local resolv_is_symlink=false
+    local domain
+
+    # A local or provider resolver may already work after the network change.
+    # Only attempt recovery after a failure; do not add public resolvers to a
+    # working configuration or restart its managing service unnecessarily.
+    for domain in deb.debian.org archive.ubuntu.com google.com; do
+        if getent hosts "$domain" &>/dev/null; then
+            print_success "[$caller_context] DNS resolution verified"
+            return 0
+        fi
+    done
 
     if [ -L "$RESOLV_FILE" ]; then
         resolv_is_symlink=true
@@ -1838,13 +1877,14 @@ timesync_wait_timesyncd() {
     while [ "$SECONDS" -lt "$deadline" ]; do
         server=$(timedatectl show-timesync -p ServerName --value 2>/dev/null)
         message=$(timedatectl show-timesync -p NTPMessage --value 2>/dev/null)
-        if [ -n "$server" ] && [[ " $servers " == *" $server "* ]] && [[ "$message" == *"Mode=4"* ]]; then
+        if [ -n "$server" ] && [[ " $servers " == *" $server "* ]] &&
+           [[ "$message" == *"Mode=4"* ]] && timesync_is_synchronized; then
             print_success "systemd-timesyncd receives time from $server ($(timedatectl show-timesync -p ServerAddress --value 2>/dev/null))"
             return 0
         fi
         sleep 2
     done
-    print_error "systemd-timesyncd got no reply from $servers within $TIMESYNC_WAIT_SECONDS seconds"
+    print_error "systemd-timesyncd did not synchronize with $servers within $TIMESYNC_WAIT_SECONDS seconds"
     timedatectl timesync-status 2>&1 | sed 's/^/  /'
     return 1
 }
@@ -1853,7 +1893,7 @@ timesync_configure_timesyncd() {
     local servers="$1" dropin="$TIMESYNC_TIMESYNCD_DROPIN" file
     if [ "$TIMESYNC_SERVICE" = "none" ]; then
         print_message "Installing systemd-timesyncd..."
-        wait_for_apt_locks
+        wait_for_apt_locks || return 1
         if ! DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-timesyncd; then
             print_error "Failed to install systemd-timesyncd"
             return 1
@@ -2578,7 +2618,7 @@ if [ "$INTERACTIVE" = true ]; then
     if [ "$CONFIGURE_SSH" = "y" ] || [ "$CONFIGURE_SSH" = "Y" ]; then
         while true; do
             prompt_value SSH_PORT "Enter new SSH port (default 22): " "22" valid_uint "Enter an integer port from 1 to 65535." 1 65535
-            SSH_PORT=${SSH_PORT:-22}
+            SSH_PORT=$((10#$SSH_PORT))
 
             # Validate port number
             if [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ]; then
@@ -2914,7 +2954,7 @@ if [ "$INTERACTIVE" = true ]; then
             print_message "Select installation source:"
             print_message "  1 - Install from password-protected archive (ufw-docker-rules-v4.7z)"
             print_message "      Archive contains both v4 and v6 scripts"
-            print_message "  2 - Install from public repository (https://raw.githubusercontent.com/civisrom/ufw-rules-docker/...)"
+            print_message "  2 - Install verified scripts from this repository (config/vendor/ufw-rules-v4.sh or ufw-rules-v6.sh)"
             prompt_value UFW_INSTALL_SOURCE "Choose source (1 or 2, default: 1): " "1" valid_choice "Choose 1 (archive) or 2 (repository)." 1 2
             UFW_INSTALL_SOURCE=${UFW_INSTALL_SOURCE:-1}
 
@@ -4260,7 +4300,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         RUSTDESK_UPDATE_SCRIPT_PATH="/usr/local/sbin/rustdesk-safe-update.sh"
         RUSTDESK_UPDATE_SERVICE_SHA256="597de499d52ce1fa058624289fde8c5739d90bba43a6ea5a4a249f7a0a6ba874"
         RUSTDESK_UPDATE_TIMER_SHA256="281e81c5cd6515341b904de91f742cf0e203657303c33d12b668fd256545d961"
-        RUSTDESK_UPDATE_SCRIPT_SHA256="0eab8fb576d06c0e836febc725706a458b3b86051cf73bed35168ce7a957ae5e"
+        RUSTDESK_UPDATE_SCRIPT_SHA256="9ebee80d805382fe516477ab412efe13ea40b7480d9fc915578c3432403abfa6"
 
         RUSTDESK_UPDATE_OK=true
 
@@ -5243,11 +5283,20 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                 if [ "$NGINX_IPV6_GUARD" = "y" ]; then
                     nginx_strip_ipv6_listen
                     if dpkg --configure -a 2>/dev/null && apt-get install -y -f; then
-                        print_success "nginx install completed after removing IPv6 listen directives"
-                        if nginx -t 2>&1 && systemctl enable nginx 2>/dev/null && systemctl restart nginx 2>/dev/null; then
+                        if apt-get install -y \
+                                -o Dpkg::Options::=--force-confold \
+                                -o Dpkg::Options::=--force-confdef $NGINX_PKGS &&
+                           nginx -t 2>&1 && systemctl enable nginx 2>/dev/null && systemctl restart nginx 2>/dev/null; then
                             print_success "nginx configuration verified and service started"
                         else
                             print_error "nginx recovery install completed but validation or service start failed"
+                            if [ -n "$NGINX_BK" ]; then
+                                if nginx_restore_migration "$NGINX_BK"; then
+                                    print_warning "Previous nginx packages and configuration were restored"
+                                else
+                                    print_error "Automatic nginx rollback failed; recovery files are in: $NGINX_BK"
+                                fi
+                            fi
                         fi
                     else
                         print_error "Failed to install one or more nginx packages: $NGINX_PKGS"
@@ -5642,7 +5691,7 @@ fi
 # Configure dedicated forwarding accounts only after global SSH settings.
 if is_yes "${CONFIGURE_TELEGRAM_TUNNEL:-n}"; then
     TELEGRAM_HELPER=/usr/local/sbin/telegram-ssh-tunnel
-    TELEGRAM_HELPER_SHA256="df9a1d2d181fb454cd50bb9295590325806a9a2134217d3fdee6803313b5bda1"
+    TELEGRAM_HELPER_SHA256="5846979906941f60b733825607057a62c4d2628a31e083f628324767ca967f54"
     TELEGRAM_TUNNEL_OK=true
     if install_verified_repo_asset "config/telegram-ssh-tunnel.py" "$TELEGRAM_HELPER" "$TELEGRAM_HELPER_SHA256" 0755; then
         TELEGRAM_ARGS=()
@@ -5683,8 +5732,11 @@ if { [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; } && command -v u
     print_message "Configuring UFW firewall..."
     UFW_CONFIG_OK=true
     
-    UFW_SSH_PORTS=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
-    UFW_SSH_PORTS=${UFW_SSH_PORTS:-$SSH_PORT}
+    if ! UFW_SSH_PORTS=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}') ||
+       [ -z "$UFW_SSH_PORTS" ]; then
+        print_error "Could not determine SSH listener ports; refusing to change UFW policies"
+        exit 1
+    fi
     for UFW_SSH_PORT in $UFW_SSH_PORTS; do
         ufw allow "${UFW_SSH_PORT}/tcp" comment 'SSH' || UFW_CONFIG_OK=false
     done
@@ -5991,8 +6043,11 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
             if [ -f "$DAEMON_JSON" ]; then
                 # Backup existing daemon.json
                 DAEMON_JSON_BACKUP="${DAEMON_JSON}.backup.$(date +%Y%m%d-%H%M%S)~"
-                cp -- "$DAEMON_JSON" "$DAEMON_JSON_BACKUP"
-                chmod 0600 "$DAEMON_JSON_BACKUP"
+                if ! cp -- "$DAEMON_JSON" "$DAEMON_JSON_BACKUP" ||
+                   ! chmod 0600 "$DAEMON_JSON_BACKUP"; then
+                    print_error "Could not back up daemon.json; refusing to replace Docker configuration"
+                    exit 1
+                fi
                 print_message "Existing daemon.json backed up to $DAEMON_JSON_BACKUP"
 
                 # Merge only after successfully parsing the administrator's
@@ -6023,9 +6078,13 @@ with open(destination, "w", encoding="utf-8") as stream:
     stream.write("\n")
 PYEOF
                     then
-                        chown root:root "$DAEMON_JSON_TMP"
-                        mv -f -- "$DAEMON_JSON_TMP" "$DAEMON_JSON"
-                        print_message "daemon.json updated (merged with existing config)"
+                        if write_file_atomic "$DAEMON_JSON" 0600 root:root < "$DAEMON_JSON_TMP"; then
+                            print_message "daemon.json updated (merged with existing config)"
+                        else
+                            print_error "Could not install the merged Docker configuration"
+                            DOCKER_DISABLE_IPTABLES="n"
+                        fi
+                        rm -f -- "$DAEMON_JSON_TMP"
                     else
                         rm -f -- "$DAEMON_JSON_TMP"
                         print_error "Existing daemon.json is not valid JSON; it was left unchanged"
@@ -6114,14 +6173,13 @@ fi
 # Install ufw-docker (independent of Docker installation)
 if [ "$INSTALL_UFW_DOCKER" = "y" ] || [ "$INSTALL_UFW_DOCKER" = "Y" ]; then
     print_message "Installing ufw-docker..."
-    UFW_DOCKER_COMMIT="020a8699f95592561f254d8d4ad1bb40d401dfc7"
-    UFW_DOCKER_SHA256="643e56b080567c567b4aa28650196849b2a2da5dd0473fd3e5216b0886035ab0"
+    UFW_DOCKER_SHA256="591dc451e8bfce8d95e8c5df255cbeca145f59432b7ab6425149c47267962752"
     if create_temp_dir "ufw-docker"; then
         UFW_DOCKER_TMP="${SYSTEM_SETUP_CREATED_TEMP_DIR}/ufw-docker"
     else
         UFW_DOCKER_TMP=""
     fi
-    UFW_DOCKER_URL="https://raw.githubusercontent.com/chaifeng/ufw-docker/${UFW_DOCKER_COMMIT}/ufw-docker"
+    UFW_DOCKER_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/vendor/ufw-docker"
 
     if [ -n "$UFW_DOCKER_TMP" ] && download_url_ipv4 "$UFW_DOCKER_URL" "$UFW_DOCKER_TMP" && \
        [ "$(sha256sum "$UFW_DOCKER_TMP" | awk '{print $1}')" = "$UFW_DOCKER_SHA256" ]; then
@@ -6521,11 +6579,7 @@ ${CRONTAB_TASKS}"
         print_error "Failed to install crontab; previous crontab was preserved"
     fi
     rm -f "$EXISTING_CRONTAB_FILE" "$CLEAN_CRONTAB_FILE"
-    # Display configured crontab
-    print_message "Configured crontab:"
-    echo "----------------------------------------"
-    crontab -l
-    echo "----------------------------------------"
+    # Existing commands may contain credentials; do not copy them into logs.
     echo ""
     fi
 else
@@ -6550,13 +6604,12 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
     MOTD_TEST_OUTPUT="${MOTD_TMP_DIR}/motd-test.txt"
     MOTD_SCRIPT_READY=false
     
-    MOTD_COMMIT="11f4fb44c4e8f906059212b99661156bac3f059e"
     if [ "$OS" = "debian" ]; then
-        MOTD_URL="https://raw.githubusercontent.com/civisrom/motd-ubuntu-debian/${MOTD_COMMIT}/scripts/debian.sh"
-        MOTD_SHA256="b26fdfaa4f61cade002de578c0e6872c19ee672655a4ecea631e5f50c597c0f7"
+        MOTD_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/vendor/motd-debian.sh"
+        MOTD_SHA256="1ed86b9962b433a2b47b19f7985ec08d3ca0efe0688fc9136c297cfa4937ed1a"
     else
-        MOTD_URL="https://raw.githubusercontent.com/civisrom/motd-ubuntu-debian/${MOTD_COMMIT}/scripts/ubuntu.sh"
-        MOTD_SHA256="ad1303d8b8ee427ea7956a9517de02572b6897034da1782eb49f66538e429e49"
+        MOTD_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/vendor/motd-ubuntu.sh"
+        MOTD_SHA256="21f703ead64f82dc86135a807fc65418531724ddb47f29d0403571dd229ecf6f"
     fi
     
     print_message "Downloading MOTD installation script for $OS..."
@@ -6581,11 +6634,11 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
             print_message "Applying MOTD post-installation fixes..."
             
             # Initialize SSH restart flag
-            SSH_RESTART_NEEDED=false
+            SSH_RESTART_NEEDED=true
             
             # 1. Ensure all scripts in /etc/update-motd.d/ are executable
             if [ -d /etc/update-motd.d ]; then
-                chmod +x /etc/update-motd.d/* 2>/dev/null
+                chmod +x /etc/update-motd.d/[0-9][0-9]-* 2>/dev/null
                 # Also ensure directory permissions are correct
                 chmod 755 /etc/update-motd.d
                 print_message "Set executable permissions on MOTD scripts and directory"
@@ -6605,19 +6658,19 @@ if [ "$INSTALL_MOTD" = "y" ] || [ "$INSTALL_MOTD" = "Y" ]; then
                     SSH_RESTART_NEEDED=true
                 fi
                 
-                # Check PrintMotd parameter
+                # PAM renders the dynamic MOTD; sshd must not print it again.
                 if grep -q "^PrintMotd" "$SSHD_CONFIG"; then
-                    # Parameter exists, ensure it's set to yes
-                    if ! grep -q "^PrintMotd yes" "$SSHD_CONFIG"; then
-                        sed -i 's/^PrintMotd.*/PrintMotd yes/' "$SSHD_CONFIG"
-                        print_message "Enabled PrintMotd in SSH config"
+                    # Keep the validated vendor setting (no duplicate static output).
+                    if ! grep -q "^PrintMotd no" "$SSHD_CONFIG"; then
+                        sed -i 's/^PrintMotd.*/PrintMotd no/' "$SSHD_CONFIG"
+                        print_message "Disabled duplicate PrintMotd in SSH config"
                         SSH_RESTART_NEEDED=true
                     fi
                 else
                     # Parameter doesn't exist, add it
                     echo "" >> "$SSHD_CONFIG"
-                    echo "# Enable MOTD" >> "$SSHD_CONFIG"
-                    echo "PrintMotd yes" >> "$SSHD_CONFIG"
+                    echo "# Let PAM display MOTD" >> "$SSHD_CONFIG"
+                    echo "PrintMotd no" >> "$SSHD_CONFIG"
                     print_message "Added PrintMotd to SSH config"
                     SSH_RESTART_NEEDED=true
                 fi
@@ -6774,6 +6827,48 @@ fi
 # INSTALL CUSTOM UFW DOCKER RULES
 # ============================================
 
+install_ufw_custom_rules_script() {
+    local source="$1" candidate backup
+
+    candidate=$(mktemp "${UFW_INSTALL_PATH}.candidate.XXXXXX") || {
+        print_error "Could not create a temporary UFW rules candidate"
+        return 1
+    }
+    SYSTEM_SETUP_TEMP_FILES+=("$candidate")
+    if ! cp -- "$source" "$candidate"; then
+        print_error "Failed to stage the custom UFW rules script"
+        return 1
+    fi
+
+    if [ -n "$UFW_SSH_PORT" ]; then
+        if ! valid_uint "$UFW_SSH_PORT" 1 65535 ||
+           ! sed -i -e 's/^SSH_PORT=22$/SSH_PORT='"$UFW_SSH_PORT"'/' \
+                    -e 's/^SSH_PORT=${SSH_PORT:-22}$/SSH_PORT='"$UFW_SSH_PORT"'/' "$candidate" ||
+           ! grep -Fxq "SSH_PORT=$UFW_SSH_PORT" "$candidate"; then
+            print_error "Failed to configure the selected SSH port; existing UFW script was preserved"
+            return 1
+        fi
+    fi
+    if ! validate_shell_script "$candidate" bash; then
+        print_error "Custom UFW rules candidate is not a valid shell script"
+        return 1
+    fi
+
+    if [ -e "$UFW_INSTALL_PATH" ] || [ -L "$UFW_INSTALL_PATH" ]; then
+        backup="${UFW_INSTALL_PATH}.backup.$(date +%Y%m%d-%H%M%S)~"
+        if ! cp -p -- "$UFW_INSTALL_PATH" "$backup"; then
+            print_error "Cannot back up the existing UFW rules script; installation cancelled"
+            return 1
+        fi
+    fi
+    if ! write_file_atomic "$UFW_INSTALL_PATH" 0755 root:root < "$candidate"; then
+        print_error "Failed to install the prepared UFW rules script"
+        return 1
+    fi
+    rm -f -- "$candidate"
+    print_message "Custom UFW rules script prepared and installed with executable permissions"
+}
+
 run_ufw_custom_rules_script() {
     if ! validate_shell_script "$UFW_INSTALL_PATH" bash; then
         print_error "Refusing to run invalid custom UFW Docker rules script: $UFW_INSTALL_PATH"
@@ -6828,34 +6923,24 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
     if [ "$UFW_INSTALL_SOURCE" = "2" ]; then
         # Install from public repository
         print_message "Installing from public repository..."
-        UFW_RULES_COMMIT="8cca4af2ce38323940d3657b1c8bbfc188d0b98a"
         case "$UFW_RULES_VERSION" in
-            4) UFW_RULES_SHA256="e36a390a808a9a2684e5423173a550b0c3df762c723c0f4f1897dde857c2d42d" ;;
-            6) UFW_RULES_SHA256="0c2809fbaefaf3220643df60bfb76f343cfc7882793603f7f40f476a16c01f13" ;;
+            4) UFW_RULES_SHA256="222216d39a71c836e794c1cdb856dd88a1f09099e7cd403308a44cf1534dedce" ;;
+            6) UFW_RULES_SHA256="ba2fea0a4eed5d41943e6baa8828c4b5e9dcc10ebd0d8f0cf8e1899f37d01b90" ;;
             *) print_error "Unsupported UFW rules version: $UFW_RULES_VERSION"; UFW_RULES_SHA256="" ;;
         esac
-        UFW_REPO_URL="https://raw.githubusercontent.com/civisrom/ufw-rules-docker/${UFW_RULES_COMMIT}/ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
+        UFW_REPO_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/vendor/ufw-rules-v${UFW_RULES_VERSION}.sh"
 
         print_message "Downloading script from repository..."
-        if [ -n "$UFW_RULES_SHA256" ] && download_verified_url "$UFW_REPO_URL" "$UFW_INSTALL_PATH" "$UFW_RULES_SHA256"; then
+        UFW_PUBLIC_SOURCE=""
+        if create_temp_dir "ufw-custom-public"; then
+            UFW_PUBLIC_SOURCE="${SYSTEM_SETUP_CREATED_TEMP_DIR}/${UFW_SCRIPT_NAME}"
+        fi
+        if [ -n "$UFW_RULES_SHA256" ] && [ -n "$UFW_PUBLIC_SOURCE" ] &&
+           download_verified_url "$UFW_REPO_URL" "$UFW_PUBLIC_SOURCE" "$UFW_RULES_SHA256"; then
             print_message "Pinned script downloaded and SHA256 verified"
-
-            # Replace SSH port in script if custom port is specified
-            if [ -n "$UFW_SSH_PORT" ] && [ "$UFW_SSH_PORT" != "22" ]; then
-                print_message "Configuring script to use custom SSH port: $UFW_SSH_PORT"
-                # Replace hardcoded SSH_PORT=22 with custom port
-                if sed -i "s/^SSH_PORT=22$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"; then
-                    print_message "SSH port configured successfully in ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
-                fi
-                # Also replace SSH_PORT=${SSH_PORT:-22} pattern if exists
-                sed -i "s/^SSH_PORT=\${SSH_PORT:-22}$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
+            if install_ufw_custom_rules_script "$UFW_PUBLIC_SOURCE"; then
+                run_ufw_custom_rules_script && UFW_CUSTOM_RULES_OK=true
             fi
-
-            # Set executable permissions
-            chmod +x "$UFW_INSTALL_PATH"
-            print_message "Script installed with executable permissions"
-
-            run_ufw_custom_rules_script && UFW_CUSTOM_RULES_OK=true
         else
             print_error "Failed to download script from repository"
             print_error "URL: $UFW_REPO_URL"
@@ -6921,35 +7006,7 @@ if [ "$INSTALL_UFW_CUSTOM_RULES" = "y" ] || [ "$INSTALL_UFW_CUSTOM_RULES" = "Y" 
                     print_message "Found script: $UFW_SCRIPT_NAME"
                     print_message "Installing script to ${UFW_INSTALL_PATH}..."
 
-                    if ! validate_shell_script "$SCRIPT_SOURCE" bash; then
-                        print_error "Archive contained an invalid shell script: $SCRIPT_SOURCE"
-                        SCRIPT_FOUND=false
-                    else
-                        if [ -f "$UFW_INSTALL_PATH" ]; then
-                            cp -- "$UFW_INSTALL_PATH" "${UFW_INSTALL_PATH}.backup.$(date +%Y%m%d-%H%M%S)~"
-                        fi
-                        if ! install -m 0755 -o root -g root "$SCRIPT_SOURCE" "$UFW_INSTALL_PATH"; then
-                            print_error "Failed to install the extracted UFW script"
-                            SCRIPT_FOUND=false
-                        fi
-                    fi
-
-                    if [ "$SCRIPT_FOUND" = true ]; then
-                        # Set executable permissions
-                        chmod 0755 "$UFW_INSTALL_PATH"
-                        print_message "Script installed with executable permissions"
-
-                    # Replace SSH port in script if custom port is specified
-                    if [ -n "$UFW_SSH_PORT" ] && [ "$UFW_SSH_PORT" != "22" ]; then
-                        print_message "Configuring script to use custom SSH port: $UFW_SSH_PORT"
-                        # Replace hardcoded SSH_PORT=22 with custom port
-                        if sed -i "s/^SSH_PORT=22$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"; then
-                            print_message "SSH port configured successfully in ufw-docker-rules-v${UFW_RULES_VERSION}.sh"
-                        fi
-                        # Also replace SSH_PORT=${SSH_PORT:-22} pattern if exists
-                        sed -i "s/^SSH_PORT=\${SSH_PORT:-22}$/SSH_PORT=$UFW_SSH_PORT/" "$UFW_INSTALL_PATH"
-                    fi
-
+                    if install_ufw_custom_rules_script "$SCRIPT_SOURCE"; then
                         run_ufw_custom_rules_script && UFW_CUSTOM_RULES_OK=true
                     fi
                 else
@@ -7226,8 +7283,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             fi
 
             # Copy selected profile config as /etc/nftables.conf.
-            # Mode 0755: the config carries a `#!/usr/sbin/nft -f` shebang and
-            # is expected to be executable so it can be invoked directly.
+            # Firewall configuration contains private address lists.
             NFT_CONFIG_CHANGED=true
             if [ "$NFTABLES_OK" != true ] || ! write_file_atomic "$NFTABLES_DST" 0600 root:root < "$NFTABLES_SRC"; then
                 print_error "CRITICAL: Atomic nftables config installation failed"
@@ -7238,7 +7294,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
             # Verify the copy was successful
             if [ "$NFTABLES_OK" = true ] && [ -f "$NFTABLES_DST" ] && [ -s "$NFTABLES_DST" ] && cmp -s "$NFTABLES_SRC" "$NFTABLES_DST"; then
                 print_success "Installed ${NFTABLES_CONF_FILE} -> $NFTABLES_DST"
-                print_message "  Permissions: 755, Owner: root:root"
+                print_message "  Permissions: 600, Owner: root:root"
                 print_message "  File size: $(wc -c < "$NFTABLES_DST") bytes"
             else
                 print_error "CRITICAL: Config file copy verification failed!"
@@ -7398,7 +7454,7 @@ if [ "$ENABLE_NFTABLES" = "y" ] || [ "$ENABLE_NFTABLES" = "Y" ]; then
     # Existing elements, rule chains, NAT and selected addresses are retained.
     if [ "$NFTABLES_OK" = true ]; then
         NFT_NODE_SETS_HELPER=/usr/local/sbin/nft-node-sets
-        NFT_NODE_SETS_SHA256="a19da2620b2037f1c2b1e94487b3ec6e40dac13b3bae8e37be7b66fb02d2cdc3"
+        NFT_NODE_SETS_SHA256="c4c6707e2a5b8b96fb41c89254d5c6f18d5c6ccaa6a63988a9d31e0c2056d648"
         if ! install_verified_repo_asset "config/nft-node-sets.py" "$NFT_NODE_SETS_HELPER" "$NFT_NODE_SETS_SHA256" 0755 ||
            ! python3 "$NFT_NODE_SETS_HELPER"; then
             print_warning "IPv6 node sets were not initialized; existing firewall remains active"
@@ -7442,7 +7498,7 @@ if is_yes "$INSTALL_NFT_DOCKER_WATCH" && [ "${NFTABLES_OK:-false}" = true ]; the
     print_header "═══════════════════════════════════════════════════"
     echo ""
 
-    NFT_WATCH_INSTALLER_SHA256="f8d21169ee5d294cbf6e225e1435bde6a9f125f621801434d14c68488fe5bd66"
+    NFT_WATCH_INSTALLER_SHA256="371cecc147d3966e146c2c6245abb207e5d429fe2b8a7a9318c5d240a1373e9e"
     NFT_WATCH_INSTALLER_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/install-nft-docker-watch.sh"
     NFT_WATCH_LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     NFT_WATCH_INSTALLER="${NFT_WATCH_LOCAL_DIR}/install-nft-docker-watch.sh"
@@ -7508,12 +7564,11 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
             print_warning "zram module could not be loaded; swap installer will check available support"
         fi
     else
-        print_warning "zram module unavailable — zramswap will be skipped by swap-setup.sh"
+        print_warning "zram module unavailable — hybrid swap setup will stop if kernel support cannot be enabled"
     fi
 
-    SWAP_SCRIPT_COMMIT="1409e6f424ff7bea57c450dfa878e498645e71c5"
-    SWAP_SCRIPT_SHA256="175011c596336598e72dc2a75c50aa49649ae464fcd275fb780ae88a83ac7e92"
-    SWAP_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/swapfile-script/${SWAP_SCRIPT_COMMIT}/swap-setup.sh"
+    SWAP_SCRIPT_SHA256="19f7796c53df149aee2c6a3b34adc00887d9a6fb96fe8e86d1d65a9221286ae4"
+    SWAP_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/vendor/swap-setup.sh"
     if create_temp_dir "swap-setup"; then
         SWAP_TMP_DIR="$SYSTEM_SETUP_CREATED_TEMP_DIR"
     else
@@ -7591,7 +7646,7 @@ if [ "$CONFIGURE_SWAP" = "y" ] || [ "$CONFIGURE_SWAP" = "Y" ]; then
     else
         print_error "Failed to download or validate swap-setup.sh"
         print_message "You can manually install it later:"
-        print_message "  Review the pinned source commit: $SWAP_SCRIPT_COMMIT"
+        print_message "  Review the verified source: $SWAP_SCRIPT_URL"
     fi
 else
     print_message "Skipping swap configuration (not requested)"
@@ -7608,9 +7663,8 @@ if [ "$RUN_BBR_OPTIMIZER" = "y" ] || [ "$RUN_BBR_OPTIMIZER" = "Y" ]; then
     print_header "═══════════════════════════════════════════════════"
     echo ""
     
-    BBR_SCRIPT_COMMIT="d97fd79bac63dfd98f0d0f4f6d626395b16e31c9"
-    BBR_SCRIPT_SHA256="c0ed6d9f0de9d97f363d5a4ae91e4e4287ab8aa5317ad92de27a520dc19cf49c"
-    BBR_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/Linux_NetworkOptimizer/${BBR_SCRIPT_COMMIT}/bbr.sh"
+    BBR_SCRIPT_SHA256="e9e8182598f2cd7eedfb2b0b87ede970c1b95bb6e3fa808c9af3da58a51ca150"
+    BBR_SCRIPT_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/${SYSTEM_SETUP_REPOSITORY_REF}/config/vendor/bbr.sh"
     if create_temp_dir "bbr-optimizer"; then
         BBR_TMP_DIR="$SYSTEM_SETUP_CREATED_TEMP_DIR"
     else
@@ -7973,6 +8027,7 @@ configure_systemd_resolved() {
     local resolv_file=/etc/resolv.conf backup_dir
     local had_config=false had_resolv=false old_active=false old_enabled
     local dot=no stub=yes ready=true target=/run/systemd/resolve/stub-resolv.conf
+    local dns_address="${RESOLVED_DNS%%#*}" dns_listener dns_wildcard
 
     if ! python3 - "$RESOLVED_DNS" <<'PYDNS'
 import ipaddress
@@ -7991,10 +8046,25 @@ PYDNS
         return 1
     fi
 
-    if [[ "$RESOLVED_DNS" == 127.* ]] &&
-       ! ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq '(^127\.0\.0\.1:53$|^0\.0\.0\.0:53$|^\*:53$)'; then
-        print_error "Selected local DNS server has no listener on port 53"
+    if [ "$dns_address" = 127.0.0.53 ] || [ "$dns_address" = 127.0.0.54 ]; then
+        print_error "The systemd-resolved stub cannot be its own upstream DNS server"
         return 1
+    fi
+    if [[ "$dns_address" == 127.* ]] || [ "$dns_address" = ::1 ]; then
+        dns_listener="$dns_address:53" dns_wildcard=0.0.0.0:53
+        if [ "$dns_address" = ::1 ]; then
+            dns_listener='[::1]:53' dns_wildcard='[::]:53'
+        fi
+        if ! ss -H -lntu 2>/dev/null | awk -v target="$dns_listener" -v wildcard="$dns_wildcard" \
+                '$5 == target || $5 == wildcard || $5 == "*:53" { found=1 } END { exit !found }'; then
+            print_error "Selected local DNS server has no listener on port 53"
+            return 1
+        fi
+    fi
+
+    if is_yes "$RESOLVED_DNS_OVER_TLS" && is_yes "$RESOLVED_STUB_LISTENER_OFF"; then
+        print_warning "Keeping DNSStubListener enabled so resolv.conf clients use DNS-over-TLS"
+        RESOLVED_STUB_LISTENER_OFF=n
     fi
 
     # Capture the manager-owned symlink itself, not only its current target.
@@ -8189,7 +8259,7 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
         print_message "Original $INTERFACES_FILE backed up"
 
         # Check if there are any inet6 lines
-        if grep -q "inet6" "$INTERFACES_FILE"; then
+        if grep -qE 'inet6|dns-nameservers.*:' "$INTERFACES_FILE"; then
             print_message "Found IPv6 configuration in $INTERFACES_FILE"
 
             # Create temporary file
@@ -8199,30 +8269,30 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
             # This includes iface lines with inet6 and their parameters
             # Also removes IPv6 addresses from dns-nameservers in IPv4 blocks
             awk '
-            /^[[:space:]]*iface.*inet6/ {
+            /^[[:space:]]*iface[[:space:]]+[^[:space:]]+[[:space:]]+inet6[[:space:]]/ {
                 # This is an inet6 interface definition
                 print "#" $0
                 in_inet6_block = 1
                 in_inet4_block = 0
                 next
             }
-            /^[[:space:]]*iface.*inet[[:space:]]/ {
+            /^[[:space:]]*iface[[:space:]]+[^[:space:]]+[[:space:]]+inet[[:space:]]/ {
                 # This is an inet4 interface definition
                 in_inet4_block = 1
                 in_inet6_block = 0
                 print $0
                 next
             }
+            /^[[:space:]]*(auto|allow-[^[:space:]]+|mapping|source|source-directory|iface)[[:space:]]/ {
+                in_inet6_block = 0
+                in_inet4_block = 0
+                print $0
+                next
+            }
             in_inet6_block {
-                # We are in an inet6 block
-                if (/^[[:space:]]*$/ || /^[[:space:]]*#/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
-                    # End of inet6 block
-                    in_inet6_block = 0
-                    print $0
-                } else {
-                    # This line is part of inet6 configuration
-                    print "#" $0
-                }
+                # Comments and blank lines do not end an interfaces stanza.
+                if (/^[[:space:]]*$/ || /^[[:space:]]*#/) print $0
+                else print "#" $0
                 next
             }
             in_inet4_block && /^[[:space:]]*dns-nameservers/ {
@@ -8246,10 +8316,6 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                 next
             }
             in_inet4_block {
-                # Check if we are leaving the inet4 block
-                if (/^[[:space:]]*$/ || /^[[:space:]]*auto/ || /^[[:space:]]*iface/) {
-                    in_inet4_block = 0
-                }
                 print $0
                 next
             }
@@ -8266,13 +8332,6 @@ if [ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ];
                 rm -f -- "$TEMP_FILE"
                 INTERFACES_OK=true
                 print_success "IPv6 configuration commented out in $INTERFACES_FILE"
-
-                echo ""
-                print_message "Modified $INTERFACES_FILE preview:"
-                print_header "─────────────────────────────────────────────"
-                grep -A 2 -B 2 "inet6" "$INTERFACES_FILE" 2>/dev/null || print_message "No IPv6 lines remaining (all commented)"
-                print_header "─────────────────────────────────────────────"
-                echo ""
 
                 # Remove IPv6 nameservers from /etc/resolv.conf
                 # Skip if systemd-resolved manages resolv.conf (it's a symlink)
@@ -8535,7 +8594,6 @@ PYEOF
                         print_warning "If the box's only working route is IPv6, applying will drop SSH."
                     else
                         print_error "netplan generate FAILED — see $NETPLAN_LOG"
-                        cat "$NETPLAN_LOG" | sed 's/^/    /'
                         print_warning "Restoring all modified netplan files from backup..."
                         for f in "${NETPLAN_CHANGED_FILES[@]}"; do
                             cp "${f}.backup.${NETPLAN_TS}~" "$f"

@@ -81,13 +81,13 @@ def ensure(path):
     mode = path.stat().st_mode & 0o777 if existed else 0o600
     transaction = 'add table ip6 filter\n'
     for name, declaration in declarations(before).items():
-        result = nft(['-j', 'list', 'set', 'ip6', 'filter', name], check=False)
+        kind, definition = declaration.split(' ', 1)
+        result = nft(['-j', 'list', kind, 'ip6', 'filter', name], check=False)
         if result.returncode == 0:
             obj = next(x.get('set', x.get('map')) for x in json.loads(result.stdout)['nftables'] if 'set' in x or 'map' in x)
             if obj.get('type') != 'ipv6_addr' or obj.get('map') != ('ipv6_addr' if name == 'egress6_snat' else None):
                 raise ValueError('Existing node set has an incompatible type; no changes made')
             continue
-        kind, definition = declaration.split(' ', 1)
         transaction += 'add '+kind+' ip6 filter '+definition+'\n'
     # Check persistence and the small live transaction before making either change.
     nft(['-c', '-f', '-'], after)

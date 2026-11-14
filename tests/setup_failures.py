@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Exercise installer failure paths without installing or changing the host."""
 
+import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
-import time
 import unittest
 
 from input_validation import INPUT_HELPERS
@@ -856,7 +855,6 @@ write_file_atomic() { local temporary; temporary=$(mktemp); cat > "$temporary" &
                 self.assertIn(f"Suites: {codename} {codename}-updates", target.read_text())
                 self.assertEqual(target.read_text().count("Types: deb"), 2)
 
-    @unittest.skipUnless(shutil.which("flock"), "flock required for APT lock tests")
     def test_apt_locks_are_waited_for_not_ignored(self):
         lock = self.root / "lists-lock"
         lock.touch()
@@ -869,32 +867,13 @@ wait_for_apt_locks
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Waiting for another package manager", result.stdout)
 
-        # A held lock must fail loudly and name the file, never be skipped.
-        # New session: the lock is held by flock's child, so the whole process
-        # group has to go away before the lock is actually released.
-        holder = subprocess.Popen(
-            ["flock", str(lock), "sleep", "30"], start_new_session=True
-        )
-        release = lambda: os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
-        self.addCleanup(lambda: holder.poll() is None and release())
-        for _ in range(100):
-            if subprocess.run(["flock", "-n", str(lock), "true"]).returncode != 0:
-                break
-            time.sleep(0.05)
-        else:
-            self.fail("helper never acquired the lock")
-        result = self.shell(body, lock, 0)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(str(lock), result.stderr)
+        # APT/dpkg hold POSIX record locks, independently of BSD flock locks.
+        with lock.open("r+") as holder:
+            fcntl.lockf(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.shell(body, lock, 0)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(str(lock), result.stderr)
 
-        release()
-        holder.wait()
-        for _ in range(100):
-            if subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0:
-                break
-            time.sleep(0.05)
-        else:
-            self.fail("lock was never released")
         result = self.shell(body, lock, 600)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1000,6 +979,7 @@ timedatectl() {{
         "show-timesync -p ServerName --value") printf 'b.example\n' ;;
         "show-timesync -p NTPMessage --value") [ "$reply" = yes ] && printf '{{ Leap=0, Version=4, Mode=4, Stratum=3 }}\n' ;;
         "show-timesync -p ServerAddress --value") printf '192.0.2.7\n' ;;
+        "show -p NTPSynchronized --value") [ "$reply" = yes ] && printf 'yes\n' ;;
         *) printf 'timedatectl %s\n' "$*" >> "$calls" ;;
     esac
 }}
@@ -1017,7 +997,7 @@ timesync_configure_timesyncd "a.example b.example"
 
         result = self.shell(self.TIMESYNC + stubs, "no")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("got no reply from a.example b.example", result.stderr)
+        self.assertIn("did not synchronize with a.example b.example", result.stderr)
         self.assertTrue(list(dropins.glob("99-system-setup-ntp.conf.backup.*~")))
 
     def test_chrony_sources_file_and_reachability(self):

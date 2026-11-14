@@ -67,17 +67,22 @@ def main():
         if len(args) > 1:
             fail('слишком много аргументов')
         root = Path.home() / 'codex_project'
-        destination = Path(args[0]).resolve() if args else root / repo
+        destination = (Path(args[0]) if args else root / repo).resolve()
         if not destination.is_relative_to(root.resolve()):
             fail('рабочие клоны должны находиться в ~/codex_project')
         os.execvp('git', ['git', 'clone', url, str(destination)])
     if len(args) > 1:
         fail('слишком много аргументов')
     name = args[0] if args else 'origin'
-    if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', name) or name.startswith('-'):
         fail('некорректное имя remote')
     existing = subprocess.check_output(['git', 'remote'], text=True).splitlines()
-    os.execvp('git', ['git', 'remote', 'set-url' if name in existing else 'add', name, url])
+    if name in existing:
+        subprocess.run(['git', 'remote', 'set-url', name, url], check=True)
+        # An explicit pushurl overrides the fetch URL and may still point to
+        # another account. Replace every previous local push destination.
+        os.execvp('git', ['git', 'config', '--local', '--replace-all', f'remote.{name}.pushurl', url])
+    os.execvp('git', ['git', 'remote', 'add', name, url])
 
 
 if __name__ == '__main__':

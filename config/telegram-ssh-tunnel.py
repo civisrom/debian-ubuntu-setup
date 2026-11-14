@@ -31,6 +31,10 @@ def run(args, *, check=True, **kwargs):
 
 def host(value):
     try:
+        # IPv6 scope IDs are not validated by ipaddress and can contain SSH
+        # configuration directives, including embedded newlines.
+        if '%' in value:
+            raise ValueError()
         return str(ipaddress.ip_address(value))
     except ValueError:
         if len(value) <= 253 and all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', s)
@@ -388,10 +392,11 @@ def attach_bot(directory, wait=False):
     if base.stat().st_uid != 0 or base.stat().st_mode & 0o022:
         raise ValueError('VPNBot directory must be root-owned and not writable by others')
     target = base / 'override.env'
-    if target.is_symlink():
+    if target.is_symlink() or (target.exists() and (not target.is_file() or target.stat().st_nlink != 1)):
         raise ValueError('Unsafe VPNBot override file')
     # No app/config.php or Telegram token is opened. Preserve unrelated overrides.
-    before = target.read_text() if target.exists() else ''
+    existed = target.exists()
+    before = target.read_text() if existed else ''
     lines = [line for line in before.splitlines() if not re.match(r'^\s*(?:export\s+)?TELEGRAM_PROXY=', line)]
     after = '\n'.join(lines) + '\nTELEGRAM_PROXY=socks5h://10.10.0.1:10890\n'
     if before == after and bot_proxy_active(base):
@@ -399,17 +404,23 @@ def attach_bot(directory, wait=False):
         if wait:
             run(['systemctl', 'disable', '--now', 'vpnbot-telegram-app.timer'])
         return
-    write(target, after, 0o600)
     env = os.environ.copy()
-    env['IP'] = run(['hostname', '-I']).stdout.split()[0]
+    addresses = run(['hostname', '-I']).stdout.split()
+    if not addresses:
+        raise ValueError('Cannot determine the VPNBot host address')
+    env['IP'] = addresses[0]
     env['VER'] = run(['git', 'describe', '--tags', '--always'], cwd=base).stdout.strip()
+    write(target, after, 0o600)
     try:
         run(['python3', 'scripts/protocol_modules.py', 'compose', 'up', '-d', '--no-deps',
              '--force-recreate', 'php', 'service'], cwd=base, env=env)
         if not bot_proxy_active(base):
             raise RuntimeError('VPNBot containers did not apply the Telegram proxy')
     except Exception:
-        write(target, before, 0o600)
+        if existed:
+            write(target, before, 0o600)
+        else:
+            target.unlink(missing_ok=True)
         run(['python3', 'scripts/protocol_modules.py', 'compose', 'up', '-d', '--no-deps',
              '--force-recreate', 'php', 'service'], cwd=base, env=env, check=False)
         raise

@@ -33,6 +33,40 @@ fi
 
 new_image="${IMAGE_REPOSITORY}@${latest_digest}"
 env_backup=$(mktemp "${RUSTDESK_DIR}/.env.backup.XXXXXX")
+env_tmp=""
+env_changed=false
+keep_backup=false
+
+rollback() {
+    echo "RustDesk update failed; restoring the previous image" >&2
+    if [ -s "$env_backup" ]; then
+        cp -- "$env_backup" "$ENV_FILE" || return 1
+    else
+        printf 'RUSTDESK_IMAGE=%s\n' "$current_image" > "$ENV_FILE" || return 1
+    fi
+    chmod 0600 "$ENV_FILE" || return 1
+    docker compose up -d --wait --remove-orphans
+}
+
+finish() {
+    local result=$?
+    trap - EXIT INT TERM
+    if [ "$result" -ne 0 ] && [ "$env_changed" = true ]; then
+        if ! rollback; then
+            echo "RustDesk rollback failed; backup retained at $env_backup" >&2
+            keep_backup=true
+        fi
+    fi
+    [ -z "$env_tmp" ] || rm -f -- "$env_tmp"
+    if [ "$keep_backup" != true ]; then
+        rm -f -- "$env_backup"
+    fi
+    exit "$result"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [ -f "$ENV_FILE" ]; then
     cp -- "$ENV_FILE" "$env_backup"
 else
@@ -40,42 +74,29 @@ else
 fi
 
 env_tmp=$(mktemp "${RUSTDESK_DIR}/.env.new.XXXXXX")
-grep -v '^RUSTDESK_IMAGE=' "$env_backup" > "$env_tmp" || true
+grep -v '^RUSTDESK_IMAGE=' "$env_backup" > "$env_tmp" || {
+    grep_status=$?
+    [ "$grep_status" -eq 1 ] || exit "$grep_status"
+}
 printf 'RUSTDESK_IMAGE=%s\n' "$new_image" >> "$env_tmp"
 chmod 0600 "$env_tmp"
+env_changed=true
 mv -f -- "$env_tmp" "$ENV_FILE"
-
-rollback() {
-    echo "RustDesk update failed; restoring $current_image" >&2
-    if [ -s "$env_backup" ]; then
-        cp -- "$env_backup" "$ENV_FILE"
-    else
-        printf 'RUSTDESK_IMAGE=%s\n' "$current_image" > "$ENV_FILE"
-        chmod 0600 "$ENV_FILE"
-    fi
-    docker compose up -d --wait --remove-orphans || true
-}
+env_tmp=""
 
 if ! docker compose pull; then
-    rollback
-    rm -f -- "$env_backup"
     exit 1
 fi
 
 if ! docker compose up -d --wait --remove-orphans; then
-    rollback
-    rm -f -- "$env_backup"
     exit 1
 fi
 
 running_services=$(docker compose ps --services --status running | sort)
 if [ "$running_services" != $'hbbr\nhbbs' ]; then
     echo "RustDesk post-update service check failed" >&2
-    rollback
-    rm -f -- "$env_backup"
     exit 1
 fi
 
-rm -f -- "$env_backup"
-docker image prune -f || true
+env_changed=false
 echo "RustDesk updated successfully: $current_digest -> $latest_digest"

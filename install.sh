@@ -142,12 +142,13 @@ export SYSTEM_SETUP_REPOSITORY_COMMIT="$RESOLVED_COMMIT"
 set +e
 if [ -t 0 ]; then
     bash "$TEMP_SCRIPT"
-elif [ -r /dev/tty ]; then
-    bash "$TEMP_SCRIPT" < /dev/tty
+elif { exec 9</dev/tty; } 2>/dev/null; then
+    bash "$TEMP_SCRIPT" <&9 9<&-
 else
     bash "$TEMP_SCRIPT"
 fi
 EXIT_CODE=$?
+exec 9<&-
 set -e
 
 # Cleanup is handled by trap, but log it

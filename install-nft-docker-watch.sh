@@ -25,7 +25,7 @@ set -euo pipefail
 readonly NFT_CONF="/etc/nftables.conf"
 readonly NFT_APPLY_SCRIPT="/usr/local/sbin/nft-apply.sh"
 readonly NFT_BACKUP_DIR="/var/backups/nftables"
-readonly NFT_APPLY_SHA256="b1659d2a2adbe5cccc067d521f131e8a782b89dd60f7698ff4284c3fb446537c"
+readonly NFT_APPLY_SHA256="ec99d03b9d53797800dc1da12a8fea5e7f5a470f719fe112ab02f382ad1b0643"
 readonly NFT_APPLY_URL="https://raw.githubusercontent.com/civisrom/debian-ubuntu-setup/main/config/nft-apply.sh"
 INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly INSTALLER_DIR

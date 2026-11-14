@@ -11,3 +11,11 @@
 typeset -U path
 path=("$HOME/.local/bin" "$HOME/bin" $path)
 export PATH
+
+# Load the shared token file only when owned by this user and private.
+# This also works in non-interactive shells used by ghx.
+if [ -f "$HOME/.config/secrets.env" ] && [ -O "$HOME/.config/secrets.env" ]; then
+    case "$(stat -c '%a' "$HOME/.config/secrets.env" 2>/dev/null)" in
+        600|400) . "$HOME/.config/secrets.env" ;;
+    esac
+fi

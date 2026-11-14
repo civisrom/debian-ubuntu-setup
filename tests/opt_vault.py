@@ -73,6 +73,34 @@ class PayloadTests(unittest.TestCase):
         payload.restore(self.vault, self.target, self.backups)
         self.assertEqual(len(list(self.backups.iterdir())), 2)
 
+    def test_private_source_permissions_survive_roundtrip(self):
+        private = self.source / "private-data"
+        private.mkdir(mode=0o700)
+        for name in ("access.txt", "tool.sh"):
+            path = private / name
+            path.write_text("synthetic fixture")
+            path.chmod(0o600)
+        self.pack()
+        payload.restore(self.vault, self.target, self.backups)
+        self.assertEqual((self.target / "private-data").stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.target / "private-data/access.txt").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.target / "private-data/tool.sh").stat().st_mode & 0o777, 0o700)
+
+    def test_ssh_directory_and_extensionless_key_are_private(self):
+        self.assertEqual(payload.mode("service/.ssh", True), 0o700)
+        self.assertEqual(payload.mode("service/.ssh/id_ed25519"), 0o600)
+
+    def test_restore_keeps_private_destination_permissions(self):
+        (self.source / "access.txt").write_text("synthetic replacement")
+        (self.source / "access.txt").chmod(0o644)
+        (self.target / "access.txt").write_text("synthetic previous")
+        (self.target / "access.txt").chmod(0o600)
+        (self.target / "scripts").mkdir(mode=0o700)
+        self.pack()
+        payload.restore(self.vault, self.target, self.backups)
+        self.assertEqual((self.target / "access.txt").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.target / "scripts").stat().st_mode & 0o777, 0o700)
+
     def test_checksum_damage_keeps_destination(self):
         self.pack()
         with (self.vault / "payload.tar.gz").open("ab") as stream:
@@ -183,10 +211,12 @@ gpg() {
 '''
         cases = [
             ("1.26.29", version, True, True),
+            ("1.26.30", version, True, True),
             (version, version, True, False),
             ("9.0.0", "9.0.0", True, False),
             ("unknown", version, False, False),
             ("1.26.29", "1.26.29", False, True),
+            ("1.26.30", "1.26.30", False, True),
         ]
         for index, (before, after, success, upgraded) in enumerate(cases):
             with self.subTest(before=before, after=after):
