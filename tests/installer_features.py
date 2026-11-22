@@ -32,6 +32,35 @@ class InstallerFeatures(unittest.TestCase):
             text=True, capture_output=True, timeout=20,
         )
 
+    def test_login_shell_requires_plugins_and_both_verified_startup_files(self):
+        start = SOURCE.index('    if [ "$OH_MY_ZSH_OK" = true ]; then')
+        end = SOURCE.index('    echo ""', start)
+        setup = """
+USER_HOME=$1 repo=$2 failure=$3
+NEW_USERNAME=testuser USER_GROUP=testgroup OH_MY_ZSH_OK=true ZSH_CONFIG_OK=true
+sudo() { cat >/dev/null; [[ $failure != plugins ]]; }
+install_verified_repo_asset() {
+    [[ $1 != "config/$failure" ]] &&
+        [[ $(sha256sum "$repo/$1" | cut -d' ' -f1) = "$3" ]] &&
+        cp "$repo/$1" "$2"
+}
+chown() { [[ $failure != owner ]]; }
+zsh() { :; }
+chsh() { printf '%s\\n' "$*" > "$USER_HOME/switched"; }
+"""
+        for failure in ("none", "plugins", ".zshrc", ".zshenv", "owner"):
+            with self.subTest(failure=failure):
+                home = self.root / failure
+                home.mkdir()
+                result = self.shell(setup + SOURCE[start:end] + '\nprintf "%s" "$ZSH_CONFIG_OK"',
+                                    home, ROOT, failure)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                good = failure == "none"
+                self.assertEqual(result.stdout, "true" if good else "false")
+                self.assertEqual((home / "switched").exists(), good)
+                if good:
+                    self.assertEqual((home / "switched").read_text().strip(), "-s zsh testuser")
+
     def test_ufw_preserves_firewall_when_ssh_config_cannot_be_read(self):
         section = SOURCE.split("# CONFIGURE UFW\n# ============================================", 1)[1]
         section = section.split("# Configure ICMP blocking in UFW", 1)[0]

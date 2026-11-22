@@ -5444,10 +5444,10 @@ EOF
         
         # Download custom .zshrc
         print_message "Downloading custom .zshrc configuration..."
-        if install_verified_repo_asset "config/.zshrc" "$USER_HOME/.zshrc" "b5b20444bd9c87f06acb18e56e5cc96d86b40974fcaa3a85dd3ea692c348a654" 0644; then
+        ZSHRC_SHA256="363e04f970599ab5d4b83c92eac818a323614df45d938af29a98b9a4c20fc5de"
+        if install_verified_repo_asset "config/.zshrc" "$USER_HOME/.zshrc" "$ZSHRC_SHA256" 0644 &&
+           chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.zshrc"; then
             print_message "Custom .zshrc verified and installed"
-            chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.zshrc" || ZSH_CONFIG_OK=false
-            chmod 644 "$USER_HOME/.zshrc"
         else
             ZSH_CONFIG_OK=false
             print_error "Failed to install custom .zshrc"
@@ -5456,21 +5456,25 @@ EOF
         # Download custom .zshenv (sets PATH for non-interactive shells too —
         # .zshrc returns early for those, so ~/.local/bin must come from here)
         print_message "Downloading custom .zshenv configuration..."
-        if install_verified_repo_asset "config/.zshenv" "$USER_HOME/.zshenv" "720c0cf32bfda634c8b9ba66012d19a9129048cd4520981c431b6423595cfcfd" 0644; then
+        ZSHENV_SHA256="854faa7cbd643e9223cd3ec3bc95e83e8417699609a89df5439c8c951b630cbb"
+        if install_verified_repo_asset "config/.zshenv" "$USER_HOME/.zshenv" "$ZSHENV_SHA256" 0644 &&
+           chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.zshenv"; then
             print_message "Custom .zshenv verified and installed"
-            chown "$NEW_USERNAME:$USER_GROUP" "$USER_HOME/.zshenv" || ZSH_CONFIG_OK=false
         else
             ZSH_CONFIG_OK=false
             print_error "Failed to install custom .zshenv"
         fi
 
-        # Change default shell to zsh
-        print_message "Changing default shell to zsh for $NEW_USERNAME"
-        if chsh -s "$(command -v zsh)" "$NEW_USERNAME"; then
-            print_message "Default shell changed to zsh"
+        if [ "$ZSH_CONFIG_OK" = true ]; then
+            print_message "Changing default shell to zsh for $NEW_USERNAME"
+            if chsh -s "$(command -v zsh)" "$NEW_USERNAME"; then
+                print_message "Default shell changed to zsh"
+            else
+                ZSH_CONFIG_OK=false
+                print_error "Failed to change default shell to zsh"
+            fi
         else
-            ZSH_CONFIG_OK=false
-            print_error "Failed to change default shell to zsh"
+            print_warning "Keeping the current login shell because Zsh configuration failed"
         fi
     else
         print_error "Oh My Zsh installation failed"
