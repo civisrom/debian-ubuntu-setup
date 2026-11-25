@@ -268,8 +268,7 @@ install() { return 1; }
         updater = (ROOT / "config/rustdesk-safe-update.sh").read_text()
         updater = updater.replace('readonly RUSTDESK_DIR="/opt/rustdesk"',
                                   f'readonly RUSTDESK_DIR="{directory}"')
-        updater = updater.replace('readonly LOCK_FILE="/run/lock/rustdesk-update.lock"',
-                                  f'readonly LOCK_FILE="{directory}/lock"')
+        updater = updater.replace("readonly SETTLE_SECONDS=15", "readonly SETTLE_SECONDS=0")
         script = directory / "update.sh"
         script.write_text(updater)
         docker = directory / "bin/docker"
@@ -295,8 +294,13 @@ elif args[:2] == ['compose', 'up']:
     if mode in ('up', 'rollback') and is_new: sys.exit(1)
     if mode == 'rollback' and not is_new: sys.exit(1)
 elif args[:2] == ['compose', 'ps']:
-    if mode == 'ps-command': sys.exit(1)
-    print('hbbr' if mode == 'ps-services' else 'hbbr\\nhbbs')
+    is_new = 'sha256:' + 'b'*64 in (root/'.env').read_text()
+    if mode == 'ps-command' and is_new: sys.exit(1)
+    print('hbbr' if mode == 'ps-services' and is_new else 'hbbr\\nhbbs')
+elif args[:1] == ['inspect']:
+    is_new = 'sha256:' + 'b'*64 in (root/'.env').read_text()
+    crashed = mode == 'restarted-always' or (mode == 'restarted' and is_new)
+    print('running 1\\nrunning 0' if crashed else 'running 0\\nrunning 0')
 """)
         docker.chmod(0o755)
         if mode == "grep-read-error":
@@ -310,7 +314,7 @@ elif args[:2] == ['compose', 'ps']:
         return result, directory, original
 
     def test_rustdesk_failures_and_signal_restore_previous_environment(self):
-        for mode in ("pull", "up", "ps-command", "ps-services", "term"):
+        for mode in ("pull", "up", "ps-command", "ps-services", "restarted", "term"):
             with self.subTest(mode=mode):
                 result, directory, original = self.run_rustdesk(mode)
                 self.assertNotEqual(result.returncode, 0)
@@ -319,12 +323,14 @@ elif args[:2] == ['compose', 'ps']:
                 self.assertFalse(list(directory.glob(".env.backup.*")))
 
     def test_rustdesk_failed_rollback_keeps_recovery_backup(self):
-        result, directory, original = self.run_rustdesk("rollback")
-        self.assertNotEqual(result.returncode, 0)
-        backups = list(directory.glob(".env.backup.*"))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_text(), original)
-        self.assertIn("rollback failed", result.stderr)
+        for mode in ("rollback", "restarted-always"):
+            with self.subTest(mode=mode):
+                result, directory, original = self.run_rustdesk(mode)
+                self.assertNotEqual(result.returncode, 0)
+                backups = list(directory.glob(".env.backup.*"))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(backups[0].read_text(), original)
+                self.assertIn("rollback failed", result.stderr)
 
     def test_rustdesk_environment_read_error_preserves_original_without_deployment(self):
         result, directory, original = self.run_rustdesk("grep-read-error")
@@ -348,6 +354,96 @@ elif args[:2] == ['compose', 'ps']:
         self.assertIn("sha256:" + "b" * 64, (directory / ".env").read_text())
         self.assertNotIn("prune", (directory / "calls").read_text())
         self.assertFalse(list(directory.glob(".env.backup.*")))
+
+    def run_rustdesk_ctl(self, mode, *args):
+        directory = self.root / ("ctl-" + mode)
+        data = directory / "data"
+        data.mkdir(parents=True)
+        (directory / "bin").mkdir()
+        (directory / "docker-compose.yml").write_text("services: {}\n")
+        (data / "id_ed25519").write_text("OLD-SK")
+        (data / "id_ed25519.pub").write_text("OLD-PK")
+        data.chmod(0o755)
+        tool = (ROOT / "config/rustdesk-ctl.sh").read_text()
+        for old, new in (
+            ('readonly RUSTDESK_DIR="/opt/rustdesk"', f'readonly RUSTDESK_DIR="{directory}"'),
+            ("readonly WAIT_SECONDS=30", "readonly WAIT_SECONDS=1"),
+            ('[ "$(id -u)" -eq 0 ] || die "run as root"', ":"),
+        ):
+            self.assertIn(old, tool)
+            tool = tool.replace(old, new)
+        script = directory / "rustdesk-ctl"
+        script.write_text(tool)
+        docker = directory / "bin/docker"
+        docker.write_text("""#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+args = sys.argv[1:]
+root = Path.cwd()
+mode = os.environ['TEST_RUSTDESK_MODE']
+with (root/'calls').open('a') as stream:
+    stream.write(' '.join(args) + '\\n')
+if args[:2] == ['compose', 'up'] and args[-1] == 'hbbs':
+    if mode == 'keygen-fails': sys.exit(1)
+    (root/'data/id_ed25519').write_text('NEW-SK')
+    (root/'data/id_ed25519.pub').write_text('NEW-PK')
+elif args[:2] == ['compose', 'logs']:
+    key = (root/'data/id_ed25519.pub').read_text()
+    print('Key: ' + ('OLD-PK' if mode == 'hbbr-old-key' and args[-1] == 'hbbr' else key))
+""")
+        docker.chmod(0o755)
+        environment = dict(os.environ, TEST_RUSTDESK_MODE=mode,
+                           PATH=str(directory / "bin") + os.pathsep + os.environ["PATH"])
+        result = subprocess.run(["bash", str(script), *args], env=environment,
+                                text=True, capture_output=True, timeout=20,
+                                stdin=subprocess.DEVNULL)
+        calls = (directory / "calls").read_text() if (directory / "calls").exists() else ""
+        return result, directory, calls
+
+    def test_rustdesk_key_rotation_backs_up_old_pair_and_starts_hbbs_first(self):
+        result, directory, calls = self.run_rustdesk_ctl("success", "key", "rotate", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NEW-PK", result.stdout)
+        data = directory / "data"
+        self.assertEqual((data / "id_ed25519.pub").read_text(), "NEW-PK")
+        self.assertEqual((data / "id_ed25519").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(data.stat().st_mode & 0o777, 0o700)
+        backups = list((directory / "key-backups").iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "id_ed25519").read_text(), "OLD-SK")
+        self.assertEqual((backups[0] / "id_ed25519.pub").read_text(), "OLD-PK")
+        order = [line for line in calls.splitlines() if line.split()[1] in ("down", "up")]
+        self.assertEqual(order, ["compose down", "compose up -d --wait --no-deps hbbs",
+                                 "compose up -d --wait"])
+
+    def test_rustdesk_key_rotation_failure_restores_previous_pair(self):
+        for mode in ("keygen-fails", "hbbr-old-key"):
+            with self.subTest(mode=mode):
+                result, directory, calls = self.run_rustdesk_ctl(mode, "key", "rotate", "--yes")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("restoring the previous key", result.stderr)
+                data = directory / "data"
+                self.assertEqual((data / "id_ed25519").read_text(), "OLD-SK")
+                self.assertEqual((data / "id_ed25519.pub").read_text(), "OLD-PK")
+                self.assertEqual(list((directory / "key-backups").iterdir()), [])
+                self.assertEqual(calls.splitlines()[-1], "compose up -d --wait")
+
+    def test_rustdesk_key_rotation_needs_confirmation(self):
+        result, directory, calls = self.run_rustdesk_ctl("no-tty", "key", "rotate")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("use --yes", result.stderr)
+        self.assertNotIn("compose down", calls)
+        self.assertEqual((directory / "data/id_ed25519.pub").read_text(), "OLD-PK")
+
+    def test_rustdesk_ctl_shows_key_and_rejects_unknown_commands(self):
+        result, _, _ = self.run_rustdesk_ctl("show", "key", "show")
+        self.assertEqual((result.returncode, result.stdout), (0, "OLD-PK\n"))
+        for args in (("key",), ("key", "rotate", "--force"), ("key", "rotate", "--yes", "x"), ("restart",)):
+            with self.subTest(args=args):
+                result, _, calls = self.run_rustdesk_ctl("bad-" + "-".join(args), *args)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(calls, "")
 
 
 if __name__ == "__main__":

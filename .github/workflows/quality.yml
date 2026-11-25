@@ -32,7 +32,7 @@ jobs:
       - name: ShellCheck
         run: |
           shellcheck --severity=warning install.sh install-nft-docker-watch.sh update-checksum.sh
-          shellcheck --severity=warning config/nft-apply.sh config/rustdesk-safe-update.sh tests/regression.sh
+          shellcheck --severity=warning config/nft-apply.sh config/rustdesk-safe-update.sh config/rustdesk-ctl.sh tests/regression.sh
           shellcheck --severity=warning config/opt-vault.sh
           shellcheck --severity=error config/vendor/*.sh config/vendor/ufw-docker
           timeout 600 shellcheck --severity=error system-setup.sh

@@ -208,6 +208,55 @@ ghx run work repo list myaccount # любая команда gh с токено�
 `ghx clone` клонирует только в `~/codex_project`. Для сервера лучше выпустить
 отдельный fine-grained токен с минимальными правами и сроком действия.
 
+## 🖥️ RustDesk сервер
+
+Сервер ставится в `/opt/rustdesk` (контейнеры `hbbs` и `hbbr`, образ закреплён
+по digest) и запускается службой `rustdesk-compose.service`. Нужны порты TCP
+21115–21117 и UDP 21116. Порт 21114 (API) есть только в платной Server Pro,
+в этой установке он не используется.
+
+`hbbs` и `hbbr` запускаются с `-k _`: сервер обслуживает только клиентов, у
+которых в поле «Key» указан его публичный ключ. Приватный ключ
+`/opt/rustdesk/data/id_ed25519` хранится в каталоге с правами 700.
+
+```bash
+rustdesk-ctl status       # службы, контейнеры, порты, загруженный ключ, ошибки в журнале
+rustdesk-ctl version      # закреплённый образ, версии hbbs/hbbr, есть ли новый образ
+rustdesk-ctl key show     # публичный ключ для поля «Key» в клиентах
+rustdesk-ctl key rotate   # новая пара ключей (старая — в /opt/rustdesk/key-backups/)
+```
+
+`key rotate` останавливает контейнеры, переносит старую пару в
+`/opt/rustdesk/key-backups/<время UTC>/`, даёт `hbbs` создать новую, запускает
+оба контейнера и проверяет, что они загрузили новый ключ. При любой ошибке
+старая пара возвращается на место. После смены ключа клиенты со старым
+ключом не смогут пользоваться сервером, пока в них не введут новый. Вернуть
+прежнюю пару вручную:
+
+```bash
+systemctl stop rustdesk-compose.service
+cp /opt/rustdesk/key-backups/<время>/id_ed25519* /opt/rustdesk/data/
+systemctl start rustdesk-compose.service
+```
+
+Службы, обновление и журналы:
+
+```bash
+systemctl status rustdesk-compose.service        # состояние службы сервера
+systemctl restart rustdesk-compose.service       # перезапуск hbbs и hbbr
+cd /opt/rustdesk && docker compose ps            # состояние контейнеров
+cd /opt/rustdesk && docker compose logs --tail=100   # журналы hbbs и hbbr
+journalctl -u rustdesk-compose.service -n 50     # журнал запуска службы
+systemctl start rustdesk-update.service          # обновить сейчас, не дожидаясь таймера
+journalctl -u rustdesk-update.service -n 50      # результат последнего обновления
+systemctl list-timers rustdesk-update.timer      # когда следующее автообновление
+```
+
+Еженедельное обновление (`rustdesk-update.timer`) берёт digest тега `latest`,
+перезапускает контейнеры, через 15 секунд проверяет, что они работают и не
+перезапускались, и при ошибке возвращает прежний образ. Обновление и смена
+ключа используют одну блокировку и не выполняются одновременно.
+
 ## 🕒 Синхронизация времени (NTP)
 
 Некоторые провайдеры закрывают исходящий NTP почти ко всем публичным серверам:

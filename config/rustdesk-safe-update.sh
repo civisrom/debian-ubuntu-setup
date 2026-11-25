@@ -7,7 +7,13 @@ umask 077
 readonly RUSTDESK_DIR="/opt/rustdesk"
 readonly ENV_FILE="${RUSTDESK_DIR}/.env"
 readonly IMAGE_REPOSITORY="rustdesk/rustdesk-server"
-readonly LOCK_FILE="/run/lock/rustdesk-update.lock"
+# Not in the world-writable system lock directory: a local user could pre-create
+# the file there and block every update (fs.protected_regular denies root).
+readonly LOCK_FILE="${RUSTDESK_DIR}/.update.lock"
+# The image has no healthcheck, so `up --wait` returns as soon as the
+# containers start. Give a crashing hbbs/hbbr time to show up (checked on a
+# real host: a crash-looping hbbr was reported as "Healthy").
+readonly SETTLE_SECONDS=15
 
 cd "$RUSTDESK_DIR"
 command -v docker >/dev/null 2>&1
@@ -37,6 +43,22 @@ env_tmp=""
 env_changed=false
 keep_backup=false
 
+# `up --wait` reports crashing containers as started, so check them after a pause.
+check_services() {
+    local running_services container_states
+    sleep "$SETTLE_SECONDS"
+    running_services=$(docker compose ps --services --status running | sort) || return 1
+    if [ "$running_services" != $'hbbr\nhbbs' ]; then
+        echo "RustDesk service check failed: hbbs/hbbr are not both running" >&2
+        return 1
+    fi
+    container_states=$(docker inspect -f '{{.State.Status}} {{.RestartCount}}' hbbs hbbr) || return 1
+    if [ "$container_states" != $'running 0\nrunning 0' ]; then
+        echo "RustDesk service check failed: hbbs/hbbr restarted after start" >&2
+        return 1
+    fi
+}
+
 rollback() {
     echo "RustDesk update failed; restoring the previous image" >&2
     if [ -s "$env_backup" ]; then
@@ -45,7 +67,8 @@ rollback() {
         printf 'RUSTDESK_IMAGE=%s\n' "$current_image" > "$ENV_FILE" || return 1
     fi
     chmod 0600 "$ENV_FILE" || return 1
-    docker compose up -d --wait --remove-orphans
+    docker compose up -d --wait --remove-orphans || return 1
+    check_services
 }
 
 finish() {
@@ -92,9 +115,7 @@ if ! docker compose up -d --wait --remove-orphans; then
     exit 1
 fi
 
-running_services=$(docker compose ps --services --status running | sort)
-if [ "$running_services" != $'hbbr\nhbbs' ]; then
-    echo "RustDesk post-update service check failed" >&2
+if ! check_services; then
     exit 1
 fi
 

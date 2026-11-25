@@ -31,6 +31,7 @@ fi
 # Generated/installable scripts must retain executable modes in the repository.
 [ -x config/nft-apply.sh ] || fail "config/nft-apply.sh is not executable"
 [ -x config/rustdesk-safe-update.sh ] || fail "rustdesk-safe-update.sh is not executable"
+[ -x config/rustdesk-ctl.sh ] || fail "rustdesk-ctl.sh is not executable"
 
 assert_embedded_hash() {
     local source_file="$1"
@@ -50,6 +51,7 @@ assert_embedded_hash system-setup.sh RUSTDESK_SERVICE_SHA256 config/rustdesk-com
 assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_SERVICE_SHA256 config/rustdesk-update.service
 assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_TIMER_SHA256 config/rustdesk-update.timer
 assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_SCRIPT_SHA256 config/rustdesk-safe-update.sh
+assert_embedded_hash system-setup.sh RUSTDESK_CTL_SHA256 config/rustdesk-ctl.sh
 assert_embedded_hash system-setup.sh OPT_VAULT_SHA256 config/opt.hc
 assert_embedded_hash system-setup.sh OPT_VAULT_HELPER_SHA256 config/opt-vault.sh
 assert_embedded_hash system-setup.sh OPT_PAYLOAD_SHA256 config/opt-payload.py
@@ -61,6 +63,13 @@ grep -q 'SYSTEM_SETUP_REPOSITORY_COMMIT="$RESOLVED_COMMIT"' install.sh || \
 if grep -q 'rustdesk/rustdesk-server:latest' config/docker-compose.yml; then
     fail "RustDesk Compose image is not digest-pinned"
 fi
+# A local user could pre-create a lock in world-writable /run/lock and block updates.
+if grep -n '/run/lock' config/rustdesk-safe-update.sh config/rustdesk-ctl.sh config/rustdesk-update.service; then
+    fail "RustDesk lock must stay in root-only /opt/rustdesk"
+fi
+# -k _ makes hbbs/hbbr refuse clients without the server public key.
+[ "$(grep -c -- ' -k _$' config/docker-compose.yml)" -eq 2 ] || \
+    fail "hbbs and hbbr must both run with -k _"
 grep -q 'readonly LOCK_FILE="/run/lock/nft-docker-watch.lock"' config/nft-apply.sh || \
     fail "canonical nftables lock is missing"
 if grep -qE '7z[[:space:]]+x[[:space:]]+-p[^[:space:]]' system-setup.sh; then

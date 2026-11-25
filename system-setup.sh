@@ -4193,6 +4193,8 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     RUSTDESK_SERVICE_PATH="/etc/systemd/system/rustdesk-compose.service"
     RUSTDESK_COMPOSE_SHA256="a73353e35c6db908c3f82d7832f6d289692d96a08a243c2e47321ae5fe9d87ad"
     RUSTDESK_SERVICE_SHA256="0edca9b82c6c7f5c35bd93c6618dc42be21dbea29baf2d404f89830b171b0094"
+    RUSTDESK_CTL_PATH="/usr/local/sbin/rustdesk-ctl"
+    RUSTDESK_CTL_SHA256="83a27e9b545f0ab8c0a67fe1bcf49d95132723f4d9d20f5edea2661e59293595"
     RUSTDESK_OK=true
 
     # Create rustdesk directory
@@ -4203,6 +4205,20 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         print_error "Failed to create directory $RUSTDESK_DIR"
         print_warning "RustDesk installation will be skipped; setup will continue"
         RUSTDESK_OK=false
+    fi
+
+    # hbbs/hbbr create the private key id_ed25519 with mode 0644, so keep the
+    # key directory private. This also fixes installs made before this check.
+    if [ "$RUSTDESK_OK" = true ]; then
+        if install -d -m 0700 -o root -g root "${RUSTDESK_DIR}/data" && \
+           chmod 0700 "${RUSTDESK_DIR}/data" && \
+           { [ ! -f "${RUSTDESK_DIR}/data/id_ed25519" ] || chmod 0600 "${RUSTDESK_DIR}/data/id_ed25519"; }; then
+            print_message "Key directory ${RUSTDESK_DIR}/data is private (700)"
+        else
+            print_error "Failed to secure ${RUSTDESK_DIR}/data"
+            print_warning "RustDesk installation will be skipped; setup will continue"
+            RUSTDESK_OK=false
+        fi
     fi
 
     # Download docker-compose.yml
@@ -4226,6 +4242,15 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
             print_error "Failed to download service file"
             print_warning "RustDesk installation will be skipped; setup will continue"
             RUSTDESK_OK=false
+        fi
+    fi
+
+    # Management command: version, status and key rotation
+    if [ "$RUSTDESK_OK" = true ]; then
+        if install_verified_repo_asset "config/rustdesk-ctl.sh" "$RUSTDESK_CTL_PATH" "$RUSTDESK_CTL_SHA256" 0755; then
+            print_message "rustdesk-ctl verified and installed"
+        else
+            print_warning "Failed to install rustdesk-ctl; the RustDesk server itself is not affected"
         fi
     fi
 
@@ -4298,9 +4323,9 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         RUSTDESK_UPDATE_SERVICE_PATH="/etc/systemd/system/rustdesk-update.service"
         RUSTDESK_UPDATE_TIMER_PATH="/etc/systemd/system/rustdesk-update.timer"
         RUSTDESK_UPDATE_SCRIPT_PATH="/usr/local/sbin/rustdesk-safe-update.sh"
-        RUSTDESK_UPDATE_SERVICE_SHA256="597de499d52ce1fa058624289fde8c5739d90bba43a6ea5a4a249f7a0a6ba874"
+        RUSTDESK_UPDATE_SERVICE_SHA256="4f49dccf929f6f1d93b7eb15b0923af924a6b017035fa1c0f5f77ac1986e0daa"
         RUSTDESK_UPDATE_TIMER_SHA256="281e81c5cd6515341b904de91f742cf0e203657303c33d12b668fd256545d961"
-        RUSTDESK_UPDATE_SCRIPT_SHA256="9ebee80d805382fe516477ab412efe13ea40b7480d9fc915578c3432403abfa6"
+        RUSTDESK_UPDATE_SCRIPT_SHA256="c50d8b7bc9775c650482cc23fd7f4e12431236ae753626e28f68d46572706715"
 
         RUSTDESK_UPDATE_OK=true
 
@@ -4339,7 +4364,7 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
             if systemctl enable rustdesk-update.timer 2>/dev/null && \
                systemctl start rustdesk-update.timer 2>/dev/null; then
                 print_success "rustdesk-update.timer enabled and started"
-                NEXT_RUN=$(systemctl list-timers rustdesk-update.timer --no-pager 2>/dev/null | awk 'NR==2 {print $1, $2}')
+                NEXT_RUN=$(systemctl show -p NextElapseUSecRealtime --value rustdesk-update.timer 2>/dev/null)
                 [ -n "$NEXT_RUN" ] && print_message "  Next run: $NEXT_RUN"
                 print_message "  Schedule:  Sunday 04:00 (±1h random delay)"
                 print_message "  Manual run: systemctl start rustdesk-update.service"
@@ -4363,6 +4388,10 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     print_message "  Directory: $RUSTDESK_DIR"
     print_message "  Service:   rustdesk-compose.service"
     print_message "  Manage:    systemctl {start|stop|restart|status} rustdesk-compose.service"
+    if [ -x "${RUSTDESK_CTL_PATH}" ]; then
+        print_message "  Check:     rustdesk-ctl status | rustdesk-ctl version"
+        print_message "  Key:       rustdesk-ctl key show | rustdesk-ctl key rotate"
+    fi
     if [ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ]; then
         print_message "  Auto-update: rustdesk-update.timer (weekly, Sun 04:00)"
     fi
@@ -8637,6 +8666,9 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         print_message "- RustDesk Server: Installed and enabled"
         print_message "  Directory: /opt/rustdesk"
         print_message "  Service: rustdesk-compose.service"
+        if [ -x /usr/local/sbin/rustdesk-ctl ]; then
+            print_message "  Manage: rustdesk-ctl status | version | key show | key rotate"
+        fi
         if systemctl is-active --quiet rustdesk-compose.service; then
             print_message "  Status: Running"
         else

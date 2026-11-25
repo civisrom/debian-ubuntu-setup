@@ -27,7 +27,7 @@ SyslogIdentifier=rustdesk-update
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/rustdesk /run/lock
+ReadWritePaths=/opt/rustdesk
 
 [Install]
 WantedBy=multi-user.target
