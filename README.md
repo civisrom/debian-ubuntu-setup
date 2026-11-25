@@ -210,52 +210,35 @@ ghx run work repo list myaccount # любая команда gh с токено�
 
 ## 🖥️ RustDesk сервер
 
-Сервер ставится в `/opt/rustdesk` (контейнеры `hbbs` и `hbbr`, образ закреплён
-по digest) и запускается службой `rustdesk-compose.service`. Нужны порты TCP
-21115–21117 и UDP 21116. Порт 21114 (API) есть только в платной Server Pro,
-в этой установке он не используется.
+RustDesk ставится из отдельного репозитория
+[rustdesk-server-setup](https://github.com/civisrom/rustdesk-server-setup).
+`system-setup.sh` скачивает его файлы с закреплённого коммита, сверяет SHA256
+и запускает `rustdesk-ctl install` сразу после шага Docker. Поэтому для
+RustDesk нужен Docker: выберите его в том же запуске или поставьте заранее.
+Ответ «n» на вопрос об автообновлении передаётся как `--no-auto-update`.
 
-`hbbs` и `hbbr` запускаются с `-k _`: сервер обслуживает только клиентов, у
-которых в поле «Key» указан его публичный ключ. Приватный ключ
-`/opt/rustdesk/data/id_ed25519` хранится в каталоге с правами 700.
+Устанавливается: `/opt/rustdesk` (контейнеры `hbbs` и `hbbr`, образ
+закреплён по digest), `rustdesk-compose.service`, еженедельное обновление с
+откатом (`rustdesk-update.timer`), watchdog раз в 3 минуты
+(`rustdesk-watchdog.timer`) и команда `rustdesk-ctl`. Нужны порты TCP
+21115–21117 и UDP 21116. `hbbs` и `hbbr` запускаются с `-k _`: сервер
+обслуживает только клиентов с его публичным ключом.
 
 ```bash
-rustdesk-ctl status       # службы, контейнеры, порты, загруженный ключ, ошибки в журнале
+rustdesk-ctl status       # службы, контейнеры, порты, ключ, watchdog, ошибки в журнале
 rustdesk-ctl version      # закреплённый образ, версии hbbs/hbbr, есть ли новый образ
+rustdesk-ctl update       # обновить сейчас (с проверкой и откатом)
+rustdesk-ctl logs 100     # журналы hbbs и hbbr
 rustdesk-ctl key show     # публичный ключ для поля «Key» в клиентах
 rustdesk-ctl key rotate   # новая пара ключей (старая — в /opt/rustdesk/key-backups/)
+rustdesk-ctl uninstall    # удалить, сохранив пару ключей
 ```
 
-`key rotate` останавливает контейнеры, переносит старую пару в
-`/opt/rustdesk/key-backups/<время UTC>/`, даёт `hbbs` создать новую, запускает
-оба контейнера и проверяет, что они загрузили новый ключ. При любой ошибке
-старая пара возвращается на место. После смены ключа клиенты со старым
-ключом не смогут пользоваться сервером, пока в них не введут новый. Вернуть
-прежнюю пару вручную:
-
-```bash
-systemctl stop rustdesk-compose.service
-cp /opt/rustdesk/key-backups/<время>/id_ed25519* /opt/rustdesk/data/
-systemctl start rustdesk-compose.service
-```
-
-Службы, обновление и журналы:
-
-```bash
-systemctl status rustdesk-compose.service        # состояние службы сервера
-systemctl restart rustdesk-compose.service       # перезапуск hbbs и hbbr
-cd /opt/rustdesk && docker compose ps            # состояние контейнеров
-cd /opt/rustdesk && docker compose logs --tail=100   # журналы hbbs и hbbr
-journalctl -u rustdesk-compose.service -n 50     # журнал запуска службы
-systemctl start rustdesk-update.service          # обновить сейчас, не дожидаясь таймера
-journalctl -u rustdesk-update.service -n 50      # результат последнего обновления
-systemctl list-timers rustdesk-update.timer      # когда следующее автообновление
-```
-
-Еженедельное обновление (`rustdesk-update.timer`) берёт digest тега `latest`,
-перезапускает контейнеры, через 15 секунд проверяет, что они работают и не
-перезапускались, и при ошибке возвращает прежний образ. Обновление и смена
-ключа используют одну блокировку и не выполняются одновременно.
+Установку, сделанную прежними версиями `system-setup.sh`, можно обновить
+повторным запуском с выбором RustDesk или напрямую из
+`rustdesk-server-setup`: каталог, ключи и имена служб те же, ключ
+сохраняется. Подробности — в README репозитория
+[rustdesk-server-setup](https://github.com/civisrom/rustdesk-server-setup).
 
 ## 🕒 Синхронизация времени (NTP)
 

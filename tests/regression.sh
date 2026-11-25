@@ -30,8 +30,6 @@ fi
 
 # Generated/installable scripts must retain executable modes in the repository.
 [ -x config/nft-apply.sh ] || fail "config/nft-apply.sh is not executable"
-[ -x config/rustdesk-safe-update.sh ] || fail "rustdesk-safe-update.sh is not executable"
-[ -x config/rustdesk-ctl.sh ] || fail "rustdesk-ctl.sh is not executable"
 
 assert_embedded_hash() {
     local source_file="$1"
@@ -46,12 +44,6 @@ assert_embedded_hash() {
 
 assert_embedded_hash install-nft-docker-watch.sh NFT_APPLY_SHA256 config/nft-apply.sh
 assert_embedded_hash system-setup.sh NFT_WATCH_INSTALLER_SHA256 install-nft-docker-watch.sh
-assert_embedded_hash system-setup.sh RUSTDESK_COMPOSE_SHA256 config/docker-compose.yml
-assert_embedded_hash system-setup.sh RUSTDESK_SERVICE_SHA256 config/rustdesk-compose.service
-assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_SERVICE_SHA256 config/rustdesk-update.service
-assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_TIMER_SHA256 config/rustdesk-update.timer
-assert_embedded_hash system-setup.sh RUSTDESK_UPDATE_SCRIPT_SHA256 config/rustdesk-safe-update.sh
-assert_embedded_hash system-setup.sh RUSTDESK_CTL_SHA256 config/rustdesk-ctl.sh
 assert_embedded_hash system-setup.sh OPT_VAULT_SHA256 config/opt.hc
 assert_embedded_hash system-setup.sh OPT_VAULT_HELPER_SHA256 config/opt-vault.sh
 assert_embedded_hash system-setup.sh OPT_PAYLOAD_SHA256 config/opt-payload.py
@@ -60,16 +52,11 @@ assert_embedded_hash system-setup.sh OPT_PAYLOAD_SHA256 config/opt-payload.py
 
 grep -q 'SYSTEM_SETUP_REPOSITORY_COMMIT="$RESOLVED_COMMIT"' install.sh || \
     fail "install.sh does not pass its immutable commit to downloaded assets"
-if grep -q 'rustdesk/rustdesk-server:latest' config/docker-compose.yml; then
-    fail "RustDesk Compose image is not digest-pinned"
-fi
-# A local user could pre-create a lock in world-writable /run/lock and block updates.
-if grep -n '/run/lock' config/rustdesk-safe-update.sh config/rustdesk-ctl.sh config/rustdesk-update.service; then
-    fail "RustDesk lock must stay in root-only /opt/rustdesk"
-fi
-# -k _ makes hbbs/hbbr refuse clients without the server public key.
-[ "$(grep -c -- ' -k _$' config/docker-compose.yml)" -eq 2 ] || \
-    fail "hbbs and hbbr must both run with -k _"
+# RustDesk comes from rustdesk-server-setup at an immutable commit with pinned file hashes.
+grep -qE '^RUSTDESK_SETUP_COMMIT="[0-9a-f]{40}"$' system-setup.sh || \
+    fail "rustdesk-server-setup must be pinned to a full commit SHA"
+[ "$(grep -cE '^    "(rustdesk-ctl|files/[a-z.-]+) [0-9a-f]{64}"$' system-setup.sh)" -eq 7 ] || \
+    fail "rustdesk-server-setup files must each carry a SHA256"
 grep -q 'readonly LOCK_FILE="/run/lock/nft-docker-watch.lock"' config/nft-apply.sh || \
     fail "canonical nftables lock is missing"
 if grep -qE '7z[[:space:]]+x[[:space:]]+-p[^[:space:]]' system-setup.sh; then

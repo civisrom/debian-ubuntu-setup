@@ -2398,9 +2398,10 @@ if [ "$INTERACTIVE" = true ]; then
     print_header "───────────────────────────────────────────────"
     echo ""
     print_message "Install RustDesk server in Docker?"
-    print_message "  - Creates /opt/rustdesk with docker-compose.yml"
-    print_message "  - Registers systemd service (rustdesk-compose.service)"
-    print_message "  - Containers: hbbs (signal) + hbbr (relay)"
+    print_message "  - Uses rustdesk-server-setup (pinned commit, SHA256-verified files)"
+    print_message "  - /opt/rustdesk, rustdesk-compose.service, containers hbbs + hbbr"
+    print_message "  - Watchdog and the rustdesk-ctl command (status, version, key rotate)"
+    print_message "  - Needs Docker: installed right after the Docker step"
     prompt_yes_no INSTALL_RUSTDESK "Install RustDesk? (y/N): " n
     INSTALL_RUSTDESK=${INSTALL_RUSTDESK:-n}
 
@@ -2408,8 +2409,7 @@ if [ "$INTERACTIVE" = true ]; then
     if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         echo ""
         print_message "Install weekly auto-update for RustDesk containers?"
-        print_message "  - Creates rustdesk-update.service + rustdesk-update.timer"
-        print_message "  - Runs every Sunday at 04:00 (with ±1h random delay)"
+        print_message "  - rustdesk-update.timer: every Sunday at 04:00 (with ±1h random delay)"
         print_message "  - Resolves an immutable image digest, verifies health, and rolls back on failure"
         prompt_yes_no INSTALL_RUSTDESK_UPDATE "Install weekly auto-update timer? (Y/n): " y
         INSTALL_RUSTDESK_UPDATE=${INSTALL_RUSTDESK_UPDATE:-y}
@@ -3932,6 +3932,9 @@ if { [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; } && \
    { [ "$INSTALL_UFW_DOCKER" != "y" ] && [ "$INSTALL_UFW_DOCKER" != "Y" ]; }; then
     print_warning "Docker with UFW selected, but ufw-docker is not selected; Docker-published ports can bypass UFW"
 fi
+if is_yes "$INSTALL_RUSTDESK" && ! is_yes "$INSTALL_DOCKER" && ! command -v docker >/dev/null 2>&1; then
+    print_warning "RustDesk selected without Docker; it will be skipped unless Docker is installed"
+fi
 if { [ "$DOCKER_DISABLE_IPTABLES" = "y" ] || [ "$DOCKER_DISABLE_IPTABLES" = "Y" ]; } && \
    { [ "$ENABLE_NFTABLES" != "y" ] && [ "$ENABLE_NFTABLES" != "Y" ]; }; then
     print_warning "Docker iptables disable selected without nftables; container port publishing/NAT may stop working"
@@ -4182,223 +4185,49 @@ elif [ "$OS" = "ubuntu" ]; then
 fi
 
 # ============================================
-# INSTALL RUSTDESK SERVER (DOCKER)
+# RUSTDESK SERVER (rustdesk-server-setup)
 # ============================================
+# The RustDesk server lives in its own repository. Its files are fetched from
+# a pinned commit, verified by SHA256 and installed by its own rustdesk-ctl,
+# which also upgrades installations made by earlier versions of this script.
+# Called after the Docker step.
 
-if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
-    print_message "Installing RustDesk server in Docker..."
-    echo ""
+RUSTDESK_SETUP_COMMIT="696245eae91eda329a1211bf9a113b32b3a5f6cd"
+RUSTDESK_SETUP_FILES=(
+    "rustdesk-ctl 987e820c54b28493dffbff2b343b788aa8308889f35686b13e1034ea74aff4fe"
+    "files/docker-compose.yml a73353e35c6db908c3f82d7832f6d289692d96a08a243c2e47321ae5fe9d87ad"
+    "files/rustdesk-compose.service ac438d9255122da09d174a70713120a9d23d4d97de52e96839f6bbb755bf5d1c"
+    "files/rustdesk-update.service ff3c9604b093180b3ce37c70bc3a395f0ef37c64bf692b2232c0e2c376ca816a"
+    "files/rustdesk-update.timer 144892dbaa60d455a8912411f3e04c55d258c488ad2021ec9db9fa7941778012"
+    "files/rustdesk-watchdog.service 5571995e1183ec9d1712f60aca83aaf37774f753e456ec16fb7a90146adeb5a9"
+    "files/rustdesk-watchdog.timer b717c5d474ce44a6b789d6ab322515d5d6c6910fd8f444e8e73911206e0ed857"
+)
 
-    RUSTDESK_DIR="/opt/rustdesk"
-    RUSTDESK_SERVICE_PATH="/etc/systemd/system/rustdesk-compose.service"
-    RUSTDESK_COMPOSE_SHA256="a73353e35c6db908c3f82d7832f6d289692d96a08a243c2e47321ae5fe9d87ad"
-    RUSTDESK_SERVICE_SHA256="0edca9b82c6c7f5c35bd93c6618dc42be21dbea29baf2d404f89830b171b0094"
-    RUSTDESK_CTL_PATH="/usr/local/sbin/rustdesk-ctl"
-    RUSTDESK_CTL_SHA256="83a27e9b545f0ab8c0a67fe1bcf49d95132723f4d9d20f5edea2661e59293595"
-    RUSTDESK_OK=true
+install_rustdesk_server() {
+    local work_dir base entry path sha
+    local -a flags=()
 
-    # Create rustdesk directory
-    print_message "Creating directory: $RUSTDESK_DIR..."
-    if mkdir -p "$RUSTDESK_DIR"; then
-        print_message "Directory created successfully"
-    else
-        print_error "Failed to create directory $RUSTDESK_DIR"
-        print_warning "RustDesk installation will be skipped; setup will continue"
-        RUSTDESK_OK=false
+    if ! command -v docker >/dev/null 2>&1 || ! systemctl is-active --quiet docker 2>/dev/null; then
+        print_error "RustDesk needs a running Docker; choose the Docker option or install Docker first"
+        return 1
     fi
-
-    # hbbs/hbbr create the private key id_ed25519 with mode 0644, so keep the
-    # key directory private. This also fixes installs made before this check.
-    if [ "$RUSTDESK_OK" = true ]; then
-        if install -d -m 0700 -o root -g root "${RUSTDESK_DIR}/data" && \
-           chmod 0700 "${RUSTDESK_DIR}/data" && \
-           { [ ! -f "${RUSTDESK_DIR}/data/id_ed25519" ] || chmod 0600 "${RUSTDESK_DIR}/data/id_ed25519"; }; then
-            print_message "Key directory ${RUSTDESK_DIR}/data is private (700)"
-        else
-            print_error "Failed to secure ${RUSTDESK_DIR}/data"
-            print_warning "RustDesk installation will be skipped; setup will continue"
-            RUSTDESK_OK=false
+    create_temp_dir "rustdesk-server-setup" || return 1
+    work_dir="$SYSTEM_SETUP_CREATED_TEMP_DIR"
+    mkdir -p "${work_dir}/files" || return 1
+    base="https://raw.githubusercontent.com/civisrom/rustdesk-server-setup/${RUSTDESK_SETUP_COMMIT}"
+    for entry in "${RUSTDESK_SETUP_FILES[@]}"; do
+        path="${entry% *}"
+        sha="${entry#* }"
+        if ! download_verified_url "${base}/${path}" "${work_dir}/${path}" "$sha"; then
+            print_error "Failed to download or verify rustdesk-server-setup/${path}"
+            return 1
         fi
-    fi
-
-    # Download docker-compose.yml
-    if [ "$RUSTDESK_OK" = true ]; then
-        print_message "Downloading docker-compose.yml..."
-        if install_verified_repo_asset "config/docker-compose.yml" "${RUSTDESK_DIR}/docker-compose.yml" "$RUSTDESK_COMPOSE_SHA256" 0644; then
-            print_message "docker-compose.yml verified and installed"
-        else
-            print_error "Failed to download docker-compose.yml"
-            print_warning "RustDesk installation will be skipped; setup will continue"
-            RUSTDESK_OK=false
-        fi
-    fi
-
-    # Download systemd service file
-    if [ "$RUSTDESK_OK" = true ]; then
-        print_message "Downloading systemd service file..."
-        if install_verified_repo_asset "config/rustdesk-compose.service" "$RUSTDESK_SERVICE_PATH" "$RUSTDESK_SERVICE_SHA256" 0644; then
-            print_message "Service file verified and installed"
-        else
-            print_error "Failed to download service file"
-            print_warning "RustDesk installation will be skipped; setup will continue"
-            RUSTDESK_OK=false
-        fi
-    fi
-
-    # Management command: version, status and key rotation
-    if [ "$RUSTDESK_OK" = true ]; then
-        if install_verified_repo_asset "config/rustdesk-ctl.sh" "$RUSTDESK_CTL_PATH" "$RUSTDESK_CTL_SHA256" 0755; then
-            print_message "rustdesk-ctl verified and installed"
-        else
-            print_warning "Failed to install rustdesk-ctl; the RustDesk server itself is not affected"
-        fi
-    fi
-
-    # Reload systemd daemon
-    if [ "$RUSTDESK_OK" = true ]; then
-        print_message "Reloading systemd daemon..."
-        if systemctl daemon-reload; then
-            print_message "Systemd daemon reloaded successfully"
-        else
-            print_error "Failed to reload systemd daemon for RustDesk"
-            print_warning "RustDesk service will not be enabled; setup will continue"
-            RUSTDESK_OK=false
-        fi
-    fi
-
-    # Enable rustdesk service
-    if [ "$RUSTDESK_OK" = true ]; then
-        print_message "Enabling rustdesk-compose service..."
-        if systemctl enable rustdesk-compose.service; then
-            print_message "Service enabled successfully"
-        else
-            print_error "Failed to enable rustdesk-compose service"
-            print_warning "RustDesk service will not start automatically; setup will continue"
-            RUSTDESK_OK=false
-        fi
-    fi
-
-    # Check if Docker is installed and running (needed to start the service)
-    if [ "$RUSTDESK_OK" != true ]; then
-        print_warning "Skipping RustDesk container start because installation did not complete"
-    elif command -v docker &> /dev/null && systemctl is-active --quiet docker 2>/dev/null; then
-        print_message "Docker is running, starting RustDesk containers..."
-
-        # Pull images first to avoid timeout on slow connections
-        if docker compose -f "${RUSTDESK_DIR}/docker-compose.yml" pull 2>/dev/null; then
-            print_message "RustDesk images pulled successfully"
-        else
-            print_warning "Failed to pull images (will try on service start)"
-        fi
-
-        if systemctl start rustdesk-compose.service; then
-            sleep 5
-            if systemctl is-active --quiet rustdesk-compose.service; then
-                print_success "RustDesk service is running"
-                # Show container status
-                docker compose -f "${RUSTDESK_DIR}/docker-compose.yml" ps 2>/dev/null || true
-            else
-                print_warning "RustDesk service started but containers may still be initializing"
-                print_message "Check status: systemctl status rustdesk-compose.service"
-                print_message "Check logs:   docker compose -f ${RUSTDESK_DIR}/docker-compose.yml logs"
-            fi
-        else
-            print_error "Failed to start RustDesk service"
-            print_message "Try manually: systemctl start rustdesk-compose.service"
-            print_message "Check logs:   journalctl -u rustdesk-compose.service"
-        fi
-    elif command -v docker &> /dev/null; then
-        print_message "Docker is installed but not running"
-        print_message "RustDesk containers will start after Docker service is active"
-    else
-        print_message "Docker is not installed yet"
-        print_message "RustDesk containers will start automatically after Docker installation"
-    fi
-
-    # --- Weekly auto-update timer (optional) ---
-    if [ "$RUSTDESK_OK" = true ] && { [ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ]; }; then
-        echo ""
-        print_message "Installing RustDesk weekly auto-update timer..."
-
-        RUSTDESK_UPDATE_SERVICE_PATH="/etc/systemd/system/rustdesk-update.service"
-        RUSTDESK_UPDATE_TIMER_PATH="/etc/systemd/system/rustdesk-update.timer"
-        RUSTDESK_UPDATE_SCRIPT_PATH="/usr/local/sbin/rustdesk-safe-update.sh"
-        RUSTDESK_UPDATE_SERVICE_SHA256="4f49dccf929f6f1d93b7eb15b0923af924a6b017035fa1c0f5f77ac1986e0daa"
-        RUSTDESK_UPDATE_TIMER_SHA256="281e81c5cd6515341b904de91f742cf0e203657303c33d12b668fd256545d961"
-        RUSTDESK_UPDATE_SCRIPT_SHA256="c50d8b7bc9775c650482cc23fd7f4e12431236ae753626e28f68d46572706715"
-
-        RUSTDESK_UPDATE_OK=true
-
-        if install_verified_repo_asset "config/rustdesk-update.service" "$RUSTDESK_UPDATE_SERVICE_PATH" "$RUSTDESK_UPDATE_SERVICE_SHA256" 0644; then
-            print_message "rustdesk-update.service verified and installed"
-        else
-            print_warning "Failed to download rustdesk-update.service"
-            RUSTDESK_UPDATE_OK=false
-        fi
-
-        if [ "$RUSTDESK_UPDATE_OK" = true ]; then
-            if install_verified_repo_asset "config/rustdesk-update.timer" "$RUSTDESK_UPDATE_TIMER_PATH" "$RUSTDESK_UPDATE_TIMER_SHA256" 0644; then
-                print_message "rustdesk-update.timer verified and installed"
-            else
-                print_warning "Failed to download rustdesk-update.timer"
-                RUSTDESK_UPDATE_OK=false
-            fi
-        fi
-
-        if [ "$RUSTDESK_UPDATE_OK" = true ]; then
-            if install_verified_repo_asset "config/rustdesk-safe-update.sh" "$RUSTDESK_UPDATE_SCRIPT_PATH" "$RUSTDESK_UPDATE_SCRIPT_SHA256" 0755; then
-                print_message "rustdesk-safe-update.sh verified and installed"
-            else
-                print_warning "Failed to install rustdesk-safe-update.sh"
-                RUSTDESK_UPDATE_OK=false
-            fi
-        fi
-
-        if [ "$RUSTDESK_UPDATE_OK" = true ]; then
-            chmod 644 "$RUSTDESK_UPDATE_SERVICE_PATH" "$RUSTDESK_UPDATE_TIMER_PATH"
-
-            # Reload systemd to pick up new unit files
-            systemctl daemon-reload
-
-            # Enable and start the timer (not the service — the timer triggers it)
-            if systemctl enable rustdesk-update.timer 2>/dev/null && \
-               systemctl start rustdesk-update.timer 2>/dev/null; then
-                print_success "rustdesk-update.timer enabled and started"
-                NEXT_RUN=$(systemctl show -p NextElapseUSecRealtime --value rustdesk-update.timer 2>/dev/null)
-                [ -n "$NEXT_RUN" ] && print_message "  Next run: $NEXT_RUN"
-                print_message "  Schedule:  Sunday 04:00 (±1h random delay)"
-                print_message "  Manual run: systemctl start rustdesk-update.service"
-                print_message "  Logs:      journalctl -u rustdesk-update.service"
-                print_message "  Status:    systemctl list-timers rustdesk-update.timer"
-            else
-                print_error "Failed to enable/start rustdesk-update.timer"
-                RUSTDESK_UPDATE_OK=false
-            fi
-        else
-            print_warning "Auto-update timer installation skipped due to download errors"
-        fi
-    fi
-
-    echo ""
-    if [ "$RUSTDESK_OK" = true ]; then
-        print_success "RustDesk installation completed"
-    else
-        print_error "RustDesk installation did not complete"
-    fi
-    print_message "  Directory: $RUSTDESK_DIR"
-    print_message "  Service:   rustdesk-compose.service"
-    print_message "  Manage:    systemctl {start|stop|restart|status} rustdesk-compose.service"
-    if [ -x "${RUSTDESK_CTL_PATH}" ]; then
-        print_message "  Check:     rustdesk-ctl status | rustdesk-ctl version"
-        print_message "  Key:       rustdesk-ctl key show | rustdesk-ctl key rotate"
-    fi
-    if [ "$INSTALL_RUSTDESK_UPDATE" = "y" ] || [ "$INSTALL_RUSTDESK_UPDATE" = "Y" ]; then
-        print_message "  Auto-update: rustdesk-update.timer (weekly, Sun 04:00)"
-    fi
-    echo ""
-else
-    print_message "Skipping RustDesk installation (not requested)"
-fi
+    done
+    chmod 0755 "${work_dir}/rustdesk-ctl" || return 1
+    is_yes "$INSTALL_RUSTDESK_UPDATE" || flags+=(--no-auto-update)
+    print_message "Installing RustDesk server with rustdesk-server-setup ${RUSTDESK_SETUP_COMMIT:0:12}..."
+    bash "${work_dir}/rustdesk-ctl" install ${flags[@]+"${flags[@]}"}
+}
 
 # ============================================
 # SET ROOT PASSWORD
@@ -6174,33 +6003,30 @@ DEOF
                 print_message "Docker Compose version: $(docker compose version)"
             fi
         fi
-
-        # Start RustDesk containers if the service was previously enabled
-        # RustDesk section runs BEFORE Docker installation, so the service
-        # is enabled but containers couldn't start without Docker.
-        # Now that Docker is installed and running, start the RustDesk service.
-        if systemctl is-enabled --quiet rustdesk-compose.service 2>/dev/null; then
-            echo ""
-            print_message "RustDesk service detected, starting containers..."
-            if systemctl start rustdesk-compose.service; then
-                sleep 3
-                if systemctl is-active --quiet rustdesk-compose.service; then
-                    print_success "RustDesk containers started successfully"
-                else
-                    print_warning "RustDesk service started but may still be pulling images"
-                    print_message "Check status: systemctl status rustdesk-compose.service"
-                fi
-            else
-                print_warning "Failed to start RustDesk service"
-                print_message "Try manually: systemctl start rustdesk-compose.service"
-            fi
-        fi
     fi
 
     echo ""
 else
     print_message "Skipping Docker installation (not requested)"
     DOCKER_INSTALLED="no"
+fi
+
+# ============================================
+# INSTALL RUSTDESK SERVER
+# ============================================
+
+if is_yes "$INSTALL_RUSTDESK"; then
+    echo ""
+    if install_rustdesk_server; then
+        RUSTDESK_OK=true
+        print_success "RustDesk server installed (manage it with: rustdesk-ctl status)"
+    else
+        RUSTDESK_OK=false
+        print_error "RustDesk installation did not complete; setup will continue"
+    fi
+    echo ""
+else
+    print_message "Skipping RustDesk installation (not requested)"
 fi
 
 # Install ufw-docker (independent of Docker installation)
@@ -8667,15 +8493,18 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
         print_message "  Directory: /opt/rustdesk"
         print_message "  Service: rustdesk-compose.service"
         if [ -x /usr/local/sbin/rustdesk-ctl ]; then
-            print_message "  Manage: rustdesk-ctl status | version | key show | key rotate"
+            print_message "  Manage: rustdesk-ctl status | version | update | logs | key show | key rotate"
         fi
         if systemctl is-active --quiet rustdesk-compose.service; then
             print_message "  Status: Running"
         else
-            print_message "  Status: Enabled (will start with Docker)"
+            print_message "  Status: NOT running (rustdesk-ctl status)"
         fi
         if systemctl is-enabled --quiet rustdesk-update.timer 2>/dev/null; then
             print_message "  Auto-update: rustdesk-update.timer (weekly, Sun 04:00)"
+        fi
+        if systemctl is-enabled --quiet rustdesk-watchdog.timer 2>/dev/null; then
+            print_message "  Watchdog: rustdesk-watchdog.timer (every 3 minutes)"
         fi
     else
         print_message "- RustDesk Server: Installation attempted but service not enabled"

@@ -32,21 +32,10 @@ jobs:
       - name: ShellCheck
         run: |
           shellcheck --severity=warning install.sh install-nft-docker-watch.sh update-checksum.sh
-          shellcheck --severity=warning config/nft-apply.sh config/rustdesk-safe-update.sh config/rustdesk-ctl.sh tests/regression.sh
+          shellcheck --severity=warning config/nft-apply.sh tests/regression.sh
           shellcheck --severity=warning config/opt-vault.sh
           shellcheck --severity=error config/vendor/*.sh config/vendor/ufw-docker
           timeout 600 shellcheck --severity=error system-setup.sh
-
-      - name: Docker Compose validation
-        run: docker compose -f config/docker-compose.yml config -q
-
-      - name: systemd unit validation
-        run: |
-          cp config/rustdesk-compose.service /tmp/rustdesk-compose.service
-          cp config/rustdesk-update.service /tmp/rustdesk-update.service
-          cp config/rustdesk-update.timer /tmp/rustdesk-update.timer
-          sed -i 's#/usr/local/sbin/rustdesk-safe-update.sh#/bin/true#' /tmp/rustdesk-update.service
-          systemd-analyze verify /tmp/rustdesk-compose.service /tmp/rustdesk-update.service /tmp/rustdesk-update.timer
 
       - name: Checksum integrity
         run: sha256sum -c system-setup.sh.sha256

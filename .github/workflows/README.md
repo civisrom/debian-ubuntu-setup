@@ -26,8 +26,6 @@ git add system-setup.sh system-setup.sh.sha256
 
 - синтаксис всех shell-скриптов через `bash -n`;
 - ShellCheck;
-- итоговую Docker Compose конфигурацию RustDesk;
-- синтаксис systemd units;
 - checksum главного скрипта;
 - локальные regression-тесты из `tests/regression.sh`.
 

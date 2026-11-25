@@ -63,7 +63,8 @@ sha256sum system-setup.sh > system-setup.sh.sha256
 Не заменяйте `-k _` на `-k <пароль>`. Строка вместо ключа остаётся проверкой
 доступа, но `hbbs` теряет приватный ключ и перестаёт подписывать ключи
 клиентов. Сменить ключ, например если публичный ключ попал к посторонним:
-`rustdesk-ctl key rotate` (см. README, раздел «RustDesk сервер»).
+`rustdesk-ctl key rotate`. RustDesk устанавливается из репозитория
+[rustdesk-server-setup](https://github.com/civisrom/rustdesk-server-setup).
 
 ## Заключение
 
