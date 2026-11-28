@@ -136,7 +136,7 @@ id() { [ "${@: -1}" = root ]; }
         self.assert_validity('valid_packages', ['', 'nginx,nginx-module-njs', 'nginx:amd64=1.2.3-1~test'],
                              ['--allow-unauthenticated', './pkg.deb', 'nginx*', 'nginx;id', 'nginx $(id)'])
         self.assert_validity('valid_packages', ['nginx'], ['', ', ,'], 'required')
-        for org, myguard, modules, allowed in [('y', 'n', 'n', '127'), ('y', 'n', 'y', '12347'), ('n', 'y', 'n', '5678')]:
+        for org, myguard, modules, allowed in [('y', 'n', 'n', '127'), ('y', 'n', 'y', '12347'), ('n', 'y', 'n', '5678'), ('n', 'n', 'n', '')]:
             for choice in '123456789':
                 result = self.shell(f'ADD_NGINX_ORG={org} ADD_NGINX_MYGUARD={myguard} ADD_NGINX_MODULES={modules}\nvalid_nginx_preset "$1"', args=(choice,))
                 self.assertEqual(result.returncode, 0 if choice in allowed else 1)
@@ -239,6 +239,75 @@ printf '%s' "$TIMESYNC_SERVERS"
                 valid = False
             self.assertEqual(status == '0', valid, value)
 
+    def test_nginx_archive_matches_the_selected_channel(self):
+        body = r"""
+OS=debian NGINX_CODENAME=trixie ADD_NGINX_ORG=$1 NGINX_INSTALL_VARIANT=$2
+plan=$3 expected=$4 archive=$5
+shift 5
+apt-get() {
+    [[ "$1 $2 $3" = "--print-uris download $expected" && -n "$archive" ]] || return 1
+    printf "'%s' nginx.deb 123 SHA256:dummy\n" "$archive"
+}
+nginx_check_planned_origin "$plan" "$@"
+"""
+        stable = 'https://nginx.org/packages/debian/pool/nginx.deb'
+        mainline = 'https://deb.myguard.nl/apt/nginx/trixie/pool/nginx.deb'
+        update = 'Inst nginx:amd64 [1.2] (1.30.8-1~trixie nginx:trixie [amd64])'
+        for org, preset, plan, spec, url, requested, rc in [
+            ('y', '1', update, 'nginx:amd64=1.30.8-1~trixie', stable, ['nginx'], 0),
+            ('y', '1', update, 'nginx:amd64=1.30.8-1~trixie', mainline, ['nginx'], 1),
+            ('y', '1', '', 'nginx', stable.replace('/packages/', '/packages/mainline/'), ['nginx'], 1),
+            ('n', '5', '', 'nginx', mainline, ['nginx-full'], 0),
+            ('n', '8', '', 'nginx', stable, ['nginx', 'nginx-common'], 1),
+            ('n', '7', '', 'nginx=3:1.31.10', mainline, ['nginx=3:1.31.10'], 0),
+            ('n', '7', '', '', '', ['nginx-dbg'], 0),
+            ('y', '1', '', 'nginx', '', ['nginx'], 1),
+        ]:
+            with self.subTest(preset=preset, plan=plan, url=url):
+                result = self.shell(body, args=(org, preset, plan, spec, url, *requested))
+                self.assertEqual(result.returncode, rc, result.stderr)
+
+    def test_nginx_menu_paths(self):
+        body = """
+OS=$1 existing=$2
+print_header() { :; }
+print_message() { echo "$1"; }
+dpkg-query() { [[ "$existing" = apt ]] && echo 'install ok installed'; }
+command() {
+    if [[ "$1 $2" = '-v nginx' ]]; then [[ "$existing" = binary ]]; else builtin command "$@"; fi
+}
+choose_nginx_installation
+printf 'STATE=%s/%s/%s/%s/%s/%s/%s/%s' "$REMOVE_NGINX" "$ADD_NGINX_ORG" "$ADD_NGINX_MYGUARD" "$ADD_NGINX_MODULES" "$INSTALL_NGINX" "$NGINX_INSTALL_VARIANT" "$NGINX_CUSTOM_PKGS" "$MIGRATE_NGINX"
+"""
+        cases = [
+            ('', 'none', 'n/n/n/n/n///n', '', []),
+            ('1||', 'none', 'n/y/n/n/n///n', 'Stable (nginx.org)', []),
+            ('2|', 'none', 'n/n/y/n/n///n', 'Mainline (MyGuard', []),
+            ('1||y|5|1|', 'none', 'n/y/n/n/y/1//n', 'Stable (nginx.org)', [1, 2, 7]),
+            ('1|y|y|4|', 'none', 'n/y/n/y/y/4//n', 'Blendbyte', [1, 2, 3, 4, 7]),
+            ('3|2|y|7|nginx, libnginx-mod-stream', 'none',
+             'n/n/y/n/y/7/nginx, libnginx-mod-stream/n', 'libnginx-mod-stream', [5, 6, 7, 8]),
+            ('1|y|y|7|nginx nginx-module-njs', 'none',
+             'n/y/n/y/y/7/nginx nginx-module-njs/n', 'nginx-module-brotli', [1, 2, 3, 4, 7]),
+            ('y', 'apt', 'y/n/n/n/n///n', 'удаление', []),
+            ('n|2|y|8||n', 'apt', 'n/n/y/n/n/8//n', 'удалит прежний набор', [5, 6, 7, 8]),
+            ('n|2|y|5||y', 'apt', 'n/n/y/n/y/5//y', 'обновит установленные пакеты', [5, 6, 7, 8]),
+            ('n|1||y|2||y', 'apt', 'n/y/n/n/y/2//y', 'modules-enabled', [1, 2, 7]),
+            ('n|1||y|7|nginx|y', 'binary', 'n/y/n/n/y/7/nginx/y', 'вне пакета nginx', [1, 2, 7]),
+        ]
+        for os_name in ('debian', 'ubuntu'):
+            for answers, existing, state, clue, presets in cases:
+                with self.subTest(os=os_name, answers=answers, existing=existing):
+                    result = self.shell(body, answers.replace('|', '\n') + '\n', (os_name, existing))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('STATE=' + state, result.stdout)
+                    self.assertIn(clue, result.stdout + result.stderr)
+                    menu = result.stdout.partition('Выберите набор пакетов.')[2]
+                    self.assertEqual([int(n) for n in re.findall(r'^  ([1-8])\)', menu, re.M)], presets)
+        result = self.shell(body, args=('other', 'none'))
+        self.assertEqual(result.stdout, 'STATE=n/n/n/n/n///n')
+        self.assertNotEqual(self.shell(body, '2\ny\n', ('debian', 'none')).returncode, 0)
+
     def test_whole_configuration_wizard_with_bad_answers_first(self):
         # Execute the real configuration section only; no installation, services or network.
         section = SOURCE.split('# INTERACTIVE CONFIGURATION SELECTION', 1)[1].split('# Confirm settings', 1)[0]
@@ -275,7 +344,7 @@ prompt_read() {
         case "$key" in
             ROOT_PASSWORD|ROOT_PASSWORD_CONFIRM|NEW_USER_PASSWORD|NEW_USER_PASSWORD_CONFIRM|OPT_VAULT_PASSWORD|UFW_CUSTOM_RULES_PASSWORD) reply='synthetic fixture' ;;
             NEW_USERNAME|TMUX_USER|GHX_USER|YUBIKEY_SSH_USER|SSH_ALLOW_USERS) reply=planned ;;
-            CONFIGURE_USER_SSH_KEY|ADD_NGINX_MYGUARD|REMOVE_NGINX|CONFIGURE_TELEGRAM_TUNNEL|CONFIGURE_NFT_IPV6) reply=n ;;
+            CONFIGURE_USER_SSH_KEY|REMOVE_NGINX|CONFIGURE_TELEGRAM_TUNNEL|CONFIGURE_NFT_IPV6) reply=n ;;
             CRONTAB_MODE) reply=3 ;;
             SSH_ROOT_LOGIN) reply=prohibit-password ;;
             SSH_PORT|UFW_SSH_PORT) reply=7384 ;;
@@ -289,6 +358,7 @@ prompt_read() {
             UFW_INSTALL_SOURCE) reply=1 ;;
             NFTABLES_PROFILE_NUM) reply=1 ;;
             SYSCTL_MODE|SWAP_MODE) reply=2 ;;
+            source_choice) reply=1 ;;
             NGINX_INSTALL_VARIANT) reply=3 ;;
             NGINX_CUSTOM_PKGS) reply=nginx-module-njs ;;
             CUSTOM_PORTS) reply='80/tcp,53/udp' ;;

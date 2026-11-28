@@ -218,7 +218,8 @@ apt-get() {
 nginx() { [ "$failure" != config ]; }
 systemctl() { [ "$1" != restart ] || [ "$failure" != start ]; }
 nginx_restore_migration() { printf 'ROLLBACK\\n'; }
-""" + section, failure)
+""" + section + '\nprintf "RUNTIME=%s" "${NGINX_RUNTIME_OK:-false}"', failure)
+            self.assertIn("RUNTIME=" + ("true" if failure == "none" else "false"), result.stdout)
             self.assertIn("requested-module", result.stdout)
             if failure == "none":
                 self.assertNotIn("ROLLBACK", result.stdout)

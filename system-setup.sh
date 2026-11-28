@@ -351,14 +351,149 @@ valid_packages() {
     done
 }
 
+NGINX_ORG_MODULES="nginx-module-njs nginx-module-geoip nginx-module-image-filter nginx-module-xslt nginx-module-perl nginx-module-otel nginx-module-acme"
+BLENDBYTE_MODULES="nginx-module-brotli nginx-module-brotli-static nginx-module-cache-purge nginx-module-dav-ext nginx-module-fancyindex nginx-module-geoip2 nginx-module-headers-more nginx-module-modsecurity nginx-module-stream-geoip2 nginx-module-substitutions nginx-module-zstd nginx-module-zstd-static"
+MYGUARD_CURATED_MODULES="libnginx-mod-stream libnginx-mod-stream-geoip2 libnginx-mod-http-upstream-fair libnginx-mod-http-subs-filter libnginx-mod-http-geoip2 libnginx-mod-http-echo libnginx-mod-http-dav-ext libnginx-mod-http-auth-pam"
+
 valid_nginx_preset() {
     case "$1" in
         1|2) is_yes "$ADD_NGINX_ORG" ;;
         3|4) is_yes "$ADD_NGINX_ORG" && is_yes "$ADD_NGINX_MODULES" ;;
         5|6|8) is_yes "$ADD_NGINX_MYGUARD" ;;
-        7) return 0 ;;
+        7) is_yes "$ADD_NGINX_ORG" || is_yes "$ADD_NGINX_MYGUARD" ;;
         *) return 1 ;;
     esac
+}
+
+nginx_source_label() {
+    if is_yes "$ADD_NGINX_ORG"; then
+        echo "Stable (nginx.org)"
+    elif is_yes "$ADD_NGINX_MYGUARD"; then
+        echo "Mainline (MyGuard, deb.myguard.nl)"
+    fi
+}
+
+# Ask APT for the archive it would fetch. A previously configured source may
+# outrank the source selected in this run, even when dependencies resolve.
+nginx_check_planned_origin() {
+    local plan="$1" package spec base uris
+    shift
+    spec=$(awk '$1 == "Inst" && $2 ~ /^nginx(:[[:alnum:]-]+)?$/ {
+        name=$2; sub(/^[^(]*\(/, ""); sub(/[ )].*$/, ""); print name "=" $0; exit
+    }' <<< "$plan")
+    if [ -z "$spec" ]; then
+        for package in "$@"; do
+            case "$package" in nginx|nginx=*|nginx:*) spec=$package; break ;; esac
+        done
+        # A custom list may install tools or modules without changing the server.
+        if [ -z "$spec" ] && [ "$NGINX_INSTALL_VARIANT" = 7 ]; then return 0; fi
+    fi
+    if is_yes "$ADD_NGINX_ORG"; then
+        base="https://nginx.org/packages/$OS"
+    else
+        base="https://deb.myguard.nl/apt/nginx/$NGINX_CODENAME"
+    fi
+    uris=$(LC_ALL=C apt-get --print-uris download "${spec:-nginx}" 2>/dev/null) || return 1
+    awk -v prefix="'$base/" 'index($1, prefix) == 1 { found=1 } END { exit !found }' <<< "$uris"
+}
+
+nginx_preset_description() {
+    case "$1" in
+        1) echo "nginx со встроенными модулями. Для обычного сайта или обратного прокси." ;;
+        2) echo "nginx и официальные динамические модули, включая njs, обработку изображений и XSLT." ;;
+        3) echo "nginx и модули Blendbyte из списка установщика, включая Brotli, ModSecurity и GeoIP2." ;;
+        4) echo "nginx, официальные динамические модули и весь набор Blendbyte из профиля 3." ;;
+        5) echo "nginx-full. Набор модулей определяют зависимости метапакета MyGuard." ;;
+        6) echo "nginx-extras. Расширенный метапакет MyGuard для конфигураций с большим числом модулей." ;;
+        7) echo "Свой список. Укажите все нужные пакеты, включая nginx, если требуется сервер." ;;
+        8) echo "nginx и восемь отдельных модулей MyGuard для stream, GeoIP2, WebDAV, PAM и HTTP-фильтров." ;;
+    esac
+}
+
+choose_nginx_installation() {
+    local source_choice preset installed=none
+    REMOVE_NGINX=n ADD_NGINX_ORG=n ADD_NGINX_MYGUARD=n ADD_NGINX_MODULES=n
+    INSTALL_NGINX=n NGINX_INSTALL_VARIANT="" NGINX_CUSTOM_PKGS="" MIGRATE_NGINX=n
+    [[ "$OS" = debian || "$OS" = ubuntu ]] || return 0
+
+    print_header "Nginx"
+    if dpkg-query -W -f='${Status}' nginx 2>/dev/null | grep -q 'install ok installed'; then
+        installed=package
+    elif command -v nginx >/dev/null 2>&1; then
+        installed=binary
+    fi
+    if [ "$installed" != none ]; then
+        print_message "Обнаружен установленный Nginx. Для выбора источника или сохранения установки нажмите Enter."
+        print_warning "Полное удаление остановит Nginx, сохранит копию /etc/nginx при наличии и очистит пакеты, модули и конфигурацию."
+        prompt_yes_no REMOVE_NGINX "Полностью удалить существующий Nginx? (y/N): " n
+        if is_yes "$REMOVE_NGINX"; then return 0; fi
+    fi
+
+    print_message "Выберите источник пакетов Nginx для этой системы."
+    print_message "  0) Пропустить настройку Nginx. Установщик не добавит источник."
+    print_message "  1) nginx.org — Stable. Официальная стабильная ветка для сайтов и обратных прокси."
+    print_message "  2) MyGuard — Mainline. Новые возможности Nginx, HTTP/3 и модули libnginx-mod-* в формате Debian."
+    print_message "     MyGuard публикует только Mainline. Для Stable выберите 1."
+    prompt_value source_choice "Источник Nginx [0/1/2, по умолчанию 0]: " 0 valid_choice "Введите 0, 1 или 2." 0 1 2
+    case "$source_choice" in
+        0) return 0 ;;
+        1)
+            ADD_NGINX_ORG=y
+            print_message "К Stable доступны 12 модулей Blendbyte (nginx-modules.com), включая Brotli и ModSecurity."
+            print_message "Они требуют совместимой версии nginx.org. До установки APT проверит зависимости."
+            prompt_yes_no ADD_NGINX_MODULES "Подключить репозиторий модулей Blendbyte? (y/N): " n
+            ;;
+        2) ADD_NGINX_MYGUARD=y ;;
+    esac
+
+    print_message "Выбрана ветка $(nginx_source_label)."
+    print_message "Enter подключит только источник APT для последующих обновлений. Для выбора и установки пакетов ответьте y."
+    prompt_yes_no INSTALL_NGINX "Установить пакеты Nginx сейчас? (y/N): " n
+    is_yes "$INSTALL_NGINX" || return 0
+
+    print_message "Выберите набор пакетов. Номер профиля определяет состав модулей выбранной ветки."
+    for preset in 1 2 3 4 5 6 7 8; do
+        valid_nginx_preset "$preset" || continue
+        print_message "  $preset) $(nginx_preset_description "$preset")"
+    done
+    prompt_value NGINX_INSTALL_VARIANT "Номер профиля: " "" valid_nginx_preset "Выберите один из показанных номеров."
+
+    if [ "$NGINX_INSTALL_VARIANT" = 7 ]; then
+        print_message "Перечислите пакеты через пробел или запятую. Можно скопировать имена из примеров."
+        if is_yes "$ADD_NGINX_ORG"; then
+            echo "  nginx nginx-dbg nginx-nr-agent"
+            echo "  $NGINX_ORG_MODULES"
+            if is_yes "$ADD_NGINX_MODULES"; then echo "  $BLENDBYTE_MODULES"; fi
+        else
+            echo "  nginx nginx-common"
+            echo "  $MYGUARD_CURATED_MODULES"
+            echo "  libnginx-mod-http-headers-more-filter libnginx-mod-http-modsecurity libnginx-mod-http-lua"
+            print_message "После подключения MyGuard каталог модулей доступен через apt-cache search '^libnginx-mod-'."
+        fi
+        prompt_value NGINX_CUSTOM_PKGS "Пакеты для установки: " "" valid_packages "Введите имена пакетов через пробел или запятую." required
+    else
+        prompt_value NGINX_CUSTOM_PKGS "Дополнительные пакеты через пробел или запятую (Enter пропускает): " "" valid_packages "Введите имена пакетов или нажмите Enter."
+    fi
+
+    if [ "$installed" != none ]; then
+        if [ "$installed" = package ]; then
+            print_message "При миграции установщик проверит зависимости, сохранит /etc/nginx и версии пакетов в /var/backups и остановит службу."
+            case "$NGINX_INSTALL_VARIANT" in
+                1|2|3|4) print_message "Для nginx.org установщик удалит прежние пакеты и переместит настройки modules-enabled в резервную копию." ;;
+                5|6) print_message "MyGuard обновит установленные пакеты Nginx и libnginx-mod-* вместе с выбранным метапакетом." ;;
+                7) print_message "Для своего списка состав замены определяют указанные пакеты и их зависимости в APT." ;;
+                8) print_message "Для профиля 8 установщик удалит прежний набор пакетов Nginx и установит выбранные модули заново." ;;
+            esac
+            print_message "После установки будут проверены конфигурация (nginx -t) и запуск службы. При сбое установщик попытается восстановить копию."
+        else
+            print_warning "Найден исполняемый nginx вне пакета nginx в dpkg. Резервирование и откат пакетной миграции к такой установке не применяются."
+        fi
+        prompt_yes_no MIGRATE_NGINX "Разрешить установку поверх существующего Nginx? (y/N): " n
+        if ! is_yes "$MIGRATE_NGINX"; then
+            INSTALL_NGINX=n
+            print_message "Выбрана только настройка источника APT."
+        fi
+    fi
 }
 
 valid_nft_profile() {
@@ -3397,149 +3532,7 @@ if [ "$INTERACTIVE" = true ]; then
         INSTALL_PHP_EXTENSIONS="n"
     fi
 
-    # Ask about upstream Nginx repositories (available for both Debian and Ubuntu)
-    if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
-        # Offer COMPLETE removal of an existing nginx first (mutually exclusive
-        # with installing). Only asked when nginx is actually present.
-        REMOVE_NGINX="n"
-        if command -v nginx >/dev/null 2>&1 || \
-           dpkg-query -W -f='${Status}' nginx 2>/dev/null | grep -q "install ok installed"; then
-            echo ""
-            print_warning "An existing nginx installation was detected."
-            print_message "Complete removal will back up /etc/nginx, then PURGE all nginx"
-            print_message "packages and modules and delete configs, binaries, unused"
-            print_message "dependencies, module symlinks and leftover directories."
-            prompt_yes_no REMOVE_NGINX "Completely REMOVE nginx (purge everything)? (y/N): " n
-            REMOVE_NGINX=${REMOVE_NGINX:-n}
-        fi
-
-        if [ "$REMOVE_NGINX" = "y" ] || [ "$REMOVE_NGINX" = "Y" ]; then
-            # Removal mode — skip all repo/install questions.
-            ADD_NGINX_ORG="n"; ADD_NGINX_MYGUARD="n"; ADD_NGINX_MODULES="n"
-            INSTALL_NGINX="n"; NGINX_INSTALL_VARIANT=""; NGINX_CUSTOM_PKGS=""; MIGRATE_NGINX="n"
-        else
-        echo ""
-        print_message "Do you want to add an upstream Nginx repository?"
-        print_message "Available Nginx repositories (Debian & Ubuntu):"
-        print_message "  1. nginx.org         - Official Nginx stable packages (https://nginx.org/en/linux_packages.html)"
-        print_message "  2. deb.myguard.nl    - Third-party Nginx builds (https://deb.myguard.nl/)"
-        print_message "  3. nginx-modules.com - Dynamic modules for Nginx stable (https://www.nginx-modules.com/)"
-        print_warning "Pick only ONE Nginx package source (1 or 2); option 3 only adds modules and pairs with the official nginx.org repo."
-
-        while true; do
-            prompt_yes_no ADD_NGINX_ORG "   Add official nginx.org repository? (y/N): " n
-            prompt_yes_no ADD_NGINX_MYGUARD "   Add third-party deb.myguard.nl Nginx repository? (y/N): " n
-            prompt_yes_no ADD_NGINX_MODULES "   Add nginx-modules.com (Blendbyte) modules repository? (y/N): " n
-            if is_yes "$ADD_NGINX_ORG" && is_yes "$ADD_NGINX_MYGUARD"; then
-                input_error "Choose only one Nginx package source; repeat the repository choices."
-            elif is_yes "$ADD_NGINX_MODULES" && ! is_yes "$ADD_NGINX_ORG"; then
-                input_error "Blendbyte modules require nginx.org; repeat the repository choices."
-            else
-                break
-            fi
-        done
-
-        # Offer to install nginx now, with a flexible choice of module set.
-        INSTALL_NGINX="n"
-        NGINX_INSTALL_VARIANT=""
-        NGINX_CUSTOM_PKGS=""
-        if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } || \
-           { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
-            echo ""
-            prompt_yes_no INSTALL_NGINX "Install nginx now from the selected repository? (y/N): " n
-            INSTALL_NGINX=${INSTALL_NGINX:-n}
-
-            if [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; then
-                echo ""
-                print_message "Choose an nginx install preset (only presets for the repos you enabled are valid):"
-                if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
-                    print_message "  1) nginx.org: nginx only (standard built-in modules)"
-                    print_message "  2) nginx.org: nginx + official dynamic modules (njs, geoip, image-filter, xslt, perl, otel, acme)"
-                fi
-                if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
-                   { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; }; then
-                    print_message "  3) nginx.org + ALL Blendbyte modules (brotli, modsecurity, headers-more, zstd, geoip2, ...)"
-                    print_message "  4) nginx.org: EVERYTHING (nginx + official modules + ALL Blendbyte modules)"
-                fi
-                if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-                    print_message "  5) deb.myguard.nl: nginx-full"
-                    print_message "  6) deb.myguard.nl: nginx-extras (maximal module set)"
-                    print_message "  8) deb.myguard.nl: nginx + curated lean modules (stream, stream-geoip2,"
-                    print_message "       http-upstream-fair, http-subs-filter, http-geoip2, http-echo,"
-                    print_message "       http-dav-ext, http-auth-pam) — distro-nginx-full equivalent, x-ui-pro ready"
-                fi
-                print_message "  7) custom (install only the package names you list below)"
-                prompt_value NGINX_INSTALL_VARIANT "Preset [1-8]: " "" valid_nginx_preset "Choose a displayed preset whose repositories are enabled."
-
-                if [ "$NGINX_INSTALL_VARIANT" = "7" ]; then
-                    # Show a copy-paste catalogue of packages available from the
-                    # repositories that were enabled. Plain echo (no [INFO] prefix
-                    # / colour) keeps the lines clean to copy and paste.
-                    echo ""
-                    print_message "Available nginx packages (copy/paste the ones you want into the prompt below):"
-                    if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
-                        echo "  # nginx.org core:"
-                        echo "    nginx nginx-dbg nginx-nr-agent"
-                        echo "  # nginx.org dynamic modules:"
-                        echo "    nginx-module-njs nginx-module-geoip nginx-module-image-filter nginx-module-xslt nginx-module-perl nginx-module-otel nginx-module-acme"
-                    fi
-                    if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
-                        echo "  # nginx-modules.com (Blendbyte) dynamic modules:"
-                        echo "    nginx-module-brotli nginx-module-brotli-static nginx-module-cache-purge nginx-module-dav-ext nginx-module-fancyindex nginx-module-geoip2 nginx-module-headers-more nginx-module-modsecurity nginx-module-stream-geoip2 nginx-module-substitutions nginx-module-zstd nginx-module-zstd-static"
-                    fi
-                    if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-                        echo "  # deb.myguard.nl base (always include these two):"
-                        echo "    nginx nginx-common"
-                        echo "  # deb.myguard.nl modules are named libnginx-mod-* (Debian-style). Common picks:"
-                        echo "    libnginx-mod-stream libnginx-mod-stream-geoip2 libnginx-mod-http-geoip2"
-                        echo "    libnginx-mod-http-headers-more-filter libnginx-mod-http-brotli libnginx-mod-http-modsecurity"
-                        echo "    libnginx-mod-http-cache-purge libnginx-mod-http-fancyindex libnginx-mod-http-dav-ext"
-                        echo "    libnginx-mod-http-subs-filter libnginx-mod-http-lua libnginx-mod-http-ndk"
-                        echo "    libnginx-mod-http-upstream-fair libnginx-mod-mail"
-                        echo "  # TIP: use 'nginx' + only the libnginx-mod-* you need — NOT nginx-full"
-                        echo "  #      (its ~110 modules exceed nginx's module limit and break nginx -t)."
-                        echo "  # Full list of available modules after setup:  apt-cache search '^libnginx-mod-'"
-                    fi
-                    echo ""
-                    print_message "Enter packages separated by spaces OR commas"
-                    print_message "  (e.g. 'nginx, nginx-module-njs nginx-module-brotli')."
-                    prompt_value NGINX_CUSTOM_PKGS "Packages to install: " "" valid_packages "Enter at least one package name, separated by spaces or commas; no APT options or paths." required
-                else
-                    echo ""
-                    print_message "Optionally add extra packages (space- or comma-separated), or leave empty."
-                    prompt_value NGINX_CUSTOM_PKGS "Extra packages: " "" valid_packages "Enter package names, separated by spaces or commas; Enter skips. No APT options or paths."
-                fi
-
-                # If nginx is already installed (e.g. from the distro repos), offer
-                # a safe, backed-up migration to the selected repository.
-                MIGRATE_NGINX="n"
-                if command -v nginx >/dev/null 2>&1 || \
-                   dpkg-query -W -f='${Status}' nginx 2>/dev/null | grep -q "install ok installed"; then
-                    echo ""
-                    print_warning "An existing nginx installation was detected: $(nginx -v 2>&1 | sed 's#.*/##' || echo unknown)"
-                    print_warning "Migrating changes the package source. For nginx.org (presets 1-4) this:"
-                    print_warning "  - removes distro nginx-common/nginx-core and all distro libnginx-mod-*;"
-                    print_warning "  - switches layout (no sites-enabled/modules-enabled; modules via load_module)."
-                    print_warning "deb.myguard.nl (presets 5-6) is Debian-style and upgrades mostly in place."
-                    print_message "Before any change the script backs up /etc/nginx and the package list to"
-                    print_message "/var/backups, stops nginx, swaps packages (keeping your configs), runs"
-                    print_message "'nginx -t', and only starts nginx if the config test passes."
-                    prompt_yes_no MIGRATE_NGINX "Migrate existing nginx to the selected repository? (y/N): " n
-                    MIGRATE_NGINX=${MIGRATE_NGINX:-n}
-                fi
-            fi
-        fi
-        fi
-    else
-        REMOVE_NGINX="n"
-        ADD_NGINX_ORG="n"
-        ADD_NGINX_MYGUARD="n"
-        ADD_NGINX_MODULES="n"
-        INSTALL_NGINX="n"
-        NGINX_INSTALL_VARIANT=""
-        NGINX_CUSTOM_PKGS=""
-        MIGRATE_NGINX="n"
-    fi
+    choose_nginx_installation
 
     # Ask about disabling IPv6 in /etc/network/interfaces
     print_header "───────────────────────────────────────────────"
@@ -3880,23 +3873,20 @@ if [ "$OS" = "ubuntu" ] && { [ "$ADD_UBUNTU_PPAS" = "y" ] || [ "$ADD_UBUNTU_PPAS
     fi
 fi
 if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
-    if [ "$REMOVE_NGINX" = "y" ] || [ "$REMOVE_NGINX" = "Y" ]; then
-        print_message "  Completely REMOVE nginx:                    YES (backup /etc/nginx + purge all)"
-    fi
-    if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
-        print_message "  Official nginx.org repository:               YES"
-    fi
-    if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-        print_message "  Third-party deb.myguard.nl Nginx repo:      YES"
-    fi
-    if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
-        print_message "  nginx-modules.com (Blendbyte) modules repo: YES"
-    fi
-    if [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; then
-        print_message "  Install nginx now:                          YES (preset ${NGINX_INSTALL_VARIANT:-?})"
-        if [ "$MIGRATE_NGINX" = "y" ] || [ "$MIGRATE_NGINX" = "Y" ]; then
-            print_message "  Migrate existing nginx (backup + swap):     YES"
+    if is_yes "$REMOVE_NGINX"; then
+        print_message "  Nginx — резервная копия конфигурации и полное удаление."
+    elif is_yes "$ADD_NGINX_ORG" || is_yes "$ADD_NGINX_MYGUARD"; then
+        print_message "  Запрошенный источник Nginx — $(nginx_source_label)."
+        if is_yes "$ADD_NGINX_MODULES"; then print_message "  Дополнительный источник модулей — Blendbyte."; fi
+        if is_yes "$INSTALL_NGINX"; then
+            print_message "  Профиль $NGINX_INSTALL_VARIANT — $(nginx_preset_description "$NGINX_INSTALL_VARIANT")"
+            if [ -n "$NGINX_CUSTOM_PKGS" ]; then print_message "  Введённые пакеты — $NGINX_CUSTOM_PKGS"; fi
+            if is_yes "$MIGRATE_NGINX"; then print_message "  Разрешена установка поверх существующего Nginx."; fi
+        else
+            print_message "  В этом разделе будет подключён только источник APT."
         fi
+    else
+        print_message "  Настройка Nginx пропущена."
     fi
 fi
 print_message "  Comment IPv6 in /etc/network/interfaces: $([ "$COMMENT_IPV6_INTERFACES" = "y" ] || [ "$COMMENT_IPV6_INTERFACES" = "Y" ] && echo "YES" || echo "NO")"
@@ -4788,10 +4778,10 @@ BLENDBYTE_PIN
             print_success "Package lists updated successfully"
             print_message "Added Nginx repositories:"
             if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
-                print_message "  ✓ nginx.org (official, https://nginx.org/packages/$OS)"
+                print_message "  ✓ Stable — nginx.org (https://nginx.org/packages/$OS)"
             fi
             if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-                print_message "  ✓ deb.myguard.nl (third-party nginx)"
+                print_message "  ✓ Mainline — MyGuard (deb.myguard.nl)"
             fi
             if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
                 print_message "  ✓ nginx-modules.com (Blendbyte modules)"
@@ -4802,7 +4792,8 @@ BLENDBYTE_PIN
             # (priority 900/901), confirming apt upgrade will not switch nginx
             # back to the distro version.
             if command -v apt-cache >/dev/null 2>&1; then
-                print_message "Verifying nginx package source (apt-cache policy nginx):"
+                print_message "APT показывает установленную версию (Installed), кандидата (Candidate) и адреса его репозиториев."
+                print_message "На ранее настроенной системе приоритет другого источника или уже установленная версия могут повлиять на выбор APT."
                 apt-cache policy nginx 2>/dev/null || print_warning "Could not query nginx policy"
             fi
         else
@@ -4819,75 +4810,19 @@ fi
 if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
    { [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; }; then
 
-    # Dynamic-module package sets, kept in sync with each repository's catalogue
-    NGINX_ORG_MODULES="nginx-module-njs nginx-module-geoip nginx-module-image-filter nginx-module-xslt nginx-module-perl nginx-module-otel nginx-module-acme"
-    BLENDBYTE_MODULES="nginx-module-brotli nginx-module-brotli-static nginx-module-cache-purge nginx-module-dav-ext nginx-module-fancyindex nginx-module-geoip2 nginx-module-headers-more nginx-module-modsecurity nginx-module-stream-geoip2 nginx-module-substitutions nginx-module-zstd nginx-module-zstd-static"
-    # Lean myguard module set (Debian-style libnginx-mod-* names) — equivalent to
-    # the distro nginx-full subset commonly used (e.g. by x-ui-pro), without the
-    # ~110-module zoo that exceeds nginx's module limit.
-    MYGUARD_CURATED_MODULES="libnginx-mod-stream libnginx-mod-stream-geoip2 libnginx-mod-http-upstream-fair libnginx-mod-http-subs-filter libnginx-mod-http-geoip2 libnginx-mod-http-echo libnginx-mod-http-dav-ext libnginx-mod-http-auth-pam"
-
+    NGINX_RUNTIME_OK=false
     NGINX_PKGS=""
-    NGINX_VARIANT_OK="y"
-
+    NGINX_VARIANT_OK=y
+    valid_nginx_preset "$NGINX_INSTALL_VARIANT" || NGINX_VARIANT_OK=n
     case "$NGINX_INSTALL_VARIANT" in
-        1)  # nginx.org: nginx only
-            if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
-                NGINX_PKGS="nginx"
-            else
-                NGINX_VARIANT_OK="n"
-            fi
-            ;;
-        2)  # nginx.org: nginx + official dynamic modules
-            if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
-                NGINX_PKGS="nginx $NGINX_ORG_MODULES"
-            else
-                NGINX_VARIANT_OK="n"
-            fi
-            ;;
-        3)  # nginx.org + ALL Blendbyte modules
-            if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
-               { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; }; then
-                NGINX_PKGS="nginx $BLENDBYTE_MODULES"
-            else
-                NGINX_VARIANT_OK="n"
-            fi
-            ;;
-        4)  # nginx.org: EVERYTHING (nginx + official modules + all Blendbyte modules)
-            if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
-               { [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; }; then
-                NGINX_PKGS="nginx $NGINX_ORG_MODULES $BLENDBYTE_MODULES"
-            else
-                NGINX_VARIANT_OK="n"
-            fi
-            ;;
-        5)  # deb.myguard.nl: nginx-full
-            if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-                NGINX_PKGS="nginx-full"
-            else
-                NGINX_VARIANT_OK="n"
-            fi
-            ;;
-        6)  # deb.myguard.nl: nginx-extras (maximal module set)
-            if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-                NGINX_PKGS="nginx-extras"
-            else
-                NGINX_VARIANT_OK="n"
-            fi
-            ;;
-        7)  # custom: only the packages the user listed
-            NGINX_PKGS=""
-            ;;
-        8)  # deb.myguard.nl: nginx + curated lean module set
-            if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-                NGINX_PKGS="nginx nginx-common $MYGUARD_CURATED_MODULES"
-            else
-                NGINX_VARIANT_OK="n"
-            fi
-            ;;
-        *)
-            NGINX_VARIANT_OK="n"
-            ;;
+        1) NGINX_PKGS="nginx" ;;
+        2) NGINX_PKGS="nginx $NGINX_ORG_MODULES" ;;
+        3) NGINX_PKGS="nginx $BLENDBYTE_MODULES" ;;
+        4) NGINX_PKGS="nginx $NGINX_ORG_MODULES $BLENDBYTE_MODULES" ;;
+        5) NGINX_PKGS="nginx-full" ;;
+        6) NGINX_PKGS="nginx-extras" ;;
+        7) ;; # Custom list below.
+        8) NGINX_PKGS="nginx nginx-common $MYGUARD_CURATED_MODULES" ;;
     esac
 
     # Always honour any extra packages the user specified
@@ -4910,10 +4845,8 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
     elif [ -z "$NGINX_PKGS" ]; then
         print_warning "No nginx packages resolved for the chosen preset; skipping nginx installation."
     else
-        if { [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; } && \
-           { [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; }; then
-            print_warning "Both nginx.org and deb.myguard.nl are enabled: the 'nginx' package resolves to deb.myguard.nl (pin 901)."
-        fi
+        print_message "Запрошена ветка $(nginx_source_label). Профиль $NGINX_INSTALL_VARIANT — $(nginx_preset_description "$NGINX_INSTALL_VARIANT")"
+        print_message "Пакеты для расчёта зависимостей APT — $NGINX_PKGS"
 
         # Detect a pre-existing nginx (typically installed from the distro repos).
         NGINX_PREEXISTING="n"
@@ -4932,10 +4865,16 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
         # Resolve the complete target transaction before stopping or removing a
         # working nginx installation. Apt uses the already-downloaded package
         # indexes, so this catches missing modules/version skew without downtime.
-        if [ "$NGINX_DO_INSTALL" = "y" ] && ! apt-get install -s $NGINX_PKGS >/dev/null 2>&1; then
-            print_error "Dependency resolution failed for the selected nginx package set; existing nginx was left untouched"
-            apt-get install -s $NGINX_PKGS 2>&1 | tail -n 15
-            NGINX_DO_INSTALL="n"
+        if [ "$NGINX_DO_INSTALL" = "y" ]; then
+            if ! NGINX_PLAN=$(LC_ALL=C apt-get install -s "${NGINX_PACKAGE_ARRAY[@]}" 2>&1); then
+                print_error "APT не смог разрешить зависимости выбранного профиля Nginx."
+                tail -n 15 <<< "$NGINX_PLAN"
+                NGINX_DO_INSTALL=n
+            elif ! nginx_check_planned_origin "$NGINX_PLAN" "${NGINX_PACKAGE_ARRAY[@]}"; then
+                print_error "APT не подтвердил пакет сервера из $(nginx_source_label). Установка пропущена до остановки службы."
+                print_message "Проверьте версию Candidate и адрес репозитория в apt-cache policy nginx. Другой источник или более новая установленная версия могут иметь приоритет."
+                NGINX_DO_INSTALL=n
+            fi
         fi
 
         if [ "$NGINX_DO_INSTALL" = "y" ]; then
@@ -5019,7 +4958,7 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                 esac
             fi
 
-            print_message "Installing nginx packages: $NGINX_PKGS"
+            print_message "APT устанавливает пакеты — $NGINX_PKGS"
 
             # On IPv6-disabled hosts the nginx package ships "listen [::]:80/443"
             # in its default site; nginx fails to bind it and the postinst aborts
@@ -5042,7 +4981,7 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     -o Dpkg::Options::=--force-confold \
                     -o Dpkg::Options::=--force-confdef \
                     $NGINX_PKGS; then
-                print_success "nginx installed successfully"
+                print_message "APT завершил установку пакетов. Теперь проверяются конфигурация и служба Nginx."
                 echo ""
 
                 # IPv6-disabled host: remove the [::] listen directives the
@@ -5052,11 +4991,11 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     nginx_strip_ipv6_listen
                 fi
                 if command -v nginx >/dev/null 2>&1; then
-                    print_message "Installed nginx version:"
+                    print_message "Версия установленного Nginx:"
                     nginx -v 2>&1 || true
                 fi
                 if command -v apt-cache >/dev/null 2>&1; then
-                    print_message "nginx package source after install (apt-cache policy nginx):"
+                    print_message "Установленный пакет и доступные источники (apt-cache policy nginx):"
                     apt-cache policy nginx 2>/dev/null || true
                 fi
 
@@ -5100,7 +5039,6 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
 
                 # Validate config before (re)starting so a broken migration does
                 # not take the service down.
-                NGINX_RUNTIME_OK=false
                 if command -v nginx >/dev/null 2>&1 && nginx -t 2>&1; then
                     print_success "nginx configuration test passed"
                     if command -v systemctl >/dev/null 2>&1; then
@@ -5130,11 +5068,6 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                     print_message "Migration backup kept at: $NGINX_BK"
                     print_warning "Old site configs are preserved in /etc/nginx; new package configs (if any) were saved as *.dpkg-dist."
                 fi
-                if [ "$NGINX_RUNTIME_OK" = true ]; then
-                    print_warning "Dynamic modules are installed but NOT auto-enabled."
-                    print_warning "Add the matching 'load_module .../modules/<name>.so;' lines to the top of /etc/nginx/nginx.conf,"
-                    print_warning "then run 'nginx -t && systemctl reload nginx'. Installed *.so live under /etc/nginx/modules/ or /usr/lib/nginx/modules/."
-                fi
             else
                 # On an IPv6-disabled host a leftover [::] listen can still leave
                 # the install half-configured; strip it and finish the install.
@@ -5145,6 +5078,7 @@ if { [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; } && \
                                 -o Dpkg::Options::=--force-confold \
                                 -o Dpkg::Options::=--force-confdef $NGINX_PKGS &&
                            nginx -t 2>&1 && systemctl enable nginx 2>/dev/null && systemctl restart nginx 2>/dev/null; then
+                            NGINX_RUNTIME_OK=true
                             print_success "nginx configuration verified and service started"
                         else
                             print_error "nginx recovery install completed but validation or service start failed"
@@ -8687,17 +8621,25 @@ if [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
         [ -n "${NGINX_RM_BK:-}" ] && print_message "  Config backup: $NGINX_RM_BK"
     fi
     if [ "$ADD_NGINX_ORG" = "y" ] || [ "$ADD_NGINX_ORG" = "Y" ]; then
-        print_message "- Official nginx.org repository added (https://nginx.org/packages/$OS)"
+        print_message "- Подключён nginx.org Stable (https://nginx.org/packages/$OS)."
     fi
     if [ "$ADD_NGINX_MYGUARD" = "y" ] || [ "$ADD_NGINX_MYGUARD" = "Y" ]; then
-        print_message "- Third-party deb.myguard.nl Nginx repository added"
+        print_message "- Подключён MyGuard Mainline (deb.myguard.nl)."
     fi
     if [ "$ADD_NGINX_MODULES" = "y" ] || [ "$ADD_NGINX_MODULES" = "Y" ]; then
-        print_message "- nginx-modules.com (Blendbyte) modules repository added"
+        print_message "- Подключён репозиторий динамических модулей Blendbyte."
     fi
-    if { [ "$INSTALL_NGINX" = "y" ] || [ "$INSTALL_NGINX" = "Y" ]; } && command -v nginx >/dev/null 2>&1; then
-        print_message "- nginx installed ($(nginx -v 2>&1 | sed 's#.*/##'))"
-        print_message "  Remember to enable dynamic modules via load_module in /etc/nginx/nginx.conf"
+    if is_yes "$INSTALL_NGINX"; then
+        if [ "${NGINX_RUNTIME_OK:-false}" = true ]; then
+            print_message "- Nginx установлен, проверка nginx -t прошла. $(nginx -v 2>&1)"
+            if is_yes "$ADD_NGINX_MYGUARD"; then
+                print_message "  MyGuard подключает пакетные модули через /etc/nginx/modules-enabled/."
+            elif [ "$NGINX_INSTALL_VARIANT" != 1 ] || [ -n "$NGINX_CUSTOM_PKGS" ]; then
+                print_message "  Для динамических модулей nginx.org проверьте директивы load_module в /etc/nginx/nginx.conf."
+            fi
+        else
+            print_warning "- Выбранная установка Nginx не завершена. Причина указана на этапе установки."
+        fi
     fi
 fi
 
